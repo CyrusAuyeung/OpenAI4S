@@ -301,3 +301,26 @@ T4 完整离线验证：8,958 项通过、26 项跳过，零失败/错误，
 212 条路由全部覆盖。前端、针对性后端、类型、双语提取、全量 pre-commit、
 harness、目录清单、secret scan、响应契约和 Skills 包检查均通过。
 原有两份未提交文档保持逐字节一致，前端源码和 dist 同批交付。
+
+
+Initial T4 commit `d0d614fb88bdf3702259f1655f644fd35f8f275c` reached a
+[Chromium CI failure](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34855451356/job/104013715852)
+in the existing Stage 1 trusted-delivery browser harness. That harness searched
+only the first rendered page for a delegated artifact among more than 100 rows;
+correct 50-row pagination made the assumption false. The harness now uses the
+real Files filename search before opening the same target. All existing producer,
+immutable-link, checksum, deduplication and zero-execution assertions remain.
+The complete local Stage 1 acceptance then passed: 100 links checked initially,
+after reload and after reopen; child-frame provenance and immutable old bytes
+verified; no model or external network calls; all owned resources cleaned up.
+The production code and dist are unchanged by this follow-up. The 8,958-test full
+suite remains evidence for those unchanged sources; the affected Stage 1 browser
+acceptance and 24 crosswalk/Stage tests were additionally run after the change.
+
+T4 首次提交的 Chromium CI 在既有 Stage 1 脚本中失败：脚本假定目标产物一定
+位于首屏，而正确的 50 项分页使该假定失效。现通过真实文件名搜索控件定位
+同一目标，保留全部 producer、不可变链接、校验、去重和零执行断言。
+本地完整 Stage 1 已通过：初次、刷新、重开分别核对 100 个链接，验证子任务
+溯源和旧版本字节，未调用模型或外部网络，临时资源清理完成。
+本次跟进只调整验收脚本与记录，生产代码和 dist 未变；补跑完整受影响浏览器
+验收及 24 项 crosswalk/Stage 测试，保留此前 8,958 项完整套件证据。
