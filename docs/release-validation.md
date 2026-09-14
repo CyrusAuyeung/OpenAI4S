@@ -111,6 +111,17 @@ in the database copy.
 完整工作区字节、外部／钥匙串／环境注入凭据或外部任务状态；SQLite 中的遗留
 明文凭据仍可能存在于数据库副本中。
 
+The [inbound connection design](inbound-connection-design.md) is also P2
+preparation: separate header/body/upload/WS budgets, capacity refusal, status
+headroom and observer detachment are future acceptance requirements. It enables
+no new inbound deadlines or connection quotas. Status reserve does not promise
+immediate service before headers identify a request, and losing an observation
+connection never authorizes task cancellation or resubmission.
+
+[入站连接约定](inbound-connection-design_zh.md) 同样仅为 P2 准备，未启用入站
+期限或连接配额。状态余量不能保证请求头解析前立即可达；观察连接中断不授权
+取消或重提已接受任务。
+
 ## macOS app image
 
 The `.dmg` is a third contract, and neither of the checks above can see it. It

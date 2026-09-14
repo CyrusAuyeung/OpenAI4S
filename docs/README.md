@@ -52,6 +52,7 @@ and the internal plans in this directory are not published by that site.
 | `next-version-progress.md` | The v0.3 per-item factual record: what landed, in which commit, and — the load-bearing column — what was neutered to prove each new test can fail. A test that cannot fail measures nothing, and a class with the right name is not completion evidence. Items whose proving run needs a machine this repository does not have are marked `Implemented but unverified` with the missing run named. |
 | `next-improvements-20260914.md` | Sequential T0–T9 implementation ledger, validation status and real Ark request/usage evidence for the approved next-branch improvements. |
 | `pre-upgrade-snapshot-design.md` / `pre-upgrade-snapshot-design_zh.md` | P2-01 preparation: one verified pre-upgrade DB snapshot, private bounded publication, independent-directory restore boundaries and future fault acceptance; no runtime or migration changes. |
+| `inbound-connection-design.md` / `inbound-connection-design_zh.md` | P2-02 preparation: separate HTTP/header/upload/WS clocks, bounded admission and status headroom, actual connection release, and local fault acceptance; no new runtime quotas or deadlines. |
 | `webapp.md` | Web workbench concepts, projections, status, and operator-facing behavior. |
 | `webshare.md` | Web sharing: the read-only snapshot + outbound relay tunnel, deployment, and the trust model. |
 

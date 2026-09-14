@@ -18,8 +18,8 @@ before pushing `next`; the following item waits for that commit's CI.
 | T4 P1-01 Files | Completed / 完成 | Shared owned filtering, pagination and refresh; 705 frontend tests passed. |
 | T5 P1-03 Navigation / 导航 | Completed / 完成 | `2f53bf9c`; all 25 applicable CI jobs passed. |
 | T6 P1-02 Provenance and export / 溯源与导出 | Completed / 完成 | `14947d25`; all 25 applicable CI jobs passed; fixed read states, validation and version identity. |
-| T7 P2-01 Snapshot design / 快照准备 | Awaiting commit/CI / 等待提交及 CI | Bilingual retention/restore contract and 12 future acceptance cases; no migration changes. |
-| T8 P2-02 Slow connection design / 慢连接准备 | Not started / 未开始 | Design and acceptance only; no new runtime quotas. |
+| T7 P2-01 Snapshot design / 快照准备 | Completed / 完成 | `1216c986`; bilingual retention/restore preparation, 25 applicable CI jobs passed; no migration changes. |
+| T8 P2-02 Slow connection design / 慢连接准备 | Awaiting validation/CI / 等待验证及 CI | Bilingual phase/admission/release contract and 14 future acceptance cases; no new runtime quotas. |
 | T9 Final validation / 最终验收 | Not started / 未开始 | Final SHA gates, package and real Ark evidence. |
 
 ## Live Ark evidence / Ark 实测
@@ -762,3 +762,51 @@ is still required before T8. Original user document edits remain excluded.
 165 目录／1549 文件清单及 3869 文件密钥扫描通过。本项仅 6 份文档变化，生产、
 测试、依赖、schema 与前端资产和 T6 字节一致，相应完整测试复用 T6 证据；仍须
 等待本项提交自己的 CI 通过才进入 T8。用户原有文档修改保持排除。
+
+
+## T7 delivery CI / T7 交付 CI
+
+Commit `1216c98666d4959233215dfc983e97fdde06bb94` passed **25 applicable jobs**,
+with **4 not-applicable jobs skipped**, in
+[CI 34881084407](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34881084407).
+Independent review verified the six-doc scope, reviewed content, job metadata
+and main-gate checkout identities. The four Python pass/skip counts match the
+T6 CI table above, with zero failures and six warnings per job. All three
+engines passed 800 frontend tests, source/dist parity and 14/14 browser scenarios.
+Shapes reported 1167 shapes / 212/212 routes without breaking drift; additive
+observations were `/compute/remote`, `/compute/ssh-aliases` and `/kernel/packages`.
+Container, wheel installation, separate Linux interrupt/full sandbox, route
+contract, 38 harness scenarios and remaining applicable gates passed. S01–S12
+remain planned future snapshot tests; CI success does not activate retention.
+
+该提交 25 项适用 CI 全部通过、4 项不适用跳过。独立复核核对六文档范围及实际
+SHA；Python 数量同上表，三浏览器各 800 单测、构建一致性和 14 场景通过。响应
+捕获 1167 形状／212 路由，无破坏性变化，三项 additive 如上。容器、wheel 安装、
+独立 Linux 边界、契约及 38 harness 等全部通过；S01–S12 仍是未来快照验收。
+
+
+## T8 validation / T8 验证
+
+The bilingual slow-connection preparation defines header, admission, body,
+upload, WebSocket, observation, output and cleanup budgets; bounded pre-thread
+admission; status capacity; and permit ownership. It preserves accepted tasks
+when observers disconnect and distinguishes legal slow uploads from deadline
+violations. C01–C14 are **future acceptance cases, not executed new features**.
+No runtime deadlines, quotas, routes, protocols or frontend assets change.
+
+Independent read-only review passed after tightening admission lock waits,
+Expect:100 wire evidence, keepalive re-entry, real socket unblock criteria,
+post-admission observer handling and temporary-disk accounting. Existing auth,
+upload, body, keepalive and WebSocket regression selection passed **68 tests**,
+with 147 deselected. Clean-candidate all-file pre-commit including mypy passed;
+bilingual directory coverage passed (165 directories / 1551 files) and source
+secret scan passed (3871 files). All non-documentation blobs remain identical
+to T7/T6, so unchanged runtime checks reuse T6 evidence; this documentation
+commit still requires its own successful CI before T9.
+
+双语准备约定覆盖请求各阶段、线程创建前容量准入、状态查询余量及资源释放归属，
+明确合法慢上传、观察断开后任务继续、只读核对未知结果。C01–C14 全部是未来验收，
+未启用新期限或配额。独立只读复核通过，现有相关回归 68 项通过、147 项未选中；
+干净候选全量 pre-commit/mypy、165 目录／1551 文件清单和 3871 文件密钥扫描通过。
+仅六份文档变化，运行时代码与 T7/T6 一致，复用原完整运行证据；进入 T9 前仍须
+本项提交 CI 通过。
