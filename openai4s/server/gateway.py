@@ -2988,6 +2988,7 @@ class SessionRunner:
                     )
                 ),
                 bind_lineage=self._bind_notebook_lineage,
+                cancelled=self._cell_cancelled,
             )
         )
         self.recovery = SessionRecoveryService(
@@ -7261,6 +7262,19 @@ class SessionRunner:
             self._ensure_kernel(st)
             return None
         return f"unsupported kernel language: {language}"
+
+    def _cell_cancelled(self, st: SessionState) -> bool:
+        """Whether the Cell about to start belongs to a cancelled execution.
+
+        ``st.cancel`` is the event the watchdog observes once a Cell runs; the
+        admitted ticket's own signal is what a Stop, a session close or daemon
+        shutdown sets first. Either one means user code must not start.
+        """
+
+        if st.cancel.is_set():
+            return True
+        ticket = self.executions.current(st.root_frame_id)
+        return bool(ticket is not None and ticket.cancellation.is_set())
 
     def _make_step_sink(self, st: SessionState):
         """Return the dispatcher's on_step callback: persist each semantic step
@@ -19897,6 +19911,15 @@ def run_server(httpd: ThreadingHTTPServer) -> None:
     the socket; ``shutdown`` is a no-op after ``serve_forever`` has already
     returned, and stops a loop another thread may be running.
     """
+    try:
+        # Only the serving daemon builds matplotlib font lists for sandboxed
+        # kernels; a CLI one-shot or a test would abandon the scan at exit.
+        from openai4s.kernel.font_cache import enable_background_builds
+
+        runner_cfg = getattr(getattr(httpd, "runner", None), "cfg", None)
+        enable_background_builds(getattr(runner_cfg, "data_dir", None))
+    except Exception:  # noqa: BLE001 - an optimisation must not stop serving
+        pass
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

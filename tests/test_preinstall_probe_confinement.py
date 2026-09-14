@@ -259,3 +259,37 @@ def test_a_virtualenv_is_not_this_interpreter(tmp_path):
     )
     # ...and this process's own interpreter still matches itself.
     assert preinstall._is_this_interpreter(sys.executable)
+
+
+def test_a_probe_runs_in_its_own_empty_directory_not_the_daemons(tmp_path, monkeypatch):
+    """`python -c` without `-I` puts the working directory first on `sys.path`.
+
+    The probe used to inherit the daemon's launch directory -- a directory a
+    CLI kernel may write -- so a `json.py` or `platform.py` there answered for
+    the stdlib in a version probe or the font-list builder. The probe's cwd is
+    the private, empty workspace it creates for itself.
+    """
+
+    daemon_cwd = tmp_path / "daemon-cwd"
+    daemon_cwd.mkdir()
+    (daemon_cwd / "platform.py").write_text(
+        "def python_version():\n    return 'forged'\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(daemon_cwd)
+
+    completed = preinstall.run_confined_probe(
+        [
+            sys.executable,
+            "-c",
+            "import json, os, platform\n"
+            "print(json.dumps([os.getcwd(), sorted(os.listdir('.')),"
+            " platform.python_version()]))",
+        ],
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    cwd, entries, version = json.loads(completed.stdout.decode("utf-8"))
+    assert os.path.realpath(cwd) != os.path.realpath(daemon_cwd)
+    assert os.path.basename(cwd).startswith("openai4s-probe-"), cwd
+    assert entries == []
+    assert version != "forged"

@@ -61,12 +61,29 @@ def test_persistent_namespace():
         assert r["stdout"].strip() == "42"
 
 
+#: A worker's one-time cold start -- the sandbox self-test, the Host facade
+#: and provenance install on its first Cell -- is not what the thread-affinity
+#: test below measures, and on a loaded macOS runner it alone has taken 17-48
+#: seconds. It gets its own generous budget.
+_COLD_START_BUDGET_S = 120
+#: The property under test: a warm kernel answers its creating request thread.
+_WARM_EXECUTE_BUDGET_S = 15
+
+
 def test_kernel_survives_the_request_thread_that_created_it(tmp_path):
     kernel = None
     try:
         with ThreadPoolExecutor(max_workers=1) as requests:
-            kernel = requests.submit(Kernel, cwd=str(tmp_path)).result(timeout=15)
-            first = requests.submit(kernel.execute, "marker = 41").result(timeout=15)
+            kernel = requests.submit(Kernel, cwd=str(tmp_path)).result(
+                timeout=_COLD_START_BUDGET_S
+            )
+            warm = requests.submit(kernel.execute, "pass").result(
+                timeout=_COLD_START_BUDGET_S
+            )
+            assert warm["error"] is None
+            first = requests.submit(kernel.execute, "marker = 41").result(
+                timeout=_WARM_EXECUTE_BUDGET_S
+            )
             assert first["error"] is None
         # The request thread is now gone, as after a Web REPL/Agent turn. The
         # next request must see the same worker and its original namespace.
@@ -590,6 +607,111 @@ def test_save_artifact_host_call_carries_canonical_and_declared_cell_ids():
             ],
         ),
     ]
+
+
+def _require_matplotlib_in_the_kernel() -> None:
+    # `find_spec`, not `importorskip`: importing matplotlib into the test
+    # process is exactly the cost these tests are about, and not theirs to pay.
+    import importlib.util
+
+    if importlib.util.find_spec("matplotlib") is None:
+        pytest.skip("matplotlib is not installed")
+
+
+_MATPLOTLIB_MODULES = (
+    "matplotlib",
+    "matplotlib.figure",
+    "matplotlib.font_manager",
+    "matplotlib.pyplot",
+)
+
+
+@pytest.mark.parametrize(
+    ("mode", "guards_off"),
+    [("repl", False), ("repl", True), ("jupyter", False)],
+    ids=["guards-and-provenance", "provenance-only", "guards-only"],
+)
+def test_a_cell_that_never_plots_never_loads_matplotlib(
+    tmp_path, monkeypatch, mode, guards_off
+):
+    """Importing matplotlib builds its font list, and under an enforced
+    sandbox every Kernel gets an empty private MPLCONFIGDIR, so that import
+    was a font scan (`system_profiler` on macOS) of 8-48 seconds on the first
+    Cell of every new kernel -- `x = 1` included. Two independent layers paid
+    it for Cells that never plot: the figure-leak guard imported pyplot to
+    read its figure numbers, and provenance imported `matplotlib.figure` to
+    wrap `savefig`. Each parameter isolates one of them."""
+
+    _require_matplotlib_in_the_kernel()
+    if guards_off:
+        monkeypatch.setenv("OPENAI4S_GUARDS_OFF", "1")
+    else:
+        monkeypatch.delenv("OPENAI4S_GUARDS_OFF", raising=False)
+    monkeypatch.delenv("OPENAI4S_PROVENANCE_OFF", raising=False)
+
+    with Kernel(dispatcher=_echo_dispatcher, cwd=str(tmp_path), mode=mode) as kernel:
+        assert kernel.execute("x = 1")["error"] is None
+        probe = kernel.execute(
+            "import sys\n"
+            f"print([name for name in {_MATPLOTLIB_MODULES!r} if name in sys.modules])"
+        )
+
+    assert probe["error"] is None
+    assert probe["stdout"].strip() == "[]"
+
+
+def _figure_lineage_dispatcher(records):
+    def dispatcher(method, args):
+        if method == "prov_record":
+            records.append(args[0])
+            return {"ok": True}
+        if method == "prov_resolve_path":
+            return None
+        return _echo_dispatcher(method, args)
+
+    return dispatcher
+
+
+_TAGGED_FIGURE_SAVE = (
+    "from openai4s.kernel import provenance\n"
+    "figure = plt.figure()\n"
+    "provenance.set_tags(figure, frozenset({'input-version'}))\n"
+    "figure.savefig('figure.png')\n"
+    "plt.close(figure)\n"
+)
+
+
+@pytest.mark.parametrize("same_cell", [True, False], ids=["same-cell", "later-cell"])
+def test_figure_savefig_lineage_survives_a_matplotlib_imported_after_install(
+    tmp_path, same_cell
+):
+    """Provenance no longer imports matplotlib to wrap `Figure.savefig`; it
+    wraps it the moment `matplotlib.figure` is imported. A wrapper applied
+    only between Cells would miss the commonest plotting Cell there is --
+    import, plot and save in one go -- so both orders must report the edge."""
+
+    _require_matplotlib_in_the_kernel()
+    records: list[dict] = []
+    importing = (
+        "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
+    )
+    with Kernel(
+        dispatcher=_figure_lineage_dispatcher(records), cwd=str(tmp_path)
+    ) as kernel:
+        assert kernel.execute("x = 1")["error"] is None
+        if same_cell:
+            saved = kernel.execute(importing + _TAGGED_FIGURE_SAVE)
+        else:
+            assert kernel.execute(importing)["error"] is None
+            saved = kernel.execute(_TAGGED_FIGURE_SAVE)
+
+    assert saved["error"] is None
+    assert (tmp_path / "figure.png").is_file()
+    figure_records = [
+        record for record in records if record.get("filename") == "figure.png"
+    ]
+    assert figure_records, records
+    assert figure_records[-1]["input_version_ids"] == ["input-version"]
 
 
 def test_host_call_soft_fail_single_key_error_dict():
