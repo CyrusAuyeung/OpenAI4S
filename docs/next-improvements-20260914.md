@@ -493,3 +493,93 @@ branch concurrency rule. Its Firefox failure is not erased or reported as a pass
 Crosswalk/Stage1/静态 UI 契约回归及干净候选全量 pre-commit。未削弱断言或
 放宽期限。跟进提交将触发对应新 CI；原失败运行中的未完成作业可能被仓库
 分支并发规则自动取消，原 Firefox 失败仍保留，不计为通过。
+
+
+The second T5 CI candidate `e950f896e80c0af485f517f29df34954052aca88`
+passed Firefox and WebKit but exposed a real production race in
+[Chromium P1 controls](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34864726201/job/104045895387).
+Two deliberate New clicks shared a navigation generation: the first frame was
+published before its directory read finished, and its late opener invalidated
+the second accepted creation. A controlled regression failed before the fix.
+Fresh New requests now acquire navigation ownership before POST; the no-frame
+Attach/first-Send shared creation keeps its existing visit. A failed fresh request
+recovers the retained frame through read-only directory/history/Files reads,
+without replaying POST or rolling the generation back. The accepted frames are
+preserved. Tests exercise both response orders using an opener that really
+advances navigation, plus failure recovery. All 731 frontend cases and the
+source/dist build pass. Real-button controlled scenarios passed Chromium,
+Firefox and WebKit: four accepted creations, one injected rejected creation,
+no retry/delete/cancel, and restored retained-frame Files. The complete browser
+sequence and independent review are still pending for this follow-up.
+
+T5 第二份候选在 Firefox、WebKit 通过，但 Chromium 的既有 P1 控件检查发现
+真实竞态：连续两次新建共享导航代次，第一次延迟打开使第二次已接受创建失去
+导航归属。新增受控回归先复现失败；fresh 新建现在在 POST 前取得新导航身份，
+无当前会话的 Attach/首发共享路径保持原行为。新建失败后只读恢复保留会话的
+目录、消息及 Files，不重发 POST、不回退代次，也不删除已接受的会话。
+731 项前端测试和源码/dist 构建通过；真实按钮在三个引擎通过两种响应顺序及
+失败恢复检查。完整浏览器串及本次独立复核仍待完成，原 CI 失败保留。
+
+
+Read-only review of this follow-up tightened failed-creation recovery: it follows
+replacement directory reads, recovers history and Files without rewriting the
+retained frame's address or sidebar scope, clears obsolete earlier-page loading,
+and restores the creation error only while that intent still owns navigation.
+Tests now cover frame A with sidebar B and prevent a late recovery from posting
+an old error after a new visit. The final frontend suite passes 732 tests.
+A separate local smoke failure observed two head reads versus one in its baseline.
+That baseline had HTTP caching enabled, while only the fault reload installed a
+Playwright route (which disables HTTP cache, per the installed Playwright API
+contract). Both measured reloads now use the same route/cache mode; only the exact
+historical response switches to 404. All version, request-count and Retry assertions
+and timeouts remain. The original failure is retained; cache asymmetry is a proven
+harness defect, not a claim that its log uniquely identifies every extra request.
+The second CI run completed with 24 passing jobs and the single Chromium failure.
+
+本次只读复核进一步收紧失败恢复：跟随被刷新替代的目录读取，只读恢复历史和
+Files，保留原会话地址与当前侧栏范围，清理失效分页的加载状态，并仅在仍持有
+导航归属时恢复错误提示。新增 A 会话+B 侧栏和晚到恢复不得重贴旧错误的断言，
+最终前端 732 项通过。另保留 smoke 的 head 请求数 2 对 1 失败记录；确认正常
+基线与故障回合的 Playwright route/HTTP 缓存条件不同，现统一两回合的拦截与
+缓存条件，只切换固定历史版本的 404。请求数、版本和重试断言及期限均保留，
+不把此条件缺口解释为日志已唯一证明每个额外请求来源。第二次 CI 最终为
+24 个作业通过，仅 Chromium 失败。
+
+
+Equalizing cache mode alone did not remove the smoke's 2-versus-1 head-count
+failure. A subsequent CDP diagnostic run passed 1/1 and traced its head reads to
+`fillDataPreview → tileThumb → renderConversationArtifacts`; no stack was captured
+for the earlier failure, so its exact cause remains unproven. The old comparison
+also depended on how often legitimate artifact-list refreshes repaint thumbnails.
+The acceptance fixture now temporarily hides the target thumbnail using the real
+artifact-priority API while retaining the real immutable Notebook bindings and
+metadata. Normal historical reads, injected 404 and Retry must each make **zero**
+head requests. All fixed-version bytes/figures/tables/download assertions remain,
+and priority is restored afterward. This isolates the contract under test without
+weakening it to tolerate extra head requests. The controlled C1 case has passed;
+the remaining complete browser sequence is still running.
+
+统一缓存条件后仍保留一次 2 对 1 失败。后续 CDP 诊断以 1 对 1 通过，其 head
+调用栈来自普通缩略图；早先失败没有调用栈，具体来源仍不作已证实结论。
+原比较还依赖合法列表刷新重画缩略图的次数。验收现经真实产物 priority 接口
+暂时隐藏目标缩略图，保留真实元数据与 Notebook 不可变绑定，严格要求正常
+历史读取、404 和 Retry 各自零 head 请求，且保留全部版本字节、图、表和下载
+断言，结束后恢复 priority。受控 C1 已通过，完整浏览器串仍在执行。
+
+
+The complete final smoke passed, including the revised full-range cleanup and
+waiting for the Retry error to be rendered before the zero-head assertion.
+Independent review found no remaining blockers and reconfirmed the Notebook
+export claim behind Crosswalk `R7/P1-04`. Only its evidence digest was re-recorded;
+the other 46 closed rows are unchanged. The complete Chromium sequence passed
+smoke, admission fault, P1 controls, Stage 1 (300 immutable link/checksum checks)
+and sandbox preview. Chromium/Firefox/WebKit matrices passed 39/39. Final package
+resources and an isolated no-dependency install smoke passed (13 modules, 604 Skills).
+The offline run started before the evidence re-recording still needs its final
+failure summary; a fresh complete run will establish the final capture.
+
+最终完整 smoke 通过，包含覆盖正常阶段失败的清理以及重试错误重新渲染后才作
+零 head 断言。独立复核无剩余阻断，并重新核对 `R7/P1-04` 的 Notebook 导出
+声明，只重录该条证据摘要，其余 46 条已关闭记录不变。完整 Chromium 串及
+三引擎矩阵 39/39 通过；交付包资源与独立无依赖安装 smoke 通过。先前离线
+运行早于摘要重录启动，仍等待最终失败详情；将重新完整运行以建立最终捕获。

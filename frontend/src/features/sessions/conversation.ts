@@ -1,16 +1,17 @@
 /** openConversation, newSession, resumeWatch, routing. app.js:7087-7219, 2678-2706, 13231-13248. */
 
 import { t } from "../../i18n";
-import { currentId, project } from "../../stores/session";
+import { _msgEarlierLoading, currentId, project } from "../../stores/session";
 import { apiErrorText } from "./api";
 import { binds } from "./binds";
 import { hint } from "./chrome";
 import { showDashboard, showWorkspace } from "./dashboard";
 import { $ } from "./dom";
+import { callLane } from "./lane";
 import { loadProjects, loadSessions, loadSessionsForNavigation } from "./load";
-import { beginProjectNavigation, navigation, ownsNavigation } from "./navigation";
+import { beginNavigation, beginProjectNavigation, navigation, ownsNavigation } from "./navigation";
 import { adoptCreatedFrame, createUploadSession } from "../chrome/upload";
-import { openConversation } from "../messages/open";
+import { openConversation, recoverConversation } from "../messages/open";
 import { renderProjMenu } from "./projects";
 import { resetNotebookCellCaches } from "../notebook/chrome";
 import { unsub } from "../ws/connect";
@@ -31,6 +32,12 @@ export async function newSession(projectId?: string): Promise<void> {
   const requestedProject = typeof projectId === "string" ? projectId : undefined;
   const targetProject =
     requestedProject === undefined ? project.value || null : requestedProject || null;
+  const fresh = !!currentId.value;
+  // A deliberate New click owns navigation before its POST. The previous
+  // creation may already have published its id but still be opening; its
+  // later open must not invalidate this newer intent. With no open frame,
+  // keep the visit so Attach and the first Send still share their creation.
+  if (fresh) beginNavigation();
   const owner = navigation();
   try {
     // Empty-project auto creation, Attach, and the first Send all share this
@@ -38,7 +45,7 @@ export async function newSession(projectId?: string): Promise<void> {
     // With a conversation already open there is nothing to share: uploads bind
     // to currentId directly, so the only thing the shared promise could do is
     // collapse two deliberate New-session clicks into one frame.
-    const creation = createUploadSession(targetProject, { fresh: !!currentId.value });
+    const creation = createUploadSession(targetProject, { fresh });
     const frameId = await creation;
     if (currentId.value === frameId && (project.value || null) === targetProject) {
       // The shared creation adopted its own frame and is still opening it.
@@ -62,7 +69,25 @@ export async function newSession(projectId?: string): Promise<void> {
     }
     if (currentId.value === frameId) $("#composer")?.focus();
   } catch (e) {
-    if (ownsNavigation(owner)) hint(t("folder.create.failed", apiErrorText(e)), true);
+    if (!ownsNavigation(owner)) return;
+    const error = t("folder.create.failed", apiErrorText(e));
+    hint(error, true);
+    if (fresh && currentId.value) {
+      // The failed intent invalidated reads of the retained frame. Recover
+      // them under a new owner, without resending creation or rolling back
+      // the generation (which would admit the old outstanding responses).
+      const retained = currentId.value;
+      _msgEarlierLoading.value = false;
+      // The sidebar scope may differ from the retained frame's project.
+      // Recovery keeps its address and scope, and follows a newer directory
+      // refresh immediately rather than waiting for a superseded socket.
+      await Promise.allSettled([
+        loadSessionsForNavigation(owner),
+        recoverConversation(retained, owner.generation),
+        Promise.resolve(callLane("loadArtifacts", retained)),
+      ]);
+      if (ownsNavigation(owner) && currentId.value === retained) hint(error, true);
+    }
   }
 }
 

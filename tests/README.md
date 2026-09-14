@@ -475,4 +475,4 @@ Put a focused regression assertion here. Put reusable scripted scenarios, fake p
 
 - [`browser_files.mjs`](browser_files.mjs): Real Files controls, 125-artifact pagination, combined filters, live refresh, delayed session reads, and optional reuse of a real Ark artifact; shared by the three-engine matrix.
 
-- [`browser_navigation.mjs`](browser_navigation.mjs): Real project navigation, session/folder response reordering, page ownership, and retry after failed or malformed reads; shared by all three engines.
+- [`browser_navigation.mjs`](browser_navigation.mjs): Real project navigation, session/folder response reordering, page ownership, retry after failed or malformed reads, and consecutive New-session intent/failure recovery; shared by all three engines.

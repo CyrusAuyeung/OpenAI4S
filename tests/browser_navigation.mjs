@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { authenticate, waitUntil } from "./browser_auth.mjs";
 
-async function holdRead(page, match) {
+async function holdResponse(page, match) {
   let release;
   let captured = false;
   let ready = false;
@@ -14,7 +14,7 @@ async function holdRead(page, match) {
   const gate = new Promise((resolve) => { release = resolve; });
   const pending = [];
   const handler = (route) => {
-    if (captured || !match(new URL(route.request().url()))) return route.fallback();
+    if (captured || !match(new URL(route.request().url()), route.request().method())) return route.fallback();
     captured = true;
     const work = (async () => {
       const response = await route.fetch();
@@ -119,14 +119,14 @@ export async function navigationChecks(page, api) {
     await page.locator(".files-search").fill("navigation-evidence.txt");
     await page.locator(`.art[data-artifact-id="${upload.body.artifact_id}"]`).waitFor();
     // Real page-two responses arrive after B has acquired its own loading flag.
-    const oldPage = await holdRead(page, sessionRead(a, true));
+    const oldPage = await holdResponse(page, sessionRead(a, true));
     let newPage;
     try {
       await page.locator("#session-more").click();
       await waitUntil("A page two pending", oldPage.waiting);
       await select(b); await rows(b, 100);
       await page.locator(`.art[data-artifact-id="${upload.body.artifact_id}"]`).waitFor();
-      newPage = await holdRead(page, sessionRead(b, true));
+      newPage = await holdResponse(page, sessionRead(b, true));
       await page.locator("#session-more").click();
       await waitUntil("B page two pending", newPage.waiting);
       await oldPage.finish({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "injected late read failure" }) });
@@ -138,7 +138,7 @@ export async function navigationChecks(page, api) {
 
     // ABA uses a persisted rename to distinguish the old real response from
     // the newer visit; matching the project ID alone would restore old bytes.
-    const oldA = await holdRead(page, sessionRead(a));
+    const oldA = await holdResponse(page, sessionRead(a));
     try {
       await select(a); await waitUntil("first A read pending", oldA.waiting);
       assert.ok(oldA.body().frames.every((row) => row.name !== "Latest A visit"));
@@ -153,7 +153,7 @@ export async function navigationChecks(page, api) {
     } finally { await oldA.finish(); }
 
     // An old folder read's success cannot repaint after another project wins.
-    const oldFolder = await holdRead(page, (url) => url.pathname === `/api/v1/projects/${b.pid}/folders`);
+    const oldFolder = await holdResponse(page, (url) => url.pathname === `/api/v1/projects/${b.pid}/folders`);
     try {
       await select(b); await waitUntil("B folders pending", oldFolder.waiting);
       await select(a); await rows(a, 100);
@@ -167,7 +167,7 @@ export async function navigationChecks(page, api) {
       { status: 200, contentType: "application/json", body: JSON.stringify({ unexpected: [] }) },
     ]) {
       await page.locator("#back-home").click();
-      const held = await holdRead(page, sessionRead(a));
+      const held = await holdResponse(page, sessionRead(a));
       try {
         await page.locator("#dash-projects .d-row").filter({ hasText: a.name }).click();
         await waitUntil("project session read pending", held.waiting);
@@ -180,8 +180,75 @@ export async function navigationChecks(page, api) {
       } finally { await held.finish(); }
     }
     assert.equal(framePosts, 0);
+    // A second deliberate New click must win even while the first accepted
+    // frame is published but its directory read is still pending. Hold real
+    // response bytes and exercise both completion orders through actual buttons.
+    const creationRead = (url, method) => method === "POST" && url.pathname === "/api/v1/frames";
+    for (const order of ["first-read", "second-creation"]) {
+      await page.evaluate(({ fid, pid }) => window.openConversation(fid, pid), { fid: a.frames[0], pid: a.pid });
+      const firstRead = await holdResponse(page, sessionRead(a));
+      let secondCreation;
+      try {
+        await page.locator("#new-session").click();
+        await waitUntil("first published creation awaiting directory", firstRead.waiting);
+        const first = await page.evaluate(() => S.currentId);
+        assert.notEqual(first, a.frames[0]);
+        secondCreation = await holdResponse(page, creationRead);
+        await page.locator("#tab-new").click();
+        await waitUntil("second creation response held", secondCreation.waiting);
+        const second = secondCreation.body().id;
+        assert.ok(second && first !== second);
+        if (order === "first-read") {
+          await firstRead.finish();
+          await secondCreation.finish();
+        } else {
+          await secondCreation.finish();
+          await waitUntil("second creation opens before old directory", () => page.url().includes(`/frames/${second}`));
+          await firstRead.finish();
+        }
+        await waitUntil("latest New intent owns the opened frame", async () =>
+          await page.evaluate((fid) => S.currentId === fid, second) && page.url().includes(`/frames/${second}`));
+        // Both accepted destinations remain durable; nothing was deleted or
+        // silently retried to make the newer intent visible.
+        for (const fid of [first, second]) assert.equal((await api(`/frames/${fid}`)).status, 200);
+      } finally { await firstRead.finish(); if (secondCreation) await secondCreation.finish(); }
+    }
+    assert.equal(framePosts, 4);
+
+    // Failed New leaves the previous frame usable. Its reads must recover
+    // under the new generation; a stale Files snapshot cannot satisfy this.
+    await page.evaluate(({ fid, pid }) => window.openConversation(fid, pid), { fid: a.frames[0], pid: a.pid });
+    if (!await page.locator(".files-search").isVisible()) await page.locator("#files-btn").click();
+    await page.locator(`.art[data-artifact-id="${upload.body.artifact_id}"]`).waitFor();
+    // Sidebar B deliberately retains frame A and its real A address.
+    await select(b); await rows(b, 100);
+    await page.locator(`.art[data-artifact-id="${upload.body.artifact_id}"]`).waitFor();
+    const retainedUrl = page.url();
+    let refreshed = 0;
+    const observeRecovery = (response) => {
+      if (new URL(response.url()).pathname === `/api/v1/frames/${a.frames[0]}/artifacts` && response.status() === 200) refreshed++;
+    };
+    const rejectCreation = (route) => route.request().method() === "POST"
+      ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "injected creation failure" }) })
+      : route.fallback();
+    page.on("response", observeRecovery);
+    await page.route("**/api/v1/frames", rejectCreation);
+    try {
+      await page.locator("#new-session").click();
+      await waitUntil("failed creation refreshes retained frame files", () => refreshed > 0);
+      await page.locator(`.art[data-artifact-id="${upload.body.artifact_id}"]`).waitFor();
+      assert.equal(await page.evaluate(() => S.currentId), a.frames[0]);
+      await page.locator("#composer-hint").filter({ hasText: "injected creation failure" }).waitFor();
+      assert.equal(page.url(), retainedUrl);
+      assert.equal(await page.evaluate(() => S.project), b.pid);
+      await rows(b, 100);
+      assert.equal(framePosts, 5);
+    } finally {
+      await page.unroute("**/api/v1/frames", rejectCreation);
+      page.off("response", observeRecovery);
+    }
     assert.equal(cancels, 0);
-    return { projects: projects.map((p) => p.pid), pages: [100, 101], framePosts, cancels, faults: 3 };
+    return { projects: projects.map((p) => p.pid), pages: [100, 101], framePosts, cancels, faults: 4, creationOrders: 2 };
   } finally {
     page.off("request", monitor);
     await page.evaluate(() => { window.fetch = window.__navigationReadObserver.fetch; delete window.__navigationReadObserver; });
