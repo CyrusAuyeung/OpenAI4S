@@ -220,6 +220,13 @@ export async function loadModels(): Promise<void> {
     const list = readComposerModels(payload);
     models.value = list;
     const wanted = entryText(payload.default_model_id);
+    // An unlisted default (e.g. the id of a since-deleted profile) falls back
+    // to the first entry, and that is not an arbitrary pick: `models_payload`
+    // always lists the daemon's live model (`llm_model`, else `cfg.llm.model`)
+    // first, which is the model `resolve_llm_config` runs an unpinned session
+    // on. A `model` sent from it (session creation, plan approve/resume/revise)
+    // restates the server's default rather than overriding it. app.js kept the
+    // unlisted id instead, and so sent a deleted profile's id as `model`.
     const chosen = list.some((entry) => entry.id === wanted) ? wanted : list[0]?.id || null;
     defaultModel.value = chosen;
     defaultModelName.value = chosen ? composerModelName(chosen) : null;

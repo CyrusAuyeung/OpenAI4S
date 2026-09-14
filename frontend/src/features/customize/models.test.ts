@@ -77,12 +77,14 @@ describe("composer model loading", () => {
     expect(defaultModelName.value).toBe("ark-code-latest");
   });
 
-  it("falls back to the first entry when the default is not listed", async () => {
+  it("falls back to the first entry -- the daemon's live model -- when the default is not listed", async () => {
     fetchMock.mockImplementation(() =>
-      Promise.resolve(response({ ...PAYLOAD, default_model_id: "gone" })),
+      Promise.resolve(response({ ...PAYLOAD, default_model_id: "mp-deleted-profile" })),
     );
     await loadModels();
     expect(defaultModel.value).toBe("doubao-seed-2.0-pro");
+    // Never the unlisted id: it would be sent as `model` on session creation.
+    expect(defaultModelName.value).toBe("doubao-seed-2.0-pro");
   });
 
   it("an unreadable /models leaves an empty list instead of throwing", async () => {
