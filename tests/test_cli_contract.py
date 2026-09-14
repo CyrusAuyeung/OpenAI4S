@@ -882,6 +882,23 @@ def test_every_exit_2_refusal_code_is_in_the_documented_exit_table(capsys):
         assert code in table_row, ("docs/configuration.md", code)
         for name, row in readme_rows.items():
             assert code in row, (name, code)
+    # RFD-3: `main()` refuses a database it will not open -- one from a newer
+    # release, or one whose upgrade failed and was rolled back -- with exit 2
+    # and these codes, and every table that lists the exit-2 refusals says so.
+    from openai4s.storage.migrations import FutureSchemaError
+
+    # `migration_failed` is pinned by the --json refusal tests below.
+    store_codes = ("future_schema", "migration_failed")
+    assert FutureSchemaError.code == store_codes[0]
+    for code in store_codes:
+        assert code in exit_2, ("run --help", code)
+        assert code in table_row, ("docs/configuration.md", code)
+        for name, row in readme_rows.items():
+            assert code in row, (name, code)
+    assert "backup" in exit_2 and "backup" in table_row
+    assert (
+        "backup" in readme_rows["README.md"] and "备份" in readme_rows["README_zh.md"]
+    )
 
 
 def test_the_cli_readme_halves_carry_the_same_operational_contract():
@@ -1734,6 +1751,85 @@ def test_real_detached_child_failed_upgrade_names_the_backup_and_exits_2(
     with sqlite3.connect(str(cfg.db_path)) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 31
     assert not cfg.pidfile.exists() and not cfg.statefile.exists()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "hello", "--json"],
+        ["init", "--non-interactive", "--json"],
+        ["user", "list", "--json"],
+    ],
+)
+def test_a_future_schema_refusal_prints_its_code_under_json(
+    tmp_path, monkeypatch, capsys, argv
+):
+    """RFD-2. The exit-2 tables say `--json` prints the refusal's code. The
+    Store refusals are raised inside the Store open and reach `main()`, which
+    wrote only the stderr line: a script calling json.loads on stdout got an
+    empty string for exactly this refusal."""
+    import sqlite3
+
+    import openai4s.config as config_module
+    from openai4s.storage.migrations import SCHEMA_VERSION
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    cfg = config_module.Config()
+    cfg.ensure_dirs()
+    with sqlite3.connect(cfg.db_path) as db:
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    before = cfg.db_path.read_bytes()
+
+    assert module.main(argv) == 2
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["code"] == "future_schema"
+    assert f"database schema {SCHEMA_VERSION + 1}" in payload["error"]
+    # The operator's one line stays where the upgrade guide says it is.
+    assert "error: [future_schema]" in captured.err
+    assert "Traceback" not in captured.err
+    assert cfg.db_path.read_bytes() == before
+
+
+def test_a_failed_upgrade_refusal_prints_its_code_under_json(
+    tmp_path, monkeypatch, capsys
+):
+    import openai4s.config as config_module
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    config_module.Config().ensure_dirs()
+    db = _older_store_whose_upgrade_fails(tmp_path, monkeypatch)
+
+    assert module.main(["run", "say hello", "--json"]) == 2
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["code"] == "migration_failed"
+    assert payload["error"].startswith("migration to version")
+    assert str(db.with_name("openai4s.db.v31.bak")) in payload["error"]
+    assert "error: migration to version" in captured.err
+
+
+def test_a_store_refusal_without_json_prints_nothing_on_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    import openai4s.config as config_module
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    config_module.Config().ensure_dirs()
+    _older_store_whose_upgrade_fails(tmp_path, monkeypatch)
+
+    assert module.main(["run", "say hello"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: migration to version" in captured.err
 
 
 @pytest.mark.parametrize(

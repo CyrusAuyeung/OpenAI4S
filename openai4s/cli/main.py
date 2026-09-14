@@ -1212,8 +1212,13 @@ def cmd_url(args) -> int:
 #: ``no_progress``, ``cancelled`` and any reason the CLI does not know all map
 #: here, so an unknown terminal fails closed. Not 2, which already means a
 #: refusal (a usage error, a code mode whose test runner nothing can
-#: authorize, environment readiness, a newer database schema).
+#: authorize, environment readiness, a newer database schema, an upgrade
+#: migration that failed and was rolled back).
 RUN_NOT_COMPLETED_EXIT = 3
+
+#: The `--json` code for a Store refusal that is not a newer schema: an upgrade
+#: migration that failed and was rolled back, or one refused before it began.
+MIGRATION_FAILED_CODE = "migration_failed"
 
 _RUN_EXIT_STATUS_HELP = """\
 exit status:
@@ -1223,8 +1228,11 @@ exit status:
      --allow-test-command: invalid_allow_test_command), an explicit --mode
      reusable_pipeline|codebase_change whose test command nothing can
      authorize (code_mode_test_runner_unauthorized), the standard environment
-     is not ready, or the database schema is newer than this build; --json
-     prints the code
+     is not ready, the database schema is newer than this build
+     (future_schema), or an upgrade of an older database failed and was
+     rolled back (migration_failed; the error line names the kept backup);
+     --json prints the error and its code on stdout, and the two database
+     refusals still print their error line on stderr
   3  the run ended without completing: stop_reason max_turns, no_progress,
      cancelled, or any other value
 
@@ -2798,6 +2806,15 @@ def main(argv: list[str] | None = None) -> int:
         # message already names the versions and the kept backup. `serve`
         # still catches it earlier so it can clear the singleton state it
         # already claimed.
+        if getattr(args, "json", False):
+            # The exit-2 contract every other refusal keeps: with --json the
+            # code is on stdout. The stderr line stays -- it is the one line
+            # the upgrade guide tells an operator to look for.
+            payload = {
+                "error": str(exc),
+                "code": getattr(exc, "code", None) or MIGRATION_FAILED_CODE,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

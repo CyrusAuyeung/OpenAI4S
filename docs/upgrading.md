@@ -118,8 +118,11 @@ and every daemon requires its access token, including one bound to
   limit, no progress or cancellation, exits `3`. The `--json` output still
   carries `stop_reason`. A script that treated any finished run as success
   should check the exit status. A refusal before the run starts also exits
-  `2`: an empty task, an invalid `--allow-test-command`, or an explicit code
-  mode whose test command nothing can authorize.
+  `2`: an empty task, an invalid `--allow-test-command`, an explicit code mode
+  whose test command nothing can authorize, or a database it will not open,
+  one newer than this build (`future_schema`) or one whose upgrade failed
+  (`migration_failed`, see section 1). With `--json` the error and its code
+  are printed on stdout.
 * **`openai4s stop` waits longer.** 0.2.x waited about 5s for the daemon to
   exit before it reported failure or, with `--force`, sent SIGKILL. 0.3.0 waits
   up to `--timeout`, 30s by default, first, and prints a `shutting down…` line
