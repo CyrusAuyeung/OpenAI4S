@@ -15213,7 +15213,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 return
             if artifact_index_routes.handle(self, method, sub, q, store):
                 return
-            # ---- identity / meta (no-auth local mode) ----
+            # ---- identity / meta (local identity; behind the token gate) ----
             if sub == "/me":
                 self._json(
                     {
