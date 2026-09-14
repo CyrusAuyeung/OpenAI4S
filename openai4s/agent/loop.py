@@ -392,6 +392,10 @@ class Agent:
                 )
                 self.dispatcher.frame_id = self.frame_id
                 self._owns_frame = True
+            # What `search_capabilities` reports as visible must be what this
+            # Agent offers the provider, or a model calls a tool it was never
+            # offered and loses the turn to the gate's refusal.
+            self.dispatcher.model_tool_offered = self._tool_offered
         # Durable generation registration defaults to the dispatcher's store:
         # the CLI root and every delegated child then record real kernel
         # generations under their own frame with no extra wiring.
@@ -1046,29 +1050,49 @@ class Agent:
         store = getattr(self.dispatcher, "store", None)
         if store is None or not self.frame_id:
             return with_finalize_response(specs)
+        reachable: dict[str, bool] = {}
+        visible = [
+            spec
+            for spec in specs
+            if self._tool_offered(
+                tool_catalog.get(getattr(spec, "name", "")), _reachable=reachable
+            )
+        ]
+        return with_finalize_response(visible)
+
+    def _tool_offered(
+        self, tool: Any, *, _reachable: dict[str, bool] | None = None
+    ) -> bool:
+        """Whether this run's projection offers ``tool`` to the model.
+
+        The one predicate behind both the provider ``tools=`` list and what
+        ``search_capabilities`` calls visible. A tool that needs no approval
+        is always offered; an approval-required one only when some approval
+        path in this process could allow its method. ``_reachable`` memoizes
+        per method within one projection.
+        """
+
+        if tool is None or not getattr(tool, "requires_approval", False):
+            return True
+        store = getattr(self.dispatcher, "store", None)
+        if store is None or not self.frame_id:
+            return True
+        method = str(tool.host_method)
+        if _reachable is not None and method in _reachable:
+            return _reachable[method]
         from openai4s.permissions import broker
 
-        permission_broker = broker()
-        reachable: dict[str, bool] = {}
-        visible = []
-        for spec in specs:
-            tool = tool_catalog.get(getattr(spec, "name", ""))
-            if tool is None or not getattr(tool, "requires_approval", False):
-                visible.append(spec)
-                continue
-            method = str(tool.host_method)
-            if method not in reachable:
-                reachable[method] = permission_broker.approval_reachable(
-                    store=store,
-                    frame_id=str(self.frame_id),
-                    method=method,
-                    dangerous=bool(getattr(tool, "dangerous", False)),
-                    side_effect_class=str(getattr(tool, "side_effect_class", "")),
-                    guardian_config=self.cfg,
-                )
-            if reachable[method]:
-                visible.append(spec)
-        return with_finalize_response(visible)
+        reachable = broker().approval_reachable(
+            store=store,
+            frame_id=str(self.frame_id),
+            method=method,
+            dangerous=bool(getattr(tool, "dangerous", False)),
+            side_effect_class=str(getattr(tool, "side_effect_class", "")),
+            guardian_config=self.cfg,
+        )
+        if _reachable is not None:
+            _reachable[method] = reachable
+        return reachable
 
     def _session_is_metered(self) -> bool:
         """Whether the team ledger charges this run's session root.
