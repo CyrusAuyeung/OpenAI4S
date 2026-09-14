@@ -17,24 +17,30 @@ async function filter(page, query = "", type = "", origin = "all") {
   await page.locator(`.files-origin [data-origin="${origin}"]`).click();
 }
 async function grid(page, expected, more) {
-  try { await waitUntil(`${expected} cards/count and more=${more}`, async () => {
-    const cards = page.locator("#results-list .art");
-    return await cards.count() === expected && await page.locator("#results-count").textContent() === String(expected) && await page.locator(".files-load-more").count() === Number(more);
-  }); } catch (error) {
-    const state = await page.evaluate(() => ({
-      frame: window.S.currentId, project: window.S.project, scope: window.S.filesScope,
-      count: document.querySelector("#results-count")?.textContent,
-      cards: document.querySelectorAll("#results-list .art").length,
-      more: document.querySelectorAll(".files-load-more").length,
-      note: document.querySelector(".files-index-note")?.textContent,
-      empty: document.querySelector(".files-empty")?.textContent,
-    }));
-    throw new Error(`${error.message}; ${JSON.stringify(state)}`);
+  let snapshot;
+  try {
+    snapshot = await waitUntil(`${expected} cards/count and more=${more}`, async () => {
+      // Read the whole DOM projection in one browser turn. Separate locator
+      // awaits could observe cards from one render and empty from the next.
+      snapshot = await page.evaluate(() => ({
+        ids: [...document.querySelectorAll("#results-list .art")].map((node) => node.dataset.artifactId),
+        count: document.querySelector("#results-count")?.textContent,
+        more: document.querySelectorAll(".files-load-more").length,
+        empty: document.querySelectorAll("#results-list .files-empty").length,
+        frame: window.S.currentId, project: window.S.project, scope: window.S.filesScope,
+        query: document.querySelector(".files-search")?.value,
+        type: document.querySelector(".files-filter-type")?.value,
+        note: document.querySelector(".files-index-note")?.textContent,
+        emptyText: document.querySelector(".files-empty")?.textContent,
+      }));
+      return snapshot.ids.length === expected && snapshot.count === String(expected) &&
+        snapshot.more === Number(more) && snapshot.empty === Number(expected === 0) ? snapshot : false;
+    });
+  } catch (error) {
+    throw new Error(`${error.message}; expected=${expected}, more=${more}; snapshot=${JSON.stringify(snapshot)}`);
   }
-  const ids = await page.locator("#results-list .art").evaluateAll((nodes) => nodes.map((node) => node.dataset.artifactId));
-  assert.equal(new Set(ids).size, ids.length, "no duplicate artifact identities in the actual DOM");
-  assert.equal(await page.locator("#results-list .files-empty").count(), Number(expected === 0));
-  return ids;
+  assert.equal(new Set(snapshot.ids).size, snapshot.ids.length, "no duplicate artifact identities in the actual DOM");
+  return snapshot.ids;
 }
 
 export async function realArtifactFilesCheck(page, api, { frame_id: fid, project_id: pid, artifacts }) {

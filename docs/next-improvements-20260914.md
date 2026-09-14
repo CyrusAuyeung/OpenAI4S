@@ -454,3 +454,42 @@ Local acceptance is complete; commit/push and the matching CI are pending.
 T5 最终完整离线捕获通过 **8,958 项、跳过 26 项**，
 零失败/错误，耗时 825.789 秒；1,167 种响应形状覆盖全部 212 条路由，
 无破坏性漂移。本地验收已完成，等待提交、推送及对应提交的 CI。
+
+
+Initial T5 commit `09c62b3dee4e54707e038ba187971a8de5ab4a39` encountered a
+[Firefox CI failure](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34863558886/job/104041610293).
+The Files helper's final empty-element assertion observed `1` instead of `0`;
+its card/count/more/IDs/empty reads crossed multiple asynchronous browser turns.
+The log does not identify the exact phase or establish a unique production cause.
+The helper now captures the entire DOM projection in one evaluation and waits for
+cards, count, pagination and empty state together, with the same timeout and richer
+failure evidence. The following navigation scene also omitted resetting persistent
+Files type/origin filters. A real Firefox run with retained CSV/Generated filters
+reproduced the missing uploaded-text card; the same reproduction passed after the
+scene explicitly reset all its filter preconditions. CI's exact retained values
+remain unknown, so that specific causal link is an inference, not a recorded fact.
+No production code, dist or timeout changed in this follow-up. The successful
+8,958-test capture, 728 frontend cases and package install smoke continue to cover
+those unchanged sources; all three full browser matrices are being rerun for the
+changed helpers. The initial failure remains in the evidence record.
+
+T5 初次提交在 Firefox CI 的 Files 空态断言失败，之后导航场景等待卡片超时。
+Files helper 原先跨多轮异步读取 DOM，现一次采集完整投影，并在同一原有期限内
+同时等待卡片、数量、分页及空态一致；日志不足以唯一证明原失败的生产根因。
+导航场景遗漏清理持久 type/origin 筛选，本地真实 Firefox 保留 CSV/Generated
+筛选可稳定复现上传文本卡片缺失，清理后同一复现通过；但 CI 当时的具体筛选值
+未记录，不将推断写成已知事实。此次只改验收脚本与记录，生产源码、dist 和
+超时阈值未变；复用原完整离线、前端和安装证据，并重跑受影响的三引擎矩阵。
+
+
+The follow-up passed independent read-only review, the full three-engine matrix
+(39/39), the forced retained-filter reproduction, 136 Crosswalk/Stage1/static UI
+contract tests, and clean-candidate all-files pre-commit. No assertion or timeout
+was weakened. The tested follow-up will be pushed for a new matching CI run; the
+repository may cancel unfinished jobs in the earlier failed run by its configured
+branch concurrency rule. Its Firefox failure is not erased or reported as a pass.
+
+跟进修正通过独立只读复核、三引擎矩阵 39/39、强制残留筛选复现、136 项
+Crosswalk/Stage1/静态 UI 契约回归及干净候选全量 pre-commit。未削弱断言或
+放宽期限。跟进提交将触发对应新 CI；原失败运行中的未完成作业可能被仓库
+分支并发规则自动取消，原 Firefox 失败仍保留，不计为通过。

@@ -111,6 +111,11 @@ export async function navigationChecks(page, api) {
     await rows(a, 100);
     await page.locator("#files-btn").click();
     await page.locator('.files-scope [data-scope="frame"]').click();
+    // This scene owns its preconditions even if a previous matrix check failed
+    // before clearing the user's persistent Files filters.
+    await page.locator(".files-filter-type").fill("");
+    await page.locator(".files-filter-type").press("Tab");
+    await page.locator('.files-origin [data-origin="all"]').click();
     await page.locator(".files-search").fill("navigation-evidence.txt");
     await page.locator(`.art[data-artifact-id="${upload.body.artifact_id}"]`).waitFor();
     // Real page-two responses arrive after B has acquired its own loading flag.
