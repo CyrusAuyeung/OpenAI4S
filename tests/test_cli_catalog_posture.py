@@ -190,3 +190,68 @@ def test_a_hidden_tool_called_anyway_is_still_refused_and_audited(tmp_path):
     assert [(row["tool"], row["state"]) for row in requests] == [
         ("dynamic_tool_define", "denied")
     ]
+
+
+#: The full default-posture effect, as the tests README pair documents it:
+#: hidden from the first turn (always-active groups) ...
+_HIDDEN_FROM_FIRST_TURN = _ASK_BY_DEFAULT | {"web_download", "rollback_skill_version"}
+#: ... and hidden once their progressive groups activate.
+_HIDDEN_ONCE_ACTIVE = {
+    "restore_artifact_version",
+    "exec_background",
+    "read_mcp_resource",
+    "get_mcp_prompt",
+    "request_network_access",
+    "stage_model_asset",
+    "register_remote_capability",
+    "compute_submit",
+}
+
+
+def test_the_documented_hidden_set_is_the_whole_default_posture_effect(
+    tmp_path, monkeypatch
+):
+    """The projection is a general rule, so its reach is easy to understate
+    (the first report named only the four dynamic-tool tools). Pin the whole
+    default-posture hidden set against the real projection, and the doc rows
+    that tell a release reader what disappears."""
+
+    from pathlib import Path
+
+    from openai4s.agent import loop as loop_mod
+
+    first_turn = _declared_tools(tmp_path / "first", monkeypatch)
+
+    agent = loop_mod.Agent(
+        cfg=_cfg(tmp_path / "all"),
+        use_skills=False,
+        allow_delegate=False,
+        workspace=str(tmp_path),
+    )
+    catalog = agent.dispatcher.tool_catalog()
+    groups = catalog.group_metadata()
+    always = {name for group in groups if group["always"] for name in group["tools"]}
+    catalog.activate_groups(*(str(group["id"]) for group in groups))
+    offered = {spec.name for spec in agent._model_tool_specs(catalog, [])}
+    hidden = {tool.name for tool in catalog.tools()} - offered
+
+    assert (always - first_turn) == _HIDDEN_FROM_FIRST_TURN
+    assert hidden == _HIDDEN_FROM_FIRST_TURN | _HIDDEN_ONCE_ACTIVE
+    # Every hidden tool is approval-required: the projection never drops a
+    # tool the gate would have run without asking.
+    assert all(catalog.get(name).requires_approval for name in hidden)
+
+    tests_dir = Path(__file__).resolve().parent
+    for readme in ("README.md", "README_zh.md"):
+        row = next(
+            line
+            for line in (tests_dir / readme).read_text(encoding="utf-8").splitlines()
+            if line.startswith("| [`test_cli_catalog_posture.py`]")
+        )
+        missing = sorted(
+            name
+            for name in (_HIDDEN_FROM_FIRST_TURN | _HIDDEN_ONCE_ACTIVE)
+            - _ASK_BY_DEFAULT
+            if f"`{name}`" not in row
+        )
+        assert not missing, (readme, missing)

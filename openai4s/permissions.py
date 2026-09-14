@@ -735,6 +735,15 @@ class PermissionBroker:
         target vetoes all of them, exactly as it does in the gate. Anything
         that cannot be read answers ``True``: hiding a capability that was in
         fact reachable is worse than one refused call.
+
+        It is an approximation, not a replay of the gate. It does not model an
+        open Guardian denial circuit, the unattended file policy, or a
+        delegated child's ``deny``/``ask`` policy (each can still refuse a call
+        this answers ``True`` for), nor the order in which the gate consults
+        the Guardian before a channel. The one allow path it omits is a
+        restart-once continuation grant, which exists only after a person
+        approves a request a daemon restart left open; a fresh CLI root has
+        none.
         """
 
         try:
