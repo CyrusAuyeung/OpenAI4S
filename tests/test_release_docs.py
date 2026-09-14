@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_VALIDATION = ROOT / "docs" / "release-validation.md"
 CONTRIBUTING = ROOT / ".github" / "CONTRIBUTING.md"
@@ -171,3 +173,88 @@ def test_the_upgrade_guide_states_the_schema_change_the_backup_and_no_downgrade(
     deletes = _migration_deletes_its_backup_on_success()
     assert deletes == ("deletes it once the migration succeeds" in english)
     assert deletes == ("迁移成功后会删除它" in chinese)
+
+
+# -- what each platform can actually download ----------------------------------
+
+WORKFLOWS = ROOT / ".github" / "workflows"
+USER_INSTALL_DOCS = (
+    ROOT / "README.md",
+    ROOT / "README_zh.md",
+    ROOT / "docs" / "startup-guide.md",
+)
+
+
+def _macos_asset_defaults_to_omit() -> bool:
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    block = workflow.split("      macos_asset:", 1)
+    return len(block) == 2 and bool(
+        re.search(r"^        default: omit$", block[1].split("\n\n", 1)[0], re.M)
+    )
+
+
+def test_no_install_doc_sends_a_mac_user_to_the_latest_release_for_a_dmg():
+    """While the release workflow omits the DMG by default, the latest release
+    has no macOS asset. A `macos-arm64.dmg` named a few lines from a
+    `releases/latest` link is a download that is not there. A proximity window
+    rather than one line, because the two sat on adjacent wrapped lines."""
+    if not _macos_asset_defaults_to_omit():
+        pytest.skip("release.yml publishes a DMG by default again")
+    offenders = []
+    for path in USER_INSTALL_DOCS:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if "releases/latest" not in line:
+                continue
+            window = lines[max(0, index - 3) : index + 4]
+            if any("macos-arm64.dmg" in near for near in window):
+                offenders.append(f"{path.relative_to(ROOT)}:{index + 1}")
+    assert not offenders, f"DMG download pointed at the latest release: {offenders}"
+
+
+def test_platforms_does_not_claim_a_notarized_dmg_ships():
+    if not _macos_asset_defaults_to_omit():
+        pytest.skip("release.yml publishes a DMG by default again")
+    text = _normalised(ROOT / "docs" / "platforms.md")
+    assert "macOS ships as a signed, notarized" not in text
+    assert "v0.3.0 publishes no DMG" in text
+
+
+def test_the_readmes_do_not_say_the_windows_package_ships_later():
+    """`release.yml` stages the Windows zip on every publish; nothing can omit
+    it. A README note saying the package ships in a coming release contradicts
+    the release it is published with."""
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "Download the verified Windows package" in workflow
+    forbidden = {
+        ROOT
+        / "README.md": "Windows/WSL2 package is still stabilizing and ships in a coming release",
+        ROOT / "README_zh.md": "Windows/WSL2 安装包仍在稳定化，将随后续版本发布",
+    }
+    for path, phrase in forbidden.items():
+        assert phrase not in _normalised(path), f"{path.name} still defers Windows"
+
+
+def test_platforms_names_the_published_container_image():
+    if not (WORKFLOWS / "publish-image.yml").is_file():
+        pytest.skip("no container image workflow")
+    text = _normalised(ROOT / "docs" / "platforms.md")
+    assert "No registry publishes it" not in text
+    assert "ghcr.io/pku-yuangroup/openai4s" in text
+
+
+def test_the_workflow_readmes_do_not_call_the_linux_boundary_smoke_manual():
+    """`ci.yml` runs `harness.smoke.linux_sandbox` as its own job on every CI
+    event, and the release receipt attests it. Calling it manual, or saying it
+    is unproven "because it is not a current CI gate", describes a workflow
+    that no longer exists."""
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    if "python -m harness.smoke.linux_sandbox" not in ci:
+        pytest.skip("ci.yml no longer runs the full Linux boundary smoke")
+    english = _normalised(WORKFLOWS / "README.md")
+    chinese = _normalised(WORKFLOWS / "README_zh.md")
+    assert "Linux boundary smoke remains manual" not in english
+    assert "because it is not a current CI gate" not in english
+    assert "仍需手动执行" not in chinese
+    assert "不是当前 CI gate" not in chinese
+    assert "ci-linux-sandbox-full" in english and "ci-linux-sandbox-full" in chinese
