@@ -44,6 +44,40 @@ Unix UID remains inside the operator trust boundary. Use separate OS accounts,
 containers/VMs, or equivalent resource-plane isolation when users must be
 mutually hostile at the host-filesystem level.
 
+The targeted credential-file denies cover the configured `OPENAI4S_DATA_DIR`
+**and** the well-known default `~/.openai4s` instance (resolved and
+de-duplicated). Building the deny set from a single data directory left the
+default instance's `access-token`, worker-bootstrap secret, `shares/` and
+`openai4s.db` readable to an enforced cell whenever `OPENAI4S_DATA_DIR` was
+redirected — a CLI run with a custom data dir, a benchmark, the test suite, or a
+second daemon. Both instances' credential files are denied regardless of which
+one the running daemon uses; non-default secondary instances (a third data dir
+with no relation to either) remain outside this set and rely on the same-UID
+trust boundary above.
+
+**macOS — reading the daemon's exec-time environment.** On macOS a process's
+argument and environment block is reachable through `sysctl(CTL_KERN,
+KERN_PROCARGS2, <pid>)`, and for a daemon whose LLM key is configured by
+environment variable / `.env` that block holds the key in cleartext. This is
+the same threat bubblewrap closes on Linux by masking `/proc/<daemon>/environ`.
+The Seatbelt profile denies the `process-info` introspection class (for other
+processes) **and** the `kern.proc` sysctls; for a detached (`setsid`) target —
+which `openai4s serve` always is — the kernel gates the KERN_PROCARGS2 read
+behind both authorization paths and passing *either* allows it, so **both**
+denies are required and neither alone suffices. Verified end to end against a
+live daemon under `enforce`: with the denies removed a cell recovers the
+daemon's real API key via KERN_PROCARGS2 (fingerprint match); with them in
+place the cell's `sysctl` returns `EPERM` and the key is not recovered, while a
+normal analysis turn and the science stack (numpy/pandas, matplotlib,
+scikit-learn `n_jobs=2`, multiprocessing, subprocess, an R cell, urllib HTTPS)
+keep working. What this does **not** cover is a process in the cell's *own*
+session (a same-UID sibling started alongside it): that read stays open, which
+is consistent with the same-UID trust boundary above — the daemon is a detached
+session leader, not such a sibling. As defence in depth, and for the same-UID
+case, macOS deployments running untrusted cells can also keep the key in the
+keychain SecretBroker (the `auto` default), where it is never placed in the
+daemon environment at all.
+
 [`openai4s.security`](../openai4s/security) adds independent policy layers:
 
 | layer | env (default) | what it does |
