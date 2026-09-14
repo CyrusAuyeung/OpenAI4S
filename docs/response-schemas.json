@@ -9021,9 +9021,6 @@
                       "type": "string"
                     },
                     "missing": {
-                      "items": {
-                        "type": "string"
-                      },
                       "type": "array"
                     },
                     "phase": {
@@ -24677,6 +24674,71 @@
         "type": "object"
       }
     },
+    "PATCH /model-profiles/([^/]+) [ok]": {
+      "schema": {
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "capability_receipt": {
+            "type": "null"
+          },
+          "credential_source": {
+            "type": "string"
+          },
+          "has_api_key": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "readiness": {
+            "properties": {
+              "checked_endpoint": {
+                "type": "boolean"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "checked_endpoint",
+              "detail",
+              "state"
+            ],
+            "type": "object"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_url",
+          "capability_receipt",
+          "credential_source",
+          "has_api_key",
+          "id",
+          "model",
+          "name",
+          "provider",
+          "readiness",
+          "revision"
+        ],
+        "type": "object"
+      }
+    },
     "PATCH /model-profiles/([^/]+)/activate [error]": {
       "schema": {
         "properties": {
@@ -33807,6 +33869,9 @@
         "properties": {
           "binding": {
             "properties": {
+              "backfilled": {
+                "type": "boolean"
+              },
               "bound": {
                 "type": "boolean"
               },
