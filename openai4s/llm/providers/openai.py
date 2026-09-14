@@ -9,6 +9,7 @@ from ..messages import _openai_messages
 from ..models import LLMError, TransportError, status_is_retryable
 from ..tooling import _apply_chat_tools, _assistant_message, _normalized_tool_call
 from ..transport import _BROWSER_UA, bind_call_context, streaming_refused
+from ..usage import RawUsage
 
 
 def _chat_openai(
@@ -138,11 +139,12 @@ def _chat_openai_stream(url, payload, headers, cfg, on_delta, *, post_sse) -> di
         "usage": {},
         "finish": None,
         "terminal": False,
+        "usage_final": False,
         "tool_calls": {},
         "output_committed": False,
     }
 
-    def _on_event(evt: dict) -> None:
+    def _on_event(evt: dict) -> bool | None:
         if evt.get("error") or evt.get("type") == "error":
             error = evt.get("error")
             if isinstance(error, dict):
@@ -182,6 +184,9 @@ def _chat_openai_stream(url, payload, headers, cfg, on_delta, *, post_sse) -> di
             state["output_committed"] = True
         choices = evt.get("choices") or []
         if not choices:
+            if state["terminal"] and evt.get("usage"):
+                state["usage_final"] = True
+                return True
             return
         ch = choices[0]
         delta = ch.get("delta") or {}
@@ -191,6 +196,8 @@ def _chat_openai_stream(url, payload, headers, cfg, on_delta, *, post_sse) -> di
             state["output_committed"] = True
             try:
                 on_delta(piece)
+            except LLMError:
+                raise
             except Exception:  # noqa: BLE001 — a UI callback must never kill the stream
                 pass
         rc = delta.get("reasoning_content") or delta.get("reasoning")
@@ -219,16 +226,28 @@ def _chat_openai_stream(url, payload, headers, cfg, on_delta, *, post_sse) -> di
             state["output_committed"] = True
             state["finish"] = ch["finish_reason"]
             state["terminal"] = True
+            if evt.get("usage"):
+                state["usage_final"] = True
+                return True
 
-    timeout = max(cfg.timeout_s, 60.0)
+    timeout = cfg.timeout_s
     try:
         post_sse(url, payload, headers, timeout, _on_event)
-    except TransportError as exc:
-        if not state["output_committed"] and streaming_refused(exc):
+    except LLMError as exc:
+        exc.usage = RawUsage(state["usage"], final=state["usage_final"])
+        if isinstance(exc, TransportError):
+            exc.output_committed |= bool(state["output_committed"])
+        if (
+            isinstance(exc, TransportError)
+            and not state["output_committed"]
+            and streaming_refused(exc)
+        ):
             raise _StreamStartError() from exc
         raise
     if not state["terminal"]:
-        raise LLMError("OpenAI stream ended before a terminal finish_reason")
+        error = LLMError("OpenAI stream ended before a terminal finish_reason")
+        error.usage = RawUsage(state["usage"], final=False)
+        raise error
     content = "".join(parts)
     calls: list[dict] = []
     openai_calls: list[dict] = []
@@ -263,7 +282,7 @@ def _chat_openai_stream(url, payload, headers, cfg, on_delta, *, post_sse) -> di
     return {
         "content": content,
         "reasoning": "".join(reasoning) or None,
-        "usage": state["usage"],
+        "usage": RawUsage(state["usage"], final=state["usage_final"]),
         "finish_reason": "tool_calls" if calls else provider_finish,
         "provider_finish_reason": provider_finish,
         "tool_calls": calls,

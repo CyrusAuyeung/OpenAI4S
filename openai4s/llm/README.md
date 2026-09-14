@@ -14,6 +14,7 @@ Capability metadata records what the OpenAI4S adapter supports today. It says no
 
 | File | Responsibility |
 | --- | --- |
+| [`usage.py`](usage.py) | Private raw usage evidence and strict metering counters, without changing the public JSON shape. |
 | [`__init__.py`](./__init__.py) | The package facade, and the reason the module-to-package split did not break anything. It re-exports configuration, capabilities, the registry, `LLMError`, and `chat`. `_post_json` and `_post_sse` stay module globals on purpose: replacing those two names is how the offline tests and other integrations intercept the wire. They forward a call context — which provider this is, and whether the user has since pressed stop — through `bind_call_context`, which binds only the keywords the target actually accepts, so the plain four-argument transports those integrations inject keep working instead of raising `TypeError` on a call that would have succeeded. |
 | [`capabilities.py`](./capabilities.py) | What each provider and model is declared to support. A provider baseline, a deployment override, and an exact-model override resolve into one cached record, and `validate_model_request` refuses a request for a feature the model was never declared to have instead of letting the wire fail on it. The same record maps a vendor's usage fields onto canonical token counts, and cost is estimated from those. Overrides are process-local; this module touches no files. |
 | [`catalog.py`](./catalog.py) | Model-profile presets, thread-safe and process-local. It knows nothing about wires. |

@@ -48,25 +48,17 @@ def _http_error(code, headers=None, body=b"{}"):
     )
 
 
-class _Resp:
+class _Resp(io.BytesIO):
     def __init__(self, body):
-        self.body = body
-
-    def read(self):
-        return self.body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
+        super().__init__(body)
+        self.headers = {}
 
 
 def test_a_transport_error_names_the_provider_it_came_from(monkeypatch):
     """Four wires are supported; an error that cannot say which one failed
     sends the operator to read logs the daemon deliberately does not keep."""
     monkeypatch.setattr(
-        "urllib.request.urlopen",
+        "openai4s.llm.transport._urlopen",
         lambda *a, **k: (_ for _ in ()).throw(_http_error(401)),
     )
     with pytest.raises(TransportError) as e:
@@ -83,7 +75,7 @@ def test_stop_interrupts_a_retry_backoff(monkeypatch):
         attempts.append(1)
         raise _http_error(503)
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     with pytest.raises(TransportError) as e:
         chat(
             [{"role": "user", "content": "hi"}],
@@ -103,7 +95,7 @@ def test_without_cancellation_the_same_call_retries(monkeypatch):
         attempts.append(1)
         raise _http_error(503)
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _s: None)
     with pytest.raises(TransportError):
         chat([{"role": "user", "content": "hi"}], _cfg())
@@ -126,7 +118,7 @@ def test_stream_transport_failure_has_one_bounded_budget_not_sse_plus_json(
         # A fresh object each time: HTTPError.read() consumes its body.
         raise _http_error(status)
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _s: None)
 
     with pytest.raises(TransportError):
@@ -164,7 +156,7 @@ def test_ark_burst_inside_http_200_sse_retries_in_the_same_bounded_budget(
             ]
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
 
     reply = chat(
@@ -207,7 +199,7 @@ def test_semantic_stream_state_vetoes_a_burst_retry(monkeypatch, semantic):
             ]
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     with pytest.raises(TransportError) as raised:
         chat(
@@ -243,7 +235,7 @@ def test_role_only_stream_event_does_not_veto_a_safe_burst_retry(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
 
     reply = chat(
@@ -273,7 +265,7 @@ def test_visible_content_before_burst_is_never_replayed(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
 
     with pytest.raises(TransportError) as raised:
@@ -300,7 +292,7 @@ def test_real_http_stream_compatibility_refusal_falls_back_to_json(monkeypatch):
             b'"finish_reason":"stop"}],"usage":{}}'
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
 
     reply = chat(
         [{"role": "user", "content": "hi"}],
@@ -319,7 +311,7 @@ def test_http_400_with_auth_code_does_not_hide_behind_stream_fallback(monkeypatc
         attempts.append(1)
         raise _http_error(400, body=b'{"error":{"code":"invalid_api_key"}}')
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
 
     with pytest.raises(TransportError) as raised:
         chat(
@@ -400,7 +392,7 @@ def test_only_structured_stream_refusal_allows_one_json_attempt(
             raise _http_error(status, body=json.dumps({"error": error}).encode())
         raise _http_error(503, {"x-request-id": "fallback-failed", "retry-after": "0"})
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _s: None)
     with pytest.raises(TransportError) as raised:
         chat(
@@ -431,7 +423,7 @@ def test_stream_and_fallback_share_the_three_send_budget(
             )
         raise _http_error(503, {"retry-after": "0"})
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     with pytest.raises(TransportError) as raised:
         chat(
             [{"role": "user", "content": "hi"}],
@@ -460,7 +452,7 @@ def test_cancel_between_stream_refusal_and_fallback_preserves_metadata(
             b'{"error":{"code":"streaming_not_supported"}}',
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     with pytest.raises(TransportError) as raised:
         chat(
             [{"role": "user", "content": "hi"}],
@@ -491,7 +483,7 @@ def test_uncertain_url_error_is_not_replayed(monkeypatch, reason):
         sends.append(True)
         raise urllib.error.URLError(reason)
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _s: None)
     with pytest.raises(TransportError):
         chat([{"role": "user", "content": "hi"}], _cfg(), on_delta=lambda _piece: None)
@@ -509,7 +501,7 @@ def test_separate_logical_calls_do_not_share_consumed_attempts(monkeypatch):
             b'{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     cfg = _cfg()
 
     def probe():
@@ -538,7 +530,7 @@ def test_shared_backoff_budget_survives_a_transport_boundary(monkeypatch):
             raise _http_error(503, {"retry-after": "1", "x-request-id": "budget"})
         raise _http_error(400, body=b'{"error":{"code":"streaming_not_supported"}}')
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     with pytest.raises(TransportError):
         transport.post_sse(
             "https://x.invalid",
@@ -650,7 +642,7 @@ def test_anthropic_semantic_events_cannot_be_replayed(monkeypatch, prefix):
             for line in (b"data: " + json.dumps(event).encode() + b"\n", b"\n")
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _: None)
     with pytest.raises(TransportError) as raised:
         chat(
@@ -696,7 +688,7 @@ def test_sse_error_keeps_response_metadata_through_cancellation(
         sleeps.append(seconds)
         cancelled.append(True)
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr(transport.time, "sleep", sleep)
     with pytest.raises(TransportError) as raised:
         chat(
@@ -733,7 +725,7 @@ def test_sse_error_then_http_stream_refusal_uses_remaining_compatibility_send(
             raise _http_error(400, body=b'{"error":{"code":"streaming_not_supported"}}')
         raise _http_error(503, {"x-request-id": "final-json"})
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("openai4s.llm.transport._urlopen", urlopen)
     monkeypatch.setattr("time.sleep", lambda _: None)
     with pytest.raises(TransportError) as raised:
         chat(

@@ -10,6 +10,7 @@ from ..messages import _anthropic_messages
 from ..models import LLMError, TransportError, status_is_retryable
 from ..tooling import _apply_anthropic_tools, _assistant_message, _normalized_tool_call
 from ..transport import bind_call_context, streaming_refused
+from ..usage import RawUsage
 
 _ANTHROPIC_VERSION = "2023-06-01"
 
@@ -104,6 +105,7 @@ def _chat_anthropic_stream(url, payload, headers, cfg, on_delta, *, post_sse) ->
         "usage": {},
         "finish": None,
         "terminal": False,
+        "usage_final": False,
         "output_committed": False,
     }
 
@@ -115,10 +117,12 @@ def _chat_anthropic_stream(url, payload, headers, cfg, on_delta, *, post_sse) ->
             return
         try:
             on_delta(piece)
+        except LLMError:
+            raise
         except Exception:  # noqa: BLE001 - a UI callback must not kill the stream
             pass
 
-    def _on_event(evt: dict) -> None:
+    def _on_event(evt: dict) -> bool | None:
         event_type = evt.get("type")
         if event_type == "error" or evt.get("error"):
             error = evt.get("error")
@@ -209,20 +213,33 @@ def _chat_anthropic_stream(url, payload, headers, cfg, on_delta, *, post_sse) ->
             if delta.get("stop_reason") is not None:
                 state["finish"] = delta["stop_reason"]
             state["usage"].update(evt.get("usage") or {})
+            state["usage_final"] = (
+                bool(evt.get("usage")) and delta.get("stop_reason") is not None
+            )
             return
         if event_type == "message_stop":
             state["output_committed"] = True
             state["terminal"] = True
+            return True
 
-    timeout = max(cfg.timeout_s, 60.0)
+    timeout = cfg.timeout_s
     try:
         post_sse(url, payload, headers, timeout, _on_event)
-    except TransportError as exc:
-        if not state["output_committed"] and streaming_refused(exc):
+    except LLMError as exc:
+        exc.usage = RawUsage(state["usage"], final=state["usage_final"])
+        if isinstance(exc, TransportError):
+            exc.output_committed |= bool(state["output_committed"])
+        if (
+            isinstance(exc, TransportError)
+            and not state["output_committed"]
+            and streaming_refused(exc)
+        ):
             raise _StreamStartError() from exc
         raise
     if not state["terminal"]:
-        raise LLMError("Anthropic stream ended before message_stop")
+        error = LLMError("Anthropic stream ended before message_stop")
+        error.usage = RawUsage(state["usage"], final=state["usage_final"])
+        raise error
 
     blocks: list[dict[str, Any]] = []
     # Arguments to normalize, per tool_use block, paired with that block's
@@ -278,7 +295,7 @@ def _chat_anthropic_stream(url, payload, headers, cfg, on_delta, *, post_sse) ->
     return {
         "content": text,
         "reasoning": None,
-        "usage": state["usage"],
+        "usage": RawUsage(state["usage"], final=state["usage_final"]),
         "finish_reason": "tool_calls" if calls else provider_finish,
         "provider_finish_reason": provider_finish,
         "tool_calls": calls,

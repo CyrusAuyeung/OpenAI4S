@@ -14,6 +14,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
+| [`usage.py`](usage.py) | 内部原始用量证据与严格计量，保持公开 JSON 字段形状。 |
 | [`__init__.py`](./__init__.py) | 包的 facade，也是当初从单模块拆成包却没弄坏任何调用方的原因。它对外导出配置、能力、registry、`LLMError` 和 `chat`。`_post_json` 和 `_post_sse` 是有意留在模块全局的：离线测试和其他集成正是替换这两个名字来拦截 wire 的。它们会把一份调用上下文——这次在跟哪个 provider 说话、用户是否已经按下停止——经 `bind_call_context` 往下传，而后者只绑定目标真正接受的关键字参数，所以那些集成注入进来的四参数 transport 依旧照常工作，而不是让一次本该成功的调用抛 `TypeError`。 |
 | [`capabilities.py`](./capabilities.py) | 每个 provider 和模型被声明支持什么。provider 基线、部署级 override 和精确到模型的 override 会解析成一条带缓存的记录；`validate_model_request` 会直接拒掉那些模型根本没声明过的能力请求，而不是把它送到 wire 上等着失败。同一条记录还负责把各家的 usage 字段映射成统一的 token 计数，成本也由此估算。override 只存在于当前进程，这个模块不碰任何文件。 |
 | [`catalog.py`](./catalog.py) | 模型 profile preset，线程安全，只存在于当前进程。它不关心底层是哪种 wire。 |

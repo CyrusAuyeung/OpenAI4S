@@ -7,14 +7,14 @@ before pushing `next`; the following item waits for that commit's CI.
 
 本记录跟踪本轮 T0–T9 顺序执行。原有 `TODO_zh.md` 与
 `next-version-progress.md` 的未提交修改保留在工作区，不纳入本轮提交。
-验证凭据只由进程环境提供，不进入代码、日志或 Git。
+验证凭据只由进程环境或继承管道提供，不进入交付代码、保留日志或 Git。
 
 | Stage / 阶段 | Status / 状态 | Evidence / 证据 |
 |---|---|---|
 | T0 Baseline / 基线 | Completed / 完成 | Locked Python 3.12 science + chemistry, frontend and three Playwright browsers installed; 90 LLM baseline tests passed. Baseline [CI 34819967908](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34819967908) succeeded at the starting SHA. |
 | T1 P0-01 Retry and compatibility / 重试与降级 | Completed / 完成 | Shared three-send state, one compatibility POST, structured stream refusal only, cancellation before sends, semantic replay veto. Initial regression run reproduced 11 failures. Independent review passed after five findings were fixed; 144 targeted tests passed. |
-| T2 P0-03 Editing / 编辑保护 | Local validation complete; CI pending / 本地验收通过，待 CI | Conditional writes, immutable editor baseline, bounded recoverable drafts and read-only reconciliation; backend, frontend and dist together. |
-| T3 P0-02 Resource bounds / 资源边界 | Not started / 未开始 | Total deadline, bounded input, backpressure and usage evidence. |
+| T2 P0-03 Editing / 编辑保护 | Completed / 完成 | Conditional writes, immutable editor baseline, bounded recoverable drafts and read-only reconciliation; backend, frontend and dist together. |
+| T3 P0-02 Resource bounds / 资源边界 | Local validation passed; CI pending / 本地验收通过，待 CI | Shared total deadline, bounded input, backpressure and original usage evidence; independent review passed. |
 | T4 P1-01 Files | Not started / 未开始 | Shared filtering and pagination. |
 | T5 P1-03 Navigation / 导航 | Not started / 未开始 | Navigation identity and request generations. |
 | T6 P1-02 Provenance and export / 溯源与导出 | Not started / 未开始 | Honest read states, validated responses and fixed version identity. |
@@ -34,6 +34,12 @@ not zero-filled estimates; missing usage is recorded as unknown.
 | T1 streaming text | `02178937694642171d94858e1bfbff6308a33b0bd3e33b8ea50f2` | `doubao-seed-2-1-turbo-260628` | 1.811 s | HTTP 200, stop; 3 deltas | prompt 53; completion 34 (reasoning 31); total 87; cached 0 |
 | T1 native tool | `021789376948232c5962d2ff0c11c118c6b5d934e5fbaa186dcb7` | `doubao-seed-2-1-turbo-260628` | 5.032 s | HTTP 200, tool_calls; echo_value(value=7) | prompt 406; completion 88 (reasoning 55); total 494; cached 0 |
 | T2 named-session artifact | `021789384515327427deff93a3e6360e32202b6d931cb308af2bf` | `doubao-seed-2-1-turbo-260628` | 6.816 s | HTTP 200, stop; one call; agent completed | prompt 15,648; completion 150 (reasoning 66); total 15,798; cached 2,360 |
+| T3 initial streaming probe | `021789389419432fb9ad9ccefd1cf94f2af1554e5d9f81220d9f6` | `doubao-seed-2-1-turbo-260628` | 90.003 s | HTTP 200, deadline; no completed usage | Unknown / 未知 |
+
+| T3 visible-delta Stop / 可见文本后停止 | `021789389644031a94a092d6e1517e56ac52cca715566be31a51a` | `doubao-seed-2-1-turbo-260628` | 4.092 s | HTTP 200, stop | prompt 57; completion 42 (reasoning 33); total 99; cached 0 |
+| T3 next-call recovery / 下一调用恢复 | `021789389648026bfe35b6525b6a24c7ddbea7b420bd558f419dd` | `doubao-seed-2-1-turbo-260628` | 4.572 s | HTTP 200, stop | prompt 51; completion 24 (reasoning 23); total 75; cached 0 |
+| T3 browser recovery tool 1 | `02178939012235529a69b00e37f9b7feeeb938de1ddf732b07129` | `doubao-seed-2-1-turbo-260628` | 6.164 s | HTTP 200, tool_calls | prompt 15,805; completion 84 (reasoning 26); total 15,889; cached 2,360 |
+| T3 browser recovery tool 2 | `0217893901286014ab1b857f955f8c19d0609a2b480a31ea5d9e7` | `doubao-seed-2-1-turbo-260628` | 4.939 s | HTTP 200, tool_calls | prompt 15,911; completion 79 (reasoning 19); total 15,990; cached 15,672 |
 
 The gateway returned a different model ID than requested; both are retained.
 端点返回的模型编号与请求模型不同，记录保留两者，不假定它们相同。
@@ -115,6 +121,91 @@ The gateway returned a different model ID than requested; both are retained.
   usage is not the total cost of T2. The corrected probe does not erase that
   limitation or the earlier record.
 
-T2 已完成实现、独立复核及本地完整验收；本次提交的远端 CI 尚待运行，不能据此
-宣称跨平台验收完成。保留首次测试失败和实测记录缺口，不把未知用量当成零。
+T2 已完成实现、独立复核、本地完整验收及远端 CI。提交
+`f558fc5225c7d45fc1c2ffba22b0a20d564a4ccc` 的 [CI 34837765300](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34837765300)
+全部 25 个适用门禁通过（另有 4 个非适用作业跳过），包括 Python 3.10/3.12/3.13/3.14、
+Linux、Docker、三浏览器及安装验证。Python 3.14 本轮运行 26 分 29 秒并通过；
+无取消或重跑。独立无依赖 wheel 安装 smoke 通过 13 个模块及 604 个 Skills。
+保留首次测试失败和实测记录缺口，不把未知用量当成零。
 后端、前端及 dist 配套提交，不修改数据库 schema、迁移、版本号或发布流程。
+
+
+## T3 validation / T3 验证
+
+- A logical model call shares its three-send budget and absolute deadline across
+  compatibility fallback, backoff, headers, body reads and cancellation drain.
+  The default total timeout is 600 seconds (finite 1–3600); idle timeouts retain
+  their meaning. The shared HTTP helper leaves its new idle option disabled for
+  existing callers. DNS that is still resolving retains its detached slot, and
+  returning after cancellation or expiry cannot open or send a new connection.
+- JSON, error bodies, SSE lines/events/total input and queued UTF-8 text have
+  enforced read-time bounds. Heartbeats count toward total input. Provider
+  terminal events close promptly; OpenAI finish reasons still permit trailing
+  usage. Oversized or incomplete tool arguments cannot become executable calls.
+- Raw usage evidence remains separate from the compatible eight-field public
+  projection. Missing, malformed or non-final counters are unknown; genuine
+  measured zero stays zero. Cancelled calls keep their original accounting
+  identity and detached capacity until accounting completes. Existing team
+  quota entry points and automatic mode preserve unknown reservations rather
+  than treating them as free calls. This item does not introduce new team quota
+  entry points for previously unwired capabilities or change the database schema.
+- Independent read-only implementation review found no remaining blockers after
+  fixes to cancellation accounting, provider-error usage, malformed cache
+  evidence, automatic-mode admission and late settlement branches. Targeted
+  regression batches passed 268 tests and a final 82-test review acceptance run;
+  strict mypy passed all eight configured source files. Full candidate pre-commit,
+  38 PR harness scenarios, directory coverage and source secret scan passed.
+- Real Ark short streaming requests confirm Stop after visible text, exactly one
+  late callback for the old call (99 tokens), and successful next-call recovery
+  (75 tokens). The initial 90-second probe reached HTTP 200 but no final usage;
+  its usage remains unknown and is excluded from known usage subtotals.
+- Chromium drove the real Stop control and then completed the same session via
+  two native tool calls. Their returned usage (31,879 total tokens) matches the
+  frame's 31,716 input + 163 output. The cancelled first browser call had no
+  recorded response and unknown usage: it proves neither zero sends nor a
+  cancellation after visible streaming. The separate short streaming test above
+  covers that boundary. The UI issued two user-message POSTs and one cancel POST,
+  reached done, and reported no uncaught page errors.
+- The first live test failure exposed the supplied credential in a local pytest
+  traceback through the configuration repr. That temporary log was immediately
+  scrubbed. LLMConfig now omits its API key from repr, a regression test covers
+  this, and subsequent live-test output is scrubbed before writing. No credential
+  entered a source file, fixture, commit or CI configuration; retained evidence
+  is checked before delivery.
+
+T3 的慢头、滴流、心跳、长行、背压和协议终态由本地可控服务验证；
+Ark 实测覆盖流式停止、旧调用回记和下一调用恢复。浏览器取消发生于
+可见文本之前，记录明确保留该边界；不把未知计量或失败验证写成成功。
+三浏览器矩阵 33/33 已通过，wheel/sdist 验证及独立无依赖安装 smoke
+（13 个模块、604 个 Skills）已通过。完整离线套件也已通过，提交 CI 待核验。
+
+
+The first full T3 run reported three failures. Two characterization assertions
+used an obsolete urllib monkeypatch and therefore injected zero attempts into
+the new deadline-aware transport. The fixture now uses the transport injection
+point and a finite, size-readable BytesIO response. Independent review confirmed
+the same two-attempt recovery and byte-identical existing golden; no golden or
+audit digest changed. The third failure was the unchanged first-cell 15-second
+kernel timeout also observed in T1/T2. All three passed together after the fixture
+fix (22.75 seconds; kernel test body 8.74 seconds), with the original timeout.
+The full suite passed after this correction; its earlier failure is retained.
+
+首轮完整测试的三处失败已如实保留：两处为旧 HTTP 夹具入口失效，
+修复后原 golden 逐字节一致；另一处为原有首次 Cell 超时，未放宽阈值。
+三项复测及随后完整套件均通过。
+
+
+Final local T3 verification: **8,957 passed, 26 skipped**, zero failures/errors,
+in 823.09 seconds. Response capture assembled all workers and checked **1,167
+route/status shapes**, **212/212 routes**, with no breaking drift. The recorded
+suite includes 209 kernel, 119 agent, 380 gateway, 81 MCP, 38 Doubao and 274 LLM
+cases with no failures. Full clean-candidate pre-commit and all 38 PR harness
+scenarios passed after the fixture correction. The final wheel/sdist is built
+from that candidate so the two original user document edits are excluded from
+both the commit and the distribution. Publishing, version changes, database
+migration and merging to main remain outside this work.
+
+最终本地验证通过：8,957 项通过、26 项跳过，耗时 823.09 秒；全部 worker 的
+响应捕获完整合并，1,167 种响应形状无破坏性变化，212 条路由全部覆盖。
+修复夹具后的全量 pre-commit 与 38 个 PR 场景均通过。
+最终分发包从干净候选构建，排除两份原有文档修改；远端 CI 通过后才进入 T4。
