@@ -21,6 +21,7 @@ from openai4s.agent.actions import NO_CODE_NUDGE, NO_NATIVE_COMPLETION_NUDGE
 from openai4s.agent.cell_record import DelegatedCellRecorder
 from openai4s.agent.delegation import _child_context_budget
 from openai4s.agent.engine import AgentEngine
+from openai4s.agent.events import ReplyReceived
 from openai4s.agent.finalize import with_finalize_response
 from openai4s.agent.ledger import RuntimeActionLedger, new_turn_id
 from openai4s.agent.models import KernelEnvSpec
@@ -200,6 +201,39 @@ class _LedgerTranscriptEventSink:
         self.transcript.emit(event)
 
 
+class _FrameUsageEventSink:
+    """Meter every delivered provider reply onto the frame this Agent opened.
+
+    The Web turn loop does the same through ``WebEventSink.add_usage``; the CLI
+    root Agent never did, so its frame kept NULL token columns while the
+    Action Ledger held the real numbers.
+    """
+
+    def __init__(self, inner: Any, record: Callable[[Mapping[str, Any]], None]):
+        self.inner = inner
+        self.record = record
+
+    def emit(self, event: Any) -> None:
+        if isinstance(event, ReplyReceived) and event.reply.usage:
+            self.record(event.reply.usage)
+        self.inner.emit(event)
+
+
+def _frame_status_for_stop_reason(stop_reason: object) -> str:
+    """The frame status vocabulary the Web gateway already writes.
+
+    Only ``submitted`` is a completion. ``cancelled`` keeps its own word, as a
+    cancelled Web turn does; ``max_turns``, ``no_progress`` and any reason this
+    table has never heard of are failures, so a new stop reason fails closed.
+    """
+
+    if stop_reason == "submitted":
+        return "done"
+    if stop_reason == "cancelled":
+        return "cancelled"
+    return "failed"
+
+
 def _completion_summary(completion: Any) -> str | None:
     """Project an EngineResult completion into the CLI's final-message slot."""
 
@@ -273,6 +307,10 @@ class Agent:
     _generation_recorder: KernelGenerationRecorder | None = field(
         default=None, init=False, repr=False
     )
+    # True only for a root Agent that opened its own turn frame. Nobody else
+    # closes that row: a delegated child's frame belongs to the DelegationRunner
+    # and an embedder's frame to the embedder, so neither is ever written here.
+    _owns_frame: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_turns is None:
@@ -291,6 +329,7 @@ class Agent:
                     kind="turn", model=self.cfg.llm.model, depth=self.delegate_depth
                 )
                 self.dispatcher.frame_id = self.frame_id
+                self._owns_frame = True
         # Durable generation registration defaults to the dispatcher's store:
         # the CLI root and every delegated child then record real kernel
         # generations under their own frame with no extra wiring.
@@ -540,6 +579,57 @@ class Agent:
 
     def run(self, task: str) -> dict:
         """Run one task through the shared engine and local runtime adapters."""
+        if not self._owns_frame:
+            return self._run_task(task)
+        # This Agent opened its turn frame, so it is the only writer that can
+        # close it. Reopened first: a reused Agent must not report the last
+        # run's terminal while this one is still going.
+        self._persist_frame_status("processing")
+        try:
+            result = self._run_task(task)
+        except KeyboardInterrupt:
+            # Ctrl-C is the CLI user's Stop; a Web Stop records "cancelled" too.
+            self._persist_frame_status("cancelled")
+            raise
+        except BaseException:
+            self._persist_frame_status("failed")
+            raise
+        self._persist_frame_status(
+            _frame_status_for_stop_reason(result.get("stop_reason"))
+        )
+        return result
+
+    def _persist_frame_status(self, status: str) -> None:
+        store = getattr(self.dispatcher, "store", None)
+        if store is None or not self.frame_id:
+            return
+        try:
+            store.update_frame(str(self.frame_id), status=status)
+        except Exception:  # noqa: BLE001 - a status write cannot break the run
+            pass
+
+    def _record_frame_usage(self, usage: Mapping[str, Any]) -> None:
+        """Add one reply's usage to the owned frame, as the Web loop does."""
+
+        if not self._owns_frame or not self.frame_id:
+            return
+        store = getattr(self.dispatcher, "store", None)
+        if store is None:
+            return
+        try:
+            store.add_frame_tokens(
+                str(self.frame_id),
+                input_tokens=int(
+                    usage.get("prompt_tokens") or usage.get("input_tokens", 0) or 0
+                ),
+                output_tokens=int(
+                    usage.get("completion_tokens") or usage.get("output_tokens", 0) or 0
+                ),
+            )
+        except Exception:  # noqa: BLE001 - metering cannot break the run
+            pass
+
+    def _run_task(self, task: str) -> dict:
         assert self.dispatcher is not None
         assert self.max_turns is not None
         # An Agent can be reused.  A previous submission must never make the
@@ -646,6 +736,10 @@ class Agent:
                     if action_ledger is not None
                     else transcript_events
                 )
+                if self._owns_frame:
+                    event_sink = _FrameUsageEventSink(
+                        event_sink, self._record_frame_usage
+                    )
 
                 def _account_abandoned_reply(reply: Mapping[str, Any]) -> None:
                     """Meter a reply that landed after this run was cancelled.
@@ -657,11 +751,14 @@ class Agent:
                     close, left open on every non-Web path.
                     """
 
+                    usage = reply.get("usage")
+                    if not isinstance(usage, Mapping) or not usage:
+                        return
+                    # Billed like a delivered reply, as the Web loop bills it.
+                    self._record_frame_usage(usage)
                     if action_ledger is None:
                         return
-                    usage = reply.get("usage")
-                    if isinstance(usage, Mapping) and usage:
-                        action_ledger.record_abandoned_usage(usage)
+                    action_ledger.record_abandoned_usage(usage)
 
                 model: Any = ChatModel(
                     self.cfg.llm,
