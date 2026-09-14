@@ -8,8 +8,9 @@ name: Publish release
 # non-draft creation does emit it, and then the draft conditions skipped
 # attachment and publication. The pipeline was unreachable by construction.
 #
-# The entry point is now explicit: a maintainer creates the draft release (or
-# lets the tag push create it), then runs this workflow against that tag. With
+# The entry point is now explicit: a maintainer creates the draft release
+# (`gh release create vX.Y.Z --draft --verify-tag`; a tag push creates nothing),
+# then runs this workflow against that tag. With
 # `publish` unset it is a dry run — everything is built and verified, nothing
 # leaves. With `publish` set the run must name an existing *draft*, which the
 # guard job proves before anything else starts.
