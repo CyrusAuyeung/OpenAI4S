@@ -580,6 +580,15 @@ def test_save_artifact_host_call_carries_canonical_and_declared_cell_ids():
     ]
 
 
+def _require_matplotlib_in_the_kernel() -> None:
+    # `find_spec`, not `importorskip`: importing matplotlib into the test
+    # process is exactly the cost these tests are about, and not theirs to pay.
+    import importlib.util
+
+    if importlib.util.find_spec("matplotlib") is None:
+        pytest.skip("matplotlib is not installed")
+
+
 _MATPLOTLIB_MODULES = (
     "matplotlib",
     "matplotlib.figure",
@@ -604,7 +613,7 @@ def test_a_cell_that_never_plots_never_loads_matplotlib(
     read its figure numbers, and provenance imported `matplotlib.figure` to
     wrap `savefig`. Each parameter isolates one of them."""
 
-    pytest.importorskip("matplotlib")
+    _require_matplotlib_in_the_kernel()
     if guards_off:
         monkeypatch.setenv("OPENAI4S_GUARDS_OFF", "1")
     else:
@@ -652,7 +661,7 @@ def test_figure_savefig_lineage_survives_a_matplotlib_imported_after_install(
     only between Cells would miss the commonest plotting Cell there is --
     import, plot and save in one go -- so both orders must report the edge."""
 
-    pytest.importorskip("matplotlib")
+    _require_matplotlib_in_the_kernel()
     records: list[dict] = []
     importing = (
         "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
