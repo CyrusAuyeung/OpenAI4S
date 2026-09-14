@@ -14,8 +14,11 @@ import importlib.util
 import json
 import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -53,7 +56,7 @@ def _isolated_font_cache_state(tmp_path, monkeypatch):
     font_cache._failed_at.clear()
 
 
-def _fontlist(version: str = "3.11.0", **extra) -> str:
+def _fontlist(version: object = "3.11.0", **extra) -> str:
     return json.dumps(
         {
             "__class__": "FontManager",
@@ -205,6 +208,10 @@ def test_a_font_list_a_kernel_wrote_never_reaches_another_kernel(tmp_path):
         {"name": "fontlist-v3.11.0.json", "content": "{not json"},
         {"name": "fontlist-v3.11.0.json", "content": _fontlist(pad="x" * 4096)},
         {"error": "ModuleNotFoundError"},
+        {"name": "fontlist-v390.json", "content": _fontlist(391)},
+        # Neither spelling matplotlib has used: its version is a str (3.11+)
+        # or an int (up to 3.10), never a float that happens to format alike.
+        {"name": "fontlist-v390.0.json", "content": _fontlist(390.0)},
     ],
     ids=[
         "path",
@@ -213,6 +220,8 @@ def test_a_font_list_a_kernel_wrote_never_reaches_another_kernel(tmp_path):
         "not-json",
         "oversize",
         "error",
+        "integer-version-mismatch",
+        "float-version",
     ],
 )
 def test_builder_output_that_is_not_a_font_list_is_not_stored(
@@ -227,6 +236,42 @@ def test_builder_output_that_is_not_a_font_list_is_not_stored(
         is None
     )
     assert not (data_dir / "cache").exists()
+
+
+def test_a_matplotlib_before_3_11_list_is_stored_as_written_and_seeded(tmp_path):
+    """matplotlib up to 3.10 versions its font list with an int.
+
+    ``FontManager.__version__ = 390`` there, so the list is
+    ``fontlist-v390.json`` carrying ``"_version": 390``. Refusing it left the
+    py3.10 floor (and any environment still on 3.10) scanning in every
+    enforced kernel, with a doomed rebuild every ``RETRY_FAILED_BUILD_AFTER_S``.
+    It is stored byte for byte: matplotlib 3.10 loads a list only when
+    ``_version == 390``, so a copy re-serialised with a string version would be
+    ignored inside the kernel.
+    """
+
+    data_dir = tmp_path / "data"
+    content = _fontlist(390)
+    built = font_cache.build_font_cache(
+        INTERPRETER,
+        data_dir=data_dir,
+        runner=_builder_runner({"name": "fontlist-v390.json", "content": content}),
+    )
+    assert built is not None and built.name == "fontlist-v390.json"
+    assert built.read_text(encoding="utf-8") == content
+    manifest = json.loads((built.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["fontlist"] == "fontlist-v390.json"
+
+    sandbox = _enforced_sandbox(tmp_path)
+    try:
+        assert font_cache.seed_kernel_font_cache(
+            sandbox, interpreter=INTERPRETER, data_dir=data_dir
+        )
+        seeded = _kernel_mplconfigdir(sandbox) / "fontlist-v390.json"
+        assert seeded.read_text(encoding="utf-8") == content
+        assert json.loads(content)["_version"] == 390
+    finally:
+        sandbox.close()
 
 
 @pytest.mark.parametrize(
@@ -437,6 +482,234 @@ def test_a_failed_build_is_not_retried_on_every_spawn(tmp_path):
     assert len(calls) == 1
 
 
+#: A child that leaves its parent's process group, as macOS `system_profiler`'s
+#: scan helper does, then writes its pid to the file named by its argument.
+_ESCAPED_CHILD = (
+    "import os, sys, time; os.setpgid(0, 0); "
+    "handle = open(sys.argv[1] + '.tmp', 'w'); handle.write(str(os.getpid())); "
+    "handle.close(); os.replace(sys.argv[1] + '.tmp', sys.argv[1]); time.sleep(120)"
+)
+
+
+def _slow_builder_interpreter(root: Path, report: Path) -> Path:
+    """An interpreter whose font scan outlasts any daemon that starts it.
+
+    It runs the real builder program on this Python, against a stand-in
+    matplotlib whose font manager starts a scan child the way macOS
+    `system_profiler` does -- in a process group of its own, holding the
+    builder's stdout and stderr -- reports both pids and the builder's private
+    cache directory, and then sleeps where the real one would still be walking
+    fonts.
+    """
+
+    site = root / "site"
+    (site / "matplotlib").mkdir(parents=True)
+    (site / "matplotlib" / "__init__.py").write_text(
+        "import os\n" "def get_cachedir():\n" "    return os.environ['MPLCONFIGDIR']\n",
+        encoding="utf-8",
+    )
+    (site / "matplotlib" / "font_manager.py").write_text(
+        "import json, os, subprocess, sys, time\n"
+        f"report = {str(report)!r}\n"
+        f"scan = subprocess.Popen([sys.executable, '-c', {_ESCAPED_CHILD!r},"
+        " report + '.scan'])\n"
+        "while not os.path.exists(report + '.scan'):\n"
+        "    time.sleep(0.01)\n"
+        "state = {'pid': os.getpid(), 'child': scan.pid,"
+        " 'cache': os.environ['MPLCONFIGDIR']}\n"
+        "with open(report + '.tmp', 'w', encoding='utf-8') as handle:\n"
+        "    json.dump(state, handle)\n"
+        "os.replace(report + '.tmp', report)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    interpreter = root / "env" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        f'PYTHONPATH={shlex.quote(str(site))} exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.fixture
+def _probe_temp(tmp_path, monkeypatch):
+    """Unconfined probes whose temp directories land where the test can look.
+
+    The sandbox is off so the lifecycle is the same on a Linux runner without
+    bubblewrap as on a Mac; an enforced sandbox only changes where the builder's
+    own temp lives, not who stops it.
+    """
+
+    if not hasattr(os, "killpg"):
+        pytest.skip("needs POSIX process groups")
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setenv("OPENAI4S_KERNEL_SANDBOX", "off")
+    monkeypatch.setenv("TMPDIR", str(temp))
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    return temp
+
+
+class _StoppingDaemon:
+    """``run_server``'s httpd: a kernel spawn starts a build, then a stop arrives."""
+
+    def __init__(self, interpreter: Path, data_dir: Path, ready) -> None:
+        self.interpreter = interpreter
+        self.data_dir = data_dir
+        self.ready = ready
+        self.builds: list = []
+        self.stop_requested_at: float | None = None
+
+    def serve_forever(self) -> None:
+        # A sandboxed kernel spawn finds no font list (seed_kernel_font_cache)...
+        self.builds.append(
+            font_cache.request_build(str(self.interpreter), data_dir=self.data_dir)
+        )
+        assert self.ready(), "the build never reached the point under test"
+        # ...and `openai4s stop`'s SIGTERM arrives as KeyboardInterrupt.
+        self.stop_requested_at = time.monotonic()
+        raise KeyboardInterrupt
+
+    def shutdown(self) -> None:
+        pass
+
+    def server_close(self) -> None:
+        pass
+
+
+def _kill_leftover_builder(report: Path) -> None:
+    """Teardown after a failure: the builder the test started is still alive."""
+
+    if not report.exists():
+        return
+    state = json.loads(report.read_text(encoding="utf-8"))
+    for pid in (state["pid"], state["child"]):
+        if _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def _wait_for(predicate, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return predicate()
+        time.sleep(0.02)
+    return True
+
+
+def test_stopping_the_daemon_stops_its_font_list_build(tmp_path, _probe_temp):
+    """`openai4s stop` must not leave the daemon's font scan running.
+
+    A build is a confined child in its own session, waited on from a daemon
+    thread. The daemon exiting froze that thread mid-wait: the builder ran on,
+    re-parented to PID 1, for the rest of its scan (up to ``BUILD_TIMEOUT_S``),
+    its result discarded and its probe workspace never removed, after `stop`
+    had reported the daemon stopped. Driven through the real ``run_server``
+    teardown and the real confined probe.
+    """
+
+    from openai4s.server import gateway
+
+    report = tmp_path / "builder.json"
+    interpreter = _slow_builder_interpreter(tmp_path / "slow", report)
+    data_dir = tmp_path / "data"
+    daemon = _StoppingDaemon(
+        interpreter, data_dir, lambda: _wait_for(report.exists, 60)
+    )
+    passed = False
+    try:
+        gateway.run_server(daemon)
+        # Nothing may be left for after `run_server`: the daemon process exits
+        # there, and a thread still waiting on its builder dies with it.
+        returned_at = time.monotonic()
+        build = daemon.builds[0]
+        assert build is not None
+        builder = json.loads(report.read_text(encoding="utf-8"))
+        assert not build.is_alive(), "the font-list builder outlived the daemon"
+        # Stopped, not waited out: the stand-in scan had two minutes to go.
+        assert returned_at - daemon.stop_requested_at < 10
+        # Everything it started, not only the interpreter: a scan child that
+        # left its process group and held the builder's pipes too.
+        assert _wait_for(lambda: not _pid_alive(builder["child"]), 5)
+        assert not _pid_alive(builder["pid"])
+        assert not Path(builder["cache"]).exists()
+        assert sorted(path.name for path in _probe_temp.iterdir()) == []
+        assert not (data_dir / "cache").exists()
+        passed = True
+    finally:
+        if not passed:
+            _kill_leftover_builder(report)
+        for thread in daemon.builds:
+            if thread is not None:
+                thread.join(10)
+
+
+def test_a_build_that_had_not_spawned_when_the_daemon_stopped_never_scans(
+    tmp_path, _probe_temp, monkeypatch
+):
+    """A build between its request and its spawn when shutdown begins.
+
+    The window is real: the directory fingerprint and the sandbox self-test run
+    first. Stopping only the builders already running would let this one start
+    its scan after the daemon's teardown had finished.
+    """
+
+    from openai4s.server import gateway
+
+    monkeypatch.setattr(font_cache, "SHUTDOWN_TIMEOUT_S", 0.2, raising=False)
+    entered = threading.Event()
+    release = threading.Event()
+    fingerprint = font_cache.font_directory_fingerprint
+
+    def held_fingerprint(*args, **kwargs):
+        entered.set()
+        release.wait(60)
+        return fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(font_cache, "font_directory_fingerprint", held_fingerprint)
+    report = tmp_path / "builder.json"
+    interpreter = _slow_builder_interpreter(tmp_path / "slow", report)
+    daemon = _StoppingDaemon(interpreter, tmp_path / "data", lambda: entered.wait(60))
+    passed = False
+    try:
+        gateway.run_server(daemon)
+        build = daemon.builds[0]
+        assert build is not None
+        # The build reaches its spawn only after the daemon's teardown returned.
+        release.set()
+        build.join(10)
+        assert not build.is_alive(), "a build spawned after shutdown ran its scan"
+        if report.exists():
+            state = json.loads(report.read_text(encoding="utf-8"))
+            assert _wait_for(lambda: not _pid_alive(state["child"]), 5)
+            assert not _pid_alive(state["pid"])
+        assert sorted(path.name for path in _probe_temp.iterdir()) == []
+        passed = True
+    finally:
+        release.set()
+        if not passed:
+            _kill_leftover_builder(report)
+        for thread in daemon.builds:
+            if thread is not None:
+                thread.join(10)
+
+
 def _fake_matplotlib(root: Path) -> Path:
     package = root / "matplotlib"
     package.mkdir(parents=True)
@@ -515,7 +788,7 @@ def _shadowing_directory(root: Path) -> Path:
         }
     )
     hijack = f"print({forged!r}, flush=True)\nimport os\nos._exit(0)\n"
-    for name in ("json", "shutil", "tempfile"):
+    for name in ("json", "shutil", "signal", "tempfile"):
         (root / f"{name}.py").write_text(hijack, encoding="utf-8")
     (root / "matplotlib").mkdir()
     (root / "matplotlib" / "__init__.py").write_text(hijack, encoding="utf-8")
@@ -605,17 +878,45 @@ def _font_manager_source() -> Path:
     return Path(list(spec.submodule_search_locations)[0]) / "font_manager.py"
 
 
-def _font_manager_version() -> str | None:
-    spec = importlib.util.find_spec("matplotlib")
-    if spec is None or not spec.submodule_search_locations:
-        return None
-    source = _font_manager_source()
+def _parse_font_manager_version(source: str) -> int | str | None:
+    """``FontManager.__version__`` as matplotlib's own source spells it.
+
+    An int up to 3.10 (``__version__ = 390``), a string from 3.11 on. Typed as
+    written: the list's ``_version`` must compare equal to it inside the kernel.
+    """
+
     match = re.search(
-        r"^\s+__version__\s*=\s*['\"]([^'\"]+)['\"]",
-        source.read_text(encoding="utf-8"),
+        r"^\s+__version__\s*=\s*(\d+|'[^']+'|\"[^\"]+\")\s*(?:#.*)?$",
+        source,
         re.MULTILINE,
     )
-    return match.group(1) if match else None
+    if match is None:
+        return None
+    literal = match.group(1)
+    return int(literal) if literal.isdigit() else literal[1:-1]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("    __version__ = 390\n", 390),
+        ("    __version__ = '3.11.0'\n", "3.11.0"),
+        ('    __version__ = "3.12.0"  # a comment\n', "3.12.0"),
+        ("    __version__ = _version.version\n", None),
+    ],
+    ids=["int-before-3.11", "str-3.11", "double-quoted", "not-a-literal"],
+)
+def test_the_end_to_end_test_reads_every_font_manager_version_spelling(line, expected):
+    """A version it cannot read makes the end-to-end test skip, not fail.
+
+    It only understood the quoted 3.11 form, so on matplotlib 3.10 -- the
+    py3.10 floor -- it skipped as "matplotlib is not installed" and the CI leg
+    where seeding did nothing stayed green.
+    """
+
+    source = f"class FontManager:\n{line}    def __init__(self):\n        pass\n"
+    parsed = _parse_font_manager_version(source)
+    assert parsed == expected and type(parsed) is type(expected)
 
 
 def test_a_sandboxed_kernel_uses_the_seeded_list_instead_of_scanning(
@@ -629,9 +930,13 @@ def test_a_sandboxed_kernel_uses_the_seeded_list_instead_of_scanning(
     unconfined kernel keeps the shared runtime cache instead.
     """
 
-    version = _font_manager_version()
-    if version is None:
+    spec = importlib.util.find_spec("matplotlib")
+    if spec is None or not spec.submodule_search_locations:
         pytest.skip("matplotlib is not installed")
+    source = _font_manager_source()
+    version = _parse_font_manager_version(source.read_text(encoding="utf-8"))
+    if version is None:
+        pytest.skip(f"cannot read FontManager.__version__ from {source}")
     data_dir = Path(os.environ["OPENAI4S_DATA_DIR"])
     payload = {
         "name": f"fontlist-v{version}.json",

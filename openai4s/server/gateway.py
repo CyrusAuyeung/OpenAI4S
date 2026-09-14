@@ -20212,8 +20212,19 @@ def run_server(httpd: ThreadingHTTPServer) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        httpd.shutdown()
-        httpd.server_close()
+        try:
+            # A font-list build enabled above is a confined child in its own
+            # session: this process exiting does not stop it, and it ran on
+            # after `openai4s stop` had reported success. Killed, not waited
+            # out, and first, so no kernel spawn during teardown starts one.
+            from openai4s.kernel.font_cache import shutdown_background_builds
+
+            shutdown_background_builds()
+        except Exception:  # noqa: BLE001 - teardown continues regardless
+            pass
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 def serve_app(cfg: Config | None = None, *, block: bool = True) -> ThreadingHTTPServer:
