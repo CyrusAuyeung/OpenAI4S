@@ -20,7 +20,7 @@ CLI 只负责组合，不负责编排。`openai4s run` 用 [`../agent/`](../agen
 ## 运维契约
 
 - `run` 在进程内跑完，动作路由与完成判定用的是与本地 Agent facade 相同的一套 Engine 规则。`run --auto` 是 Auto Mode：越界动作交给 Guardian 处理而不是直接失败关闭，结果也要先经过复核，run 才报告终态 —— CI 得能分清「跑完且验证过」和「跑完但没人检查」。这不是完全放权；Guardian 真正生效的面是一份只读允许名单，且绑定在经过校验的动作摘要上。
-- `serve` 的绑定地址必须始终取自 `Config`，默认也必须留在 loopback 上，不要写死。要把 daemon 暴露到本机之外，应该交给可信的反向代理或 SSH tunnel。access token 现在是默认必需的，loopback 上同样如此：Gateway 会把它写进数据目录下一个仅属主可读的文件，跨重启复用，并要求除 `/health` 和 `/api/v1/auth/status` 之外的每条路径都带上它 —— 一个客户端总不能靠一份它无权读取的响应来得知自己需要 token。`OPENAI4S_REQUIRE_TOKEN=0` 仍可关掉这道门，但仅限 loopback 绑定，且只到 Gateway 里写明的那个移除版本为止。这个 token 只是最后一道薄薄的防线，不能把它当成可以放心暴露端口的理由。
+- `serve` 的绑定地址必须始终取自 `Config`，默认也必须留在 loopback 上，不要写死。要把 daemon 暴露到本机之外，应该交给可信的反向代理或 SSH tunnel。access token 现在是默认必需的，loopback 上同样如此：Gateway 会把它写进数据目录下一个仅属主可读的文件，跨重启复用，并要求除 `/health` 和 `/api/v1/auth/status` 之外的每条路径都带上它 —— 一个客户端总不能靠一份它无权读取的响应来得知自己需要 token。这道门没有豁免：`OPENAI4S_REQUIRE_TOKEN=0` 只在 loopback 上被承认了恰好一个 minor release（D1），自 0.3.0 起被忽略，因此 daemon 启动过后 token 文件总是存在。这个 token 只是最后一道薄薄的防线，不能把它当成可以放心暴露端口的理由。
 - 正因为这道门开着，`serve`、`status`、`url` 打印给人看的 URL 会带上 `?token=…`，否则 SPA 在能给出任何入口之前就先收到 401。凡是不交到人手上的用法，取的都是同一个 URL 的不带 token 版本：凭据不该出现在日志行或窗口标题里。
 - 与 daemon 通信的子命令则把 token 放在 header 里，因为 daemon 对写操作本就拒收 query token。它读那个仅属主可读的 token 文件，daemon 跑在别的账号下时则读 `OPENAI4S_TOKEN`。请求路径由 `contract.API_ROOT` 拼出来，调用方自带前缀会直接报错而不是给出一个 404 —— 把 `/api/` 写死，正是当初每个 `share` 子命令都只收到 daemon 那句「API 是带版本的」404、而没有任何一个真正走到路由的原因。
 - `serve` 先绑定端口，再打印横幅，这样端口冲突表现为一次失败的启动，而不是「启动成功之后的崩溃」。`stop` 只宣称它验证过的事：它轮询等待进程真正退出，daemon 还在收尾时以退出码 2 报错、pidfile 原样留下 —— 过早清掉状态文件，正是当初一个还活着、还占着端口的 daemon 被 `status` 判成「没在跑」、又被下一个 `serve` 一头撞上的原因；`stop --force` 在同样的轮询之后升级为 SIGKILL。

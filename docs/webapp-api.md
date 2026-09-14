@@ -253,13 +253,12 @@ contract.
   survives restarts; it used to be per-boot, which invalidated every cookie
   already issued. The CLI reads the same file, or `OPENAI4S_TOKEN` when the
   daemon runs under another account.
-- `OPENAI4S_REQUIRE_TOKEN=0` disables the gate **on loopback only**, until the
-  version named by `gateway.LEGACY_TOKEN_OPT_OUT_REMOVED_IN`. It is the same variable that used to opt *in*, with its sense
-  reversed. Off loopback it is ignored: a bind anything can route to has no
-  configuration under which it should answer without a credential.
+- The gate cannot be disabled. `OPENAI4S_REQUIRE_TOKEN=0` disabled it on
+  loopback for exactly one minor release (decision D1, v0.2.x); from 0.3.0 the
+  variable is ignored on every bind, as it always was off loopback.
 - `GET /api/v1/auth/status` is reachable unauthenticated so a client can
   discover it needs a credential, and answers
-  `{authenticated, auth_mode: "token"|"none", token_header}` — a mode string
+  `{authenticated, auth_mode: "token", token_header}` — a mode string
   only, never any part of the token. It previously reported `"none"`
   unconditionally, so a daemon running with the gate on told every caller there
   was no gate.
@@ -333,8 +332,8 @@ success response body. Serializer shapes are in §4.
 | Method & path | Behavior |
 | --- | --- |
 | `GET /health` (not under `/api`) | Minimal public projection `{"status":"ok","model"}`. Exempt from the token gate and deliberately omits host filesystem paths. |
-| `GET /me` | Hardcoded local identity: `{"user_id":"local-dev","email":null,"provider","has_api_key","shared_api_key":false,"auth_mode":"none"}`. |
-| `GET /auth/status` | `{"authenticated":true,"auth_mode":"none"}` (always). |
+| `GET /me` | Hardcoded local identity: `{"user_id":"local-dev","email":null,"provider","has_api_key","shared_api_key":false,"auth_mode":"token"}`. |
+| `GET /auth/status` | Unauthenticated: `{"authenticated","auth_mode":"token","token_header"}` — whether this request carried a valid credential, never any part of the token (see the auth section above). |
 | `POST /auth/login` · `POST /auth/logout` · `GET /auth/me` | Team mode (M1). HttpOnly `SameSite=Lax` cookie; only the token's sha256 is stored. Login is rate-limited per username+IP and the bucket is charged *before* the password hash, so the limit also bounds the hashing an attacker can provoke. Wrong password, unknown user and disabled account are one sentence — the difference is the attacker's question. |
 | `GET /auth/me/llm-key` | Whether this user has a key of their own, per provider: `{keys: [{provider, configured, created_at, updated_at}]}`. Never the value — a credential a screen can display is one a screenshot leaks — and never the reference either, which names a keychain slot. |
 | `PUT /auth/me/llm-key` | Body `{provider, api_key}` (M4-1, decision D7's second half). The key goes to the `SecretBroker`; the database keeps only a reference. A broker that cannot store it answers `503 secret_store` and **writes no row**: a row pointing at a slot that was never filled would make the next turn refuse with "configured but unreadable" for a key that was never accepted. The override is per provider, so a user with their own Anthropic account and no OpenAI key runs on theirs for one and the group's for the other. |

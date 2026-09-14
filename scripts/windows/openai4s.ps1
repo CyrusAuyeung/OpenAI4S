@@ -677,10 +677,9 @@ function Get-AppUrl([string] $Distro, [string] $BootstrapLinux, [string] $Bundle
     }
     if ([string]::IsNullOrWhiteSpace($parsed.Query)) {
         # `openai4s url` returns the URL a person can open. No query means the
-        # daemon's sign-in gate was explicitly turned off (OPENAI4S_REQUIRE_TOKEN
-        # set to 0, where the bare URL works) or its credential file could not
-        # be read. Opening it is still the right next step, so warn instead of
-        # refusing.
+        # daemon's credential file could not be read (the sign-in gate itself
+        # cannot be turned off since 0.3.0). Opening it is still the right next
+        # step, so warn instead of refusing.
         Write-Host '  note: the URL carries no sign-in token. If the browser shows 401,' -ForegroundColor Yellow
         Write-Host "  read the daemon log: $(Get-WslLogCommand $Distro)" -ForegroundColor Yellow
     }
