@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from openai4s.kernel.environment import build_kernel_environment
 from openai4s.kernel.errors import KernelBusyError, KernelInterruptUnavailable
+from openai4s.kernel.font_cache import seed_kernel_font_cache
 from openai4s.kernel.sink_drain import CAP_BYTES as _SINK_CAP
 from openai4s.kernel.sink_drain import SinkCapture, SinkDirectory
 from openai4s.kernel.transport import KernelTransport, PipeTransport
@@ -314,6 +315,12 @@ class Kernel:
         if capture_sinks:
             self._sinks = SinkDirectory(self._sandbox.status.temp_dir)
         try:
+            if self.transport_factory is None and self.argv is None:
+                # Once per sandbox, before its first worker: an enforced
+                # sandbox starts matplotlib with an empty private cache, so
+                # copy in the font list the host built -- never one a kernel
+                # wrote. Best effort; a miss only costs the old font scan.
+                seed_kernel_font_cache(self._sandbox, interpreter=self.python)
             self._proc = self._spawn()
         except Exception:
             if self._sinks is not None:

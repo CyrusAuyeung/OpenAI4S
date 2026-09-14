@@ -19865,6 +19865,15 @@ def run_server(httpd: ThreadingHTTPServer) -> None:
     returned, and stops a loop another thread may be running.
     """
     try:
+        # Only the serving daemon builds matplotlib font lists for sandboxed
+        # kernels; a CLI one-shot or a test would abandon the scan at exit.
+        from openai4s.kernel.font_cache import enable_background_builds
+
+        runner_cfg = getattr(getattr(httpd, "runner", None), "cfg", None)
+        enable_background_builds(getattr(runner_cfg, "data_dir", None))
+    except Exception:  # noqa: BLE001 - an optimisation must not stop serving
+        pass
+    try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
