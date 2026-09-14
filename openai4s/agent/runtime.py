@@ -1027,18 +1027,18 @@ class LocalActionExecutor:
     def _execute_native(
         self, batch: NativeToolBatch, state: RunState
     ) -> ExecutionOutcome:
-        # Evidence counts dispatched calls, not declared ones: the batch
-        # answers parse/validation/limit refusals without invoking anything,
-        # and an unknown tool name reaches invoke but is refused before the
-        # dispatcher — none executed work. Count only calls that actually reach
-        # the dispatcher, so a refused/hallucinated call cannot back a later
-        # execution-shaped finalize claim. list.append is atomic under the GIL,
-        # so parallel read waves count safely.
-        invoked: list[Any] = []
+        # Evidence counts executed calls, not declared or merely dispatched
+        # ones: the batch answers parse/validation/limit refusals without
+        # invoking anything, an unknown tool name is refused before the
+        # dispatcher, and a static precheck, the dispatcher's permission gate,
+        # a soft-fail result or a raised dispatch all end without the work a
+        # later bullet may claim. Count a call only once its dispatch reports
+        # ok, so none of those can back an execution-shaped finalize claim.
+        # list.append is atomic under the GIL, so parallel read waves count
+        # safely.
+        executed: list[Any] = []
 
-        def invoke(call):
-            if call_reaches_dispatcher(call.name, self.tool_catalog, call.arguments):
-                invoked.append(call)
+        def dispatch(call):
             payload = {"name": call.name, "arguments": call.arguments}
             binder = getattr(self.dispatcher, "bind_action_context", None)
 
@@ -1110,6 +1110,14 @@ class LocalActionExecutor:
             ):
                 return execute_with_capture()
 
+        def invoke(call):
+            result = dispatch(call)
+            if result[1] is True and call_reaches_dispatcher(
+                call.name, self.tool_catalog, call.arguments
+            ):
+                executed.append(call)
+            return result
+
         metadata_resolver = getattr(
             self.dispatcher, "control_tool_execution_metadata", None
         )
@@ -1139,8 +1147,8 @@ class LocalActionExecutor:
                     ),
                 ),
             )
-        if invoked:
-            note_execution_evidence(state.metadata, tool_calls=len(invoked))
+        if executed:
+            note_execution_evidence(state.metadata, tool_calls=len(executed))
         return outcome
 
     def _execute_code(
@@ -1345,31 +1353,36 @@ class LocalActionExecutor:
         else:
             calls, errors = parse_tool_calls(reply.content, self.tool_catalog)
         if calls or errors:
+            # ``run_tool_calls`` dispatches only the first
+            # MAX_TOOL_CALLS_PER_TURN parsed calls and reports how each ended.
+            # Count only calls that ran ok: an unknown name or invalid
+            # arguments are refused before the dispatcher, and a precheck
+            # block, a permission denial or a soft-fail result executed none of
+            # the work a later execution-shaped finalize claim may name.
+            executed: list[Any] = []
+
+            def count_executed(call: Any, ok: bool) -> None:
+                if ok is True and call_reaches_dispatcher(
+                    (call or {}).get("name"),
+                    self.tool_catalog,
+                    (call or {}).get("arguments"),
+                ):
+                    executed.append(call)
+
             if self.tool_catalog is None:
-                observation = run_tool_calls(self.dispatcher, calls, errors)
+                observation = run_tool_calls(
+                    self.dispatcher, calls, errors, on_result=count_executed
+                )
             else:
                 observation = run_tool_calls(
                     self.dispatcher,
                     calls,
                     errors,
                     self.tool_catalog,
+                    on_result=count_executed,
                 )
-            # ``run_tool_calls`` dispatches only the first
-            # MAX_TOOL_CALLS_PER_TURN parsed calls; the remainder never ran.
-            # Of those, count only calls naming a known tool: an unknown name
-            # is refused before the dispatcher and executed nothing, so it must
-            # not back a later execution-shaped finalize claim.
-            executed = sum(
-                1
-                for call in calls[:MAX_TOOL_CALLS_PER_TURN]
-                if call_reaches_dispatcher(
-                    (call or {}).get("name"),
-                    self.tool_catalog,
-                    (call or {}).get("arguments"),
-                )
-            )
             if executed:
-                note_execution_evidence(state.metadata, tool_calls=executed)
+                note_execution_evidence(state.metadata, tool_calls=len(executed))
         elif has_incomplete_code_block(reply.content):
             observation = INCOMPLETE_CELL_NUDGE
         else:

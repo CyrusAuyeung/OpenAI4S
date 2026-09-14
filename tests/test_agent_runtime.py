@@ -625,8 +625,11 @@ def test_code_observation_notes_an_incomplete_tail_after_the_executed_cell():
 def test_none_action_keeps_legacy_tool_fallback_as_user_history(monkeypatch):
     calls = []
 
-    def fake_run(dispatcher, parsed_calls, errors):
+    def fake_run(dispatcher, parsed_calls, errors, *, on_result=None):
         calls.append((dispatcher, parsed_calls, errors))
+        for parsed in parsed_calls:
+            if on_result is not None:
+                on_result(parsed, True)
         return "[Tool Results]\nlegacy result"
 
     monkeypatch.setattr(runtime, "run_tool_calls", fake_run)
