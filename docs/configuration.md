@@ -300,7 +300,7 @@ openai4s jupyter install                # install user KernelSpecs
 |------|---------|
 | 0 | The run completed (`stop_reason` is `submitted`). |
 | 1 | An unhandled error; a Python traceback is on stderr. |
-| 2 | Refused before or at the first Code Cell: a usage error, the standard environment is not ready, or the database schema is newer than this build. |
+| 2 | Refused before or at the first Code Cell: a usage error (an empty task, `empty_task`; an invalid `--allow-test-command`, `invalid_allow_test_command`), an explicit `--mode reusable_pipeline\|codebase_change` whose test command nothing can authorize (`code_mode_test_runner_unauthorized`), the standard environment is not ready, or the database schema is newer than this build. `--json` prints the code. |
 | 3 | The run ended without completing: `stop_reason` is `max_turns`, `no_progress`, `cancelled`, or any other value. |
 
 `--json` prints the full result, `stop_reason` included, for exit 0 and 3

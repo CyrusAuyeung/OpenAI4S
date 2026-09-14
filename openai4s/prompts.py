@@ -190,10 +190,14 @@ happens to be on disk."""
 # (Concatenated, not an f-string: the example call below has literal braces.)
 _TASK_MODE_SHARED_COMPLETION = _TASK_MODE_SAVE_ARTIFACTS + """
 
-Run every test command through `host.bash(command)` inside a Python cell. The
-Host accepts a test only on its own receipt for that exact command string, so a
-test run through `subprocess` or `os.system`, or one whose output you merely
-print, is never evidence. Once that cell has run, its Observation starts with a
+Run every test command through `host.bash(command)` inside a Python cell,
+exactly as written. The Host accepts a test only with a `host.bash` receipt for
+that exact command string: the kernel's record of that command's exit status,
+run with this cell's environment. A test run through `subprocess` or
+`os.system`, or one whose output you merely print, leaves no receipt and is
+refused. Do not change what the command runs to get one (a wrapper script, an
+edited `PATH`): that substitutes the runner and is not a test result. If the
+command cannot run, say so. Once that cell has run, its Observation starts with a
 `[cell id: …]` line: that id (never a cell number, a kernel label, or a guess)
 is the test's `producing_cell_id`, so submit in a later cell, after you have
 seen it.

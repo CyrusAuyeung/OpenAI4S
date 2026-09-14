@@ -690,6 +690,97 @@ def test_run_help_documents_the_exit_status_table(capsys):
         assert fragment in text
 
 
+def _run_refusal_codes() -> list[str]:
+    """Every literal refusal code `cmd_run` can hand to `_run_refusal`."""
+
+    import inspect
+    import re
+
+    source = inspect.getsource(_cli_module().cmd_run)
+    return sorted(set(re.findall(r'"code":\s*"([a-z_]+)"', source)))
+
+
+def test_every_exit_2_refusal_code_is_in_the_documented_exit_table(capsys):
+    """The exit table said 2 meant a usage error, readiness or a newer schema,
+    while `cmd_run` also refused an empty task and an explicit code mode whose
+    test runner nothing could authorize. A new refusal code must be named in
+    every place the table is written, or it drifts again."""
+
+    codes = _run_refusal_codes()
+    assert {
+        "empty_task",
+        "invalid_allow_test_command",
+        "code_mode_test_runner_unauthorized",
+    } <= set(codes)
+
+    with pytest.raises(SystemExit):
+        _cli_module().main(["run", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    exit_2 = help_text[help_text.index("2 refused") : help_text.index("3 the run")]
+
+    table_row = next(
+        line
+        for line in (_REPO / "docs" / "configuration.md")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("| 2 |")
+    )
+    cli_dir = _REPO / "openai4s" / "cli"
+    readme_rows = {
+        name: next(
+            line
+            for line in (cli_dir / name).read_text(encoding="utf-8").splitlines()
+            if line.startswith(prefix)
+        )
+        for name, prefix in (
+            ("README.md", "- `run` exits 0"),
+            ("README_zh.md", "- `run` 只有在"),
+        )
+    }
+    for code in codes:
+        assert code in exit_2, ("run --help", code)
+        assert code in table_row, ("docs/configuration.md", code)
+        for name, row in readme_rows.items():
+            assert code in row, (name, code)
+
+
+def test_the_cli_readme_halves_carry_the_same_operational_contract():
+    """A hand-merge kept both the old Chinese bullet (`status` prints the
+    `?token=` URL) and its replacement (it prints the plain origin), so the
+    Chinese page contradicted itself, the English page and `cmd_status`."""
+
+    cli_dir = _REPO / "openai4s" / "cli"
+
+    def contract_bullets(name: str, heading: str) -> list[str]:
+        text = (cli_dir / name).read_text(encoding="utf-8")
+        section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+        return [line for line in section.splitlines() if line.startswith("- ")]
+
+    english = contract_bullets("README.md", "## Operational contract")
+    chinese = contract_bullets("README_zh.md", "## 运维契约")
+    assert len(english) == len(chinese), (len(english), len(chinese))
+    token_bullets = [line for line in chinese if "?token=" in line]
+    assert len(token_bullets) == 1, token_bullets
+    assert "`serve`、`status`、`url`" not in token_bullets[0]
+    assert "`status`" in token_bullets[0] and "不带 token" in token_bullets[0]
+
+
+def test_the_upgrade_guide_names_the_longer_stop_wait():
+    """0.2.x `stop` gave up (or, with --force, sent SIGKILL) after about 5s;
+    0.3.0 waits the whole --timeout, 30s by default, first."""
+
+    module = _cli_module()
+    assert module.STOP_TIMEOUT_S == 30.0
+    for name in ("upgrading.md", "upgrading_zh.md"):
+        text = " ".join((_REPO / "docs" / name).read_text(encoding="utf-8").split())
+        # The section-4 bullet, not the backup step that also says `stop`.
+        start = text.index("* **`openai4s stop`")
+        window = text[start : start + 700]
+        assert "--timeout" in window, name
+        assert "30" in window, name
+        assert "--force" in window, name
+
+
 def test_daemon_health_ignores_environment_proxies_for_a_wsl_nat_host(monkeypatch):
     module = _cli_module()
     config = SimpleNamespace(host="172.25.100.5", port=8760)

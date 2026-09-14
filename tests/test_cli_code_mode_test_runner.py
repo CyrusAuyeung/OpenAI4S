@@ -312,6 +312,49 @@ def test_allow_test_command_is_validated_before_anything_runs(
     assert message in payload["error"]
 
 
+def test_the_receipt_is_described_as_the_worker_report_it_is():
+    """`host.bash` runs inside the Cell's own kernel process, with the Cell's
+    PATH, cwd and in-process state, and the worker reports its exit status.
+    The rule authorizes an exact command string; the receipt is not proof
+    against a Cell that fakes the runner. Every place that described it as
+    the Host's own receipt for "exactly this test command" must say so."""
+
+    from pathlib import Path
+
+    from openai4s import prompts
+
+    root = Path(__file__).resolve().parents[1]
+    parser = _cli().build_parser()
+    run = next(
+        action
+        for action in parser._subparsers._group_actions[0].choices["run"]._actions
+        if "--allow-test-command" in action.option_strings
+    )
+    flag_help = " ".join(str(run.help).split())
+    assert "exact command string" in flag_help
+    assert "worker" in flag_help and "not proof" in flag_help
+
+    fragment = " ".join(prompts._TASK_MODE_SHARED_COMPLETION.split())
+    assert "its own receipt" not in fragment
+    assert "never evidence" not in fragment
+    assert "exact command string" in fragment
+    assert "exit status" in fragment and "`PATH`" in fragment
+
+    architecture = " ".join(
+        (root / "docs" / "architecture.md").read_text(encoding="utf-8").split()
+    )
+    assert "Host's own successful `host.bash` receipt" not in architecture
+    assert "never counts" not in architecture
+    assert "kernel worker's own report" in architecture
+
+    cli = root / "openai4s" / "cli"
+    english = " ".join((cli / "README.md").read_text(encoding="utf-8").split())
+    chinese = "".join((cli / "README_zh.md").read_text(encoding="utf-8").split())
+    assert "pre-authorizes exactly that command for" not in english
+    assert "exact command string" in english and "not proof" in english
+    assert "精确命令字符串" in chinese and "并不能证明" in chinese
+
+
 def test_the_opt_in_is_parsed_as_a_repeatable_flag():
     parser = _cli().build_parser()
     args = parser.parse_args(
