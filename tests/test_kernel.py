@@ -180,6 +180,35 @@ def test_variable_inspector_reads_only_safe_builtins_without_repr_hooks():
         assert kernel.execute("print(events)")["stdout"].strip() == "[]"
 
 
+def test_variable_inspector_hides_the_skill_bootstrap_it_did_not_author(tmp_path):
+    """The Variable Inspector lists the user's bindings, not the session's glue.
+
+    Every Web session runs the skill import gate as a system cell before the
+    first user cell, and that source binds its helpers into the same namespace
+    user code runs in -- as it must: the frozen-sidecar replay reads its policy
+    back through ``globals()``. The inspector hid only dunders, ``host`` and
+    ``openai4s``, so a session holding one variable listed 33, thirty-two of
+    them ``_o4s_*`` imports, sets and classes the user never wrote.
+
+    Driven through the same bootstrap call the gateway makes, so the names
+    under test are the ones a real session injects rather than a list copied
+    from the generator.
+    """
+    from openai4s.server.recovery_runtime import bootstrap_python_generation
+    from openai4s.skills_loader import SkillLoader
+
+    with Kernel(dispatcher=_echo_dispatcher, cwd=str(tmp_path)) as kernel:
+        metadata = bootstrap_python_generation(
+            kernel, tmp_path, SkillLoader().bootstrap_code()
+        )
+        assert metadata["status"] == "active", metadata
+        assert kernel.execute("pp = 7")["error"] is None
+
+        names = [item["name"] for item in kernel.inspect_variables()["variables"]]
+
+        assert names == ["pp"]
+
+
 def test_variable_inspector_fails_busy_without_competing_frame_reader():
     with Kernel(dispatcher=_echo_dispatcher) as kernel:
         started = threading.Event()
