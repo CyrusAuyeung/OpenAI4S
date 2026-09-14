@@ -18,6 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from openai4s.execution.attempts import (
+    attempt_state_for_exception,
+    attempt_state_for_result,
+)
 from openai4s.observability import carry_context
 from openai4s.tools import (
     MAX_TOOL_CALLS_PER_TURN,
@@ -1220,7 +1224,7 @@ class LocalActionExecutor:
                     attempt[0].mark_execution_attempt_response(attempt[1])
             if result is not None and artifact_receipts:
                 result["_openai4s_artifact_receipts"] = list(artifact_receipts)
-        except BaseException:
+        except BaseException as exc:
             try:
                 if hooks is not None:
                     failed_result = (
@@ -1231,17 +1235,16 @@ class LocalActionExecutor:
                     hooks.after(action, token, failed_result)
             finally:
                 if attempt is not None:
-                    self._finish_code_attempt(attempt, "failed")
+                    self._finish_code_attempt(
+                        attempt, attempt_state_for_exception(exc, otherwise="failed")
+                    )
             raise
         try:
             if hooks is not None:
                 hooks.after(action, token, result)
             if attempt is not None:
                 attempt[0].mark_execution_attempt_capture(attempt[1])
-                self._finish_code_attempt(
-                    attempt,
-                    self._attempt_terminal_state(result),
-                )
+                self._finish_code_attempt(attempt, attempt_state_for_result(result))
         except BaseException:
             if attempt is not None:
                 self._finish_code_attempt(attempt, "record_failed")
@@ -1318,17 +1321,6 @@ class LocalActionExecutor:
             attempt[1],
             terminal_state=state,
         )
-
-    @staticmethod
-    def _attempt_terminal_state(result: dict | None) -> str:
-        if not isinstance(result, dict):
-            return "failed"
-        if result.get("interrupted"):
-            return "interrupted"
-        error = str(result.get("error") or "")
-        if "timed out" in error.lower() or "timeout" in error.lower():
-            return "timed_out"
-        return "failed" if error else "completed"
 
     def _record_kernel_generation(self, state: RunState) -> None:
         """Publish generation continuity without inventing missing identity."""
