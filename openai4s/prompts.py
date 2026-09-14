@@ -181,12 +181,30 @@ Save each source file as an artifact (`host.save_artifact(path, filename)`)
 once it is written, so it is a durable deliverable rather than a file that
 happens to be on disk.
 
-Finish by declaring, in `host.submit_output(...)` or `finalize_response`:
-`source_files` (every source file you wrote), `entry_points`,
-`architecture_summary` (one short paragraph naming what each module owns), and
-`test_evidence` (each entry names the command and the id of the cell that
-actually ran it). The Host verifies these against the filesystem, the artifact
-store, and the recorded cell output before accepting the completion — an
+Run every test command through `host.bash(command)` inside a Python cell. The
+Host accepts a test only on its own receipt for that exact command string, so a
+test run through `subprocess` or `os.system`, or one whose output you merely
+print, is never evidence. Once that cell has run, its Observation starts with a
+`[cell id: …]` line: that id (never a cell number, a kernel label, or a guess)
+is the test's `producing_cell_id`, so submit in a later cell, after you have
+seen it.
+
+Finish by declaring `source_files` (every source file you wrote),
+`entry_points`, `architecture_summary` (one short paragraph naming what each
+module owns), and `test_evidence` (each entry names the exact command string
+and the `producing_cell_id` of the cell that ran it). They are keyword
+arguments of `host.submit_output`, not keys inside its `output` dict:
+
+    host.submit_output(
+        {"summary": "..."}, ["..."],
+        source_files=[{"path": "pkg/core.py"}], entry_points=["run.py"],
+        architecture_summary="...",
+        test_evidence=[{"command": "python -m pytest -q", "producing_cell_id": "<id>"}],
+    )
+
+`finalize_response` takes the same four fields as top-level arguments. The Host
+verifies them against the filesystem, the artifact store, the recorded cell
+output, and its own shell receipts before accepting the completion — an
 unbacked claim is refused, not published. There is no field for a test's output
 text: pass or fail is read off the recorded output of the cell you name, so
 report the cell, not your reading of it."""

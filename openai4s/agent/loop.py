@@ -214,6 +214,54 @@ def _completion_summary(completion: Any) -> str | None:
     return summary.strip() if isinstance(summary, str) and summary.strip() else None
 
 
+#: A pre-authorized command longer than this would be truncated in the
+#: permission target the gate matches, so its rule would admit any command
+#: sharing that prefix.
+_MAX_ALLOWED_TEST_COMMAND_CHARS = 4000
+
+
+def allowed_test_command_error(command: str) -> str | None:
+    """Why ``command`` cannot be pre-authorized as exact test evidence, if so.
+
+    The rule must name one command: the text the gate matches (redacted and
+    bounded) has to equal the command itself, and the command must be one the
+    evidence check would accept -- a composition that can mask a failing exit
+    status is refused there, so authorizing it here would only buy a refusal.
+    """
+
+    from openai4s.bash_capability import command_preserves_failure_status
+    from openai4s.host.bash import redact_shell_text
+
+    if not isinstance(command, str) or not command.strip():
+        return "a test command must be a non-empty string"
+    if "\x00" in command:
+        return "a test command must not contain a NUL byte"
+    if len(command) > _MAX_ALLOWED_TEST_COMMAND_CHARS:
+        return (
+            "a test command longer than "
+            f"{_MAX_ALLOWED_TEST_COMMAND_CHARS} characters cannot be matched exactly"
+        )
+    if redact_shell_text(command, limit=_MAX_ALLOWED_TEST_COMMAND_CHARS) != command:
+        return "a test command must not carry a credential-shaped value"
+    if not command_preserves_failure_status(command):
+        return (
+            "its shell composition (;, |, ||, a newline, or a substitution) "
+            "could mask a failing test's exit status, so it can never back "
+            "test_evidence"
+        )
+    return None
+
+
+def _preauthorized_test_commands_note(commands: Sequence[str]) -> str:
+    listed = "\n".join(f"- host.bash({command!r})" for command in commands)
+    return (
+        "Pre-authorized test commands for this run. host.bash is approved for "
+        "exactly these command strings and nothing else, so run each test with "
+        "the string verbatim and cite that same string as the test_evidence "
+        f"command:\n{listed}"
+    )
+
+
 @dataclass
 class Agent:
     cfg: Config = field(default_factory=get_config)
@@ -245,6 +293,12 @@ class Agent:
     # per-turn prompt fragment is appended and whether the Host demands
     # verified source/entry-point/test evidence at completion.
     task_mode: str | None = None
+    # Exact test commands the operator pre-authorized for an explicit code
+    # mode (``openai4s run --allow-test-command``). Each becomes a
+    # conversation-scoped exact-command ``bash`` allow rule, so the Host can
+    # issue the receipt ``test_evidence`` is verified against in a run that has
+    # nobody to approve it. The receipt requirement itself is unchanged.
+    allowed_test_commands: Sequence[str] = ()
     # Durable kernel-generation store handle (duck-typed Store). When set (or
     # defaulted from the dispatcher's store), each worker lifetime writes a
     # kernel_generations row under this Agent's frame so artifact environment
@@ -538,6 +592,110 @@ class Agent:
         recorder.bind_generation_source(self.current_kernel_generation_id)
         self.cell_execution_hooks = recorder
 
+    def _explicit_evidence_mode(self) -> str | None:
+        """The explicitly selected mode, when it arms the code-evidence gate."""
+
+        raw = str(self.task_mode or "").strip()
+        if not raw:
+            return None
+        try:
+            mode = resolve_task_mode("", explicit=raw).value
+        except ValueError:
+            # `run` raises the loud error for an unknown name; nothing to arm.
+            return None
+        return mode if mode in EVIDENCE_REQUIRED_MODES else None
+
+    def authorize_test_commands(self) -> list[str]:
+        """Install ``allowed_test_commands`` as exact ``bash`` allow rules.
+
+        Only for an explicit evidence mode, only in this Agent's own
+        conversation, and only for the exact command text: the rule pattern is
+        glob-escaped, and a command whose permission target would not equal its
+        own text (a credential-shaped token the gate redacts, or an overlong
+        command it truncates) is refused, because either would turn one
+        command into a family. Idempotent. Returns the installed commands.
+        """
+
+        commands = [str(command) for command in self.allowed_test_commands]
+        if not commands or self._explicit_evidence_mode() is None:
+            return []
+        for command in commands:
+            problem = allowed_test_command_error(command)
+            if problem is not None:
+                raise ValueError(f"--allow-test-command {command!r}: {problem}")
+        store = getattr(self.dispatcher, "store", None)
+        if store is None or not self.frame_id:
+            return []
+        from openai4s.storage.permissions import literal_permission_pattern
+
+        root = str(self.frame_id)
+        try:
+            frame = store.get_frame(root)
+            if isinstance(frame, Mapping) and frame.get("root_frame_id"):
+                root = str(frame["root_frame_id"])
+        except Exception:  # noqa: BLE001 - the Agent's own frame is the scope
+            pass
+        for command in commands:
+            store.set_permission_rule(
+                scope="conversation",
+                scope_id=root,
+                tool="bash",
+                pattern=literal_permission_pattern(command),
+                decision="allow",
+            )
+        return commands
+
+    def code_mode_preflight_refusal(self) -> str | None:
+        """Why an explicit code mode cannot complete here, before any model call.
+
+        Its completion needs a Host-authorized ``host.bash`` receipt for each
+        cited test command. When no channel, rule, or unattended policy could
+        ever authorize ``host.bash`` in this process, every turn of the run is
+        spent on a contract it cannot meet; say so instead. ``None`` when the
+        run has no such requirement or the runner is authorizable.
+        """
+
+        mode = self._explicit_evidence_mode()
+        if mode is None:
+            return None
+        self.authorize_test_commands()
+        store = getattr(self.dispatcher, "store", None)
+        if store is None or not self.frame_id:
+            return None
+        from openai4s.permissions import broker
+
+        permission_broker = broker()
+        if permission_broker.approval_reachable(
+            store=store,
+            frame_id=str(self.frame_id),
+            method="bash",
+            side_effect_class="runtime_mutation",
+            guardian_config=self.cfg,
+        ):
+            return None
+        if self.allowed_test_commands:
+            blocker = "a standing 'bash' deny rule blocks every command, including the pre-authorized ones"
+        elif permission_broker.guardian_adjudicates(
+            store=store, frame_id=str(self.frame_id), guardian_config=self.cfg
+        ):
+            blocker = (
+                "no standing 'bash' allow rule applies, and the Auto Mode Guardian "
+                "never approves a shell command"
+            )
+        else:
+            blocker = (
+                "no interactive approval channel is attached, no standing 'bash' "
+                "allow rule applies, and OPENAI4S_UNATTENDED_APPROVAL is not 'allow'"
+            )
+        return (
+            f"--mode {mode} completes only with test_evidence backed by a "
+            "Host-authorized host.bash receipt for each test command, and nothing "
+            f"in this run can authorize host.bash: {blocker}. Pre-authorize the "
+            "exact test command(s) the run will cite with --allow-test-command "
+            "CMD (repeatable), or run the task in the Web UI, where a person can "
+            "approve the command."
+        )
+
     def run(self, task: str) -> dict:
         """Run one task through the shared engine and local runtime adapters."""
         assert self.dispatcher is not None
@@ -573,6 +731,9 @@ class Agent:
             # its historical no-rows behaviour.
             self._install_cell_recorder()
         fragment = task_mode_prompt(mode, explicit=explicit)
+        authorized_tests = self.authorize_test_commands() if explicit else []
+        if authorized_tests:
+            fragment += "\n\n" + _preauthorized_test_commands_note(authorized_tests)
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt()},
             {
