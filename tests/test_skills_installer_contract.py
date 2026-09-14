@@ -333,6 +333,16 @@ def _version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
+def _next_release_steps(version: str) -> set[str]:
+    """The versions one release step after `version`: next patch, minor, major."""
+    major, minor, patch = _version_key(version)
+    return {
+        f"{major}.{minor}.{patch + 1}",
+        f"{major}.{minor + 1}.0",
+        f"{major + 1}.0.0",
+    }
+
+
 def test_every_npm_pin_names_a_published_release():
     """A pinned install command is only honest if that version is on npm.
 
@@ -340,9 +350,10 @@ def test_every_npm_pin_names_a_published_release():
     because `npm publish` reads the version from there. The docs cannot follow
     it until the publish has happened. So pins are held to the list of
     releases recorded as published, and `package.json` may be ahead of that
-    list by exactly the unpublished next version. Bumping `package.json`
-    therefore cannot drag the pins along, and switching a pin before the
-    version is recorded as published fails here.
+    list by exactly one release step (the next patch, minor or major version
+    after the newest published one). Bumping `package.json` therefore cannot
+    drag the pins along, a version that skips a release is refused, and
+    switching a pin before the version is recorded as published fails here.
     """
     import subprocess
 
@@ -350,9 +361,10 @@ def test_every_npm_pin_names_a_published_release():
     assert published, "no npm release is recorded as published"
     declared = _package()["version"]
     newest = max(published, key=_version_key)
-    assert declared in published or _version_key(declared) > _version_key(newest), (
+    assert declared in published or declared in _next_release_steps(newest), (
         f"package.json declares {declared}, which is neither published "
-        f"({published}) nor newer than {newest}"
+        f"({published}) nor one release step after {newest} "
+        f"({sorted(_next_release_steps(newest))})"
     )
 
     try:

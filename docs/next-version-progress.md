@@ -730,8 +730,9 @@ disclose the limitation, and nothing may say P0 is closed.
 
 The five `implemented_unverified` rows still wait on one real `workflow_dispatch`
 of `release.yml` with `publish=true`. The only dispatch that has succeeded so
-far, run 32950628226 for v0.2.0, ran in `pypi_only` mode, which skips staging
-and publication. The v0.3.0 publish dispatch will therefore be the first
+far, run 32950628226 for v0.2.0, ran in `pypi_only` mode. That mode publishes
+to PyPI but skips staging assets onto the draft and making the release public.
+The v0.3.0 publish dispatch will therefore be the first
 execution of the `attach` and `finalize` jobs, the stage attestation and the
 evidence upload. D12 permits these rows because each one names that run.
 

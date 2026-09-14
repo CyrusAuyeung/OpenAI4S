@@ -158,7 +158,14 @@ def test_the_upgrade_guide_states_the_schema_change_the_backup_and_no_downgrade(
     assert current >= 32, "the upgrade guide names a schema this tree does not reach"
     english = _normalised(UPGRADING)
     chinese = _normalised(UPGRADING_ZH)
+    # A container keeps the database on its volume, not under ~/.openai4s, so
+    # the backup instruction has to name the directory the image really uses.
+    image_data_dir = re.search(
+        r"OPENAI4S_DATA_DIR=(\S+)", (ROOT / "Dockerfile").read_text("utf-8")
+    )[1]
     for text in (english, chinese):
+        assert f"OPENAI4S_DATA_DIR={image_data_dir}" in text
+        assert "PersistentVolumeClaim" in text
         assert f"schema **{V020_SCHEMA}**" in text
         assert "schema **32**" in text
         assert f"openai4s.db.v{V020_SCHEMA}.bak" in text
@@ -220,19 +227,113 @@ def test_platforms_does_not_claim_a_notarized_dmg_ships():
     assert "v0.3.0 publishes no DMG" in text
 
 
+#: Wording that defers a package to a later release, per README half.
+_DEFERRAL = {
+    "README.md": re.compile(
+        r"\b(?:coming|later|future|upcoming|next) release\b|ships? later"
+        r"|still stabiliz|not yet (?:published|shipped|released)",
+        re.IGNORECASE,
+    ),
+    "README_zh.md": re.compile(
+        r"后续版本|之后的版本|以后的版本|将来的版本|稳定化|尚未发布"
+    ),
+}
+
+
+def _install_sections(path: Path) -> str:
+    """The Linux and Windows install sections of a README half: from the
+    `### Linux` heading to the heading after `### Windows`. The news entries
+    for older releases sit outside it and may keep their historical wording."""
+    text = path.read_text(encoding="utf-8")
+    start = text.index("\n### Linux")
+    windows = text.index("\n### Windows", start)
+    end = text.index("\n### ", windows + 1)
+    return text[start:end]
+
+
+def _sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[。；])|(?<=[.;])\s+|\n", text)
+    return [part for part in parts if part.strip()]
+
+
 def test_the_readmes_do_not_say_the_windows_package_ships_later():
     """`release.yml` stages the Windows zip on every publish; nothing can omit
-    it. A README note saying the package ships in a coming release contradicts
-    the release it is published with."""
+    it. An install note saying the package ships in a coming release
+    contradicts the release it is published with. Matched per sentence rather
+    than as one exact phrase, so a paraphrase of the deferral is caught too."""
     workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     assert "Download the verified Windows package" in workflow
-    forbidden = {
-        ROOT
-        / "README.md": "Windows/WSL2 package is still stabilizing and ships in a coming release",
-        ROOT / "README_zh.md": "Windows/WSL2 安装包仍在稳定化，将随后续版本发布",
+    for name, deferral in _DEFERRAL.items():
+        sections = _install_sections(ROOT / name)
+        assert "Windows" in sections
+        deferring = [
+            " ".join(sentence.split())
+            for sentence in _sentences(sections)
+            if "Windows" in sentence and deferral.search(sentence)
+        ]
+        assert not deferring, f"{name} still defers Windows: {deferring}"
+
+
+PARITY_AUDIT = ROOT / "docs" / "windows-wsl-parity-audit.md"
+
+#: A limitation the audit's final verification section states, and the words
+#: each README half must use to disclose it. Keyed by the audit's own wording,
+#: so an audit that later certifies one of them releases the docs from it.
+_WINDOWS_LIMITATIONS = {
+    "Windows reboot": ("A Windows reboot", "Windows 整机重启"),
+    "Conda provisioning": ("Conda environment provisioning", "Conda 环境准备"),
+    "real provider login/inference": (
+        "Real provider sign-in and inference",
+        "真实的供应商登录与推理",
+    ),
+    "The unmodified full browser script is **not passed**": (
+        "full browser smoke did not pass",
+        "完整浏览器 smoke 未通过",
+    ),
+    "WSL service connection timeouts": (
+        "WSL service connection timeouts",
+        "WSL 服务连接超时",
+    ),
+}
+
+
+def test_the_windows_limitations_follow_the_audits_final_verification():
+    """The parity audit's "Unverified scope" line belongs to its pre-fix plan.
+    The "Fix verification — 2026-09-07" section supersedes it and names more:
+    a Windows reboot (only a WSL-distribution restart passed), Conda
+    provisioning, and a full browser smoke that did not pass. The disclosure
+    copied the plan's list, so it both missed those and said a WSL restart was
+    unverified when one had passed."""
+    audit = _normalised(PARITY_AUDIT)
+    heading = "## Fix verification — 2026-09-07"
+    assert heading in audit, "the parity audit's final verification section moved"
+    final = audit.split(heading, 1)[1]
+    stated = {
+        fact: words for fact, words in _WINDOWS_LIMITATIONS.items() if fact in final
     }
-    for path, phrase in forbidden.items():
-        assert phrase not in _normalised(path), f"{path.name} still defers Windows"
+    assert stated, "the audit's final section no longer states any known limitation"
+    decisions = _normalised(ROOT / "docs" / "v03-decisions.md")
+    for index, name in enumerate(("README.md", "README_zh.md")):
+        section = " ".join(
+            _install_sections(ROOT / name).split("\n### Windows", 1)[1].split()
+        )
+        missing = [
+            words[index] for words in stated.values() if words[index] not in section
+        ]
+        assert not missing, f"{name}'s Windows section does not disclose {missing}"
+    for superseded in (
+        "complete recovery after a WSL or Windows restart",
+        "WSL 或 Windows 重启后的完整恢复",
+    ):
+        for path in (ROOT / "README.md", ROOT / "README_zh.md"):
+            assert superseded not in _normalised(path), f"{path.name}: {superseded}"
+        assert superseded not in decisions, f"v03-decisions.md: {superseded}"
+    for fact in (
+        "Windows reboot",
+        "Conda provisioning",
+        "full browser smoke did not pass",
+    ):
+        assert fact in decisions, f"D13 in v03-decisions.md does not name {fact!r}"
 
 
 def test_platforms_names_the_published_container_image():

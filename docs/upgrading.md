@@ -35,6 +35,13 @@ If you might want to go back to 0.2.x, make your own copy first:
    them while nothing is running.
 3. Install 0.3.0 and start it.
 
+The container image keeps its data directory at `/data`
+(`OPENAI4S_DATA_DIR=/data`). That is the `openai4s-data` named volume in
+`compose.yaml` or the `openai4s-data` PersistentVolumeClaim in
+`deploy/kubernetes.yaml`. The 0.3.0 image migrates that database the same way.
+For Docker or Kubernetes, stop the container (or scale the Deployment to zero)
+and back up the volume or the PVC before you start the 0.3.0 image.
+
 Migrations 28 to 32 add tables, columns and indexes and remove nothing:
 
 | Version | Adds |
@@ -47,12 +54,13 @@ Migrations 28 to 32 add tables, columns and indexes and remove nothing:
 
 ## 2. Going back to 0.2.x is not supported
 
-0.2.0 does not check the schema version of the database it opens. Pointed at a
-data directory that 0.3.0 has already upgraded, it starts without a warning and
-writes to that database, but it does not maintain anything migrations 28 to 32
-added. A test run of 0.2.0 against an upgraded copy did not corrupt it, because
-those migrations only add things. Nothing guarantees that the two versions agree
-about the rows they both write, though.
+0.2.0 does not check the schema version of the database it opens: it skips
+migration whenever the stored version is at or above the one it knows. Pointed
+at a data directory that 0.3.0 has already upgraded, it starts without a warning
+and writes to that database, but it does not maintain anything migrations 28 to
+32 added. Those migrations only add tables, columns and indexes. That does not
+make the combination supported: nothing checks that the two versions agree
+about the rows they both write.
 
 To go back, stop 0.3.0 and restore the copy you made before upgrading:
 
@@ -87,7 +95,7 @@ and every daemon requires its access token, including one bound to
 
 * **The workbench is new.** The Preact/TypeScript workbench is the default UI.
   `OPENAI4S_WEBUI=legacy` still serves the old `app.js` UI, which receives no new
-  features, and `OPENAI4S_WEBUI_NEXT` is ignored.
+  features.
 * **`openai4s run` exit status.** The command exits `0` only when the run
   submitted a result. A run that stops for any other reason, such as the turn
   limit, no progress or cancellation, exits non-zero. The `--json` output still

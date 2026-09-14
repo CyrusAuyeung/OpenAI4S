@@ -194,7 +194,14 @@ tar -xzf OpenAI4S-*-linux-x86_64.tar.gz && cd OpenAI4S-*-linux-x86_64
 
 Download `OpenAI4S-<version>-windows-x86_64.zip`, unzip it, and double-click `OpenAI4S.cmd`. The first run checks WSL2 and a working bubblewrap 0.8.0+ sandbox, verifies and installs the bundled Linux payload, creates `~/.local/bin/openai4s`, starts the daemon there, and opens an authenticated local URL in your Windows browser. No application download, no `pip`, no toolchain. Ubuntu 24.04 is the supported baseline; mainland PyPI/Conda mirrors and an optional WSL-reachable proxy can be configured by the launcher. See the bilingual [Windows/WSL2 guide](docs/windows-wsl.md).
 
-`v0.3.0` is the first release that ships this package. The [WSL2 parity audit](docs/windows-wsl-parity-audit.md) lists what has not been verified yet: Windows on ARM, distributions and WSL network modes other than the tested baseline, real provider authentication and inference, every science recipe, and complete recovery after a WSL or Windows restart.
+`v0.3.0` is the first release that ships this package. Its acceptance evidence covers WSL2 on x86_64 with the tested Ubuntu 24.04 distribution. The last section of the [WSL2 parity audit](docs/windows-wsl-parity-audit.md) ("Fix verification — 2026-09-07") leaves the following unverified:
+
+- Windows on ARM, other distributions, and WSL network modes other than the tested one.
+- Real provider sign-in and inference. The scientist flow ran with `OPENAI4S_NOTEBOOK_REPL=1` and no live model.
+- Conda environment provisioning, so R and other named environments on Windows are unverified. R was installed in the test distribution only as a test prerequisite.
+- Every domain recipe.
+- A Windows reboot. Only a restart of the WSL distribution was tested; it reopened the saved results and a stored credential.
+- Cold-start performance. The unmodified full browser smoke did not pass: it exceeded its 20-second queue-admission wait. WSL service connection timeouts were also seen under concurrent load.
 
 **Native Windows is not supported, and the program refuses to start a kernel there** rather than warning and proceeding — it spawns POSIX subprocesses, the R channel rides file descriptors 3 and 4 through a shell redirection, and the sandbox has no Windows backend. WSL2 reports as Linux, so this package runs the same build every other platform runs. If you do not have WSL2 yet, the launcher stops and tells you the exact command (`wsl --install`, from an Administrator PowerShell). Details: **[Supported platforms](docs/platforms.md)**.
 
@@ -286,7 +293,7 @@ The canonical bilingual documentation is published at **[openai4s.org/docs](http
 
 ### Next
 
-- [ ] **Publish the Windows and Linux desktop packages** next to the macOS image, so every supported platform installs without a toolchain.
+- [ ] **A notarized macOS image and arm64 packages.** The Linux package ships from `v0.2.0` and the Windows/WSL2 package from `v0.3.0`, but `v0.3.0` has no macOS image and only `x86_64` is published. A Developer ID-signed, notarized `.dmg` plus arm64 Linux and Windows-on-ARM packages would let every supported platform install without a toolchain.
 - [ ] **NVIDIA scientific computing suites** — bring **BioNeMo** (biomolecular foundation models) and **Parabricks** (GPU-accelerated genomics pipelines) in as first-class Skills and BYOC backends, beyond today's NVIDIA NIM integration.
 - [ ] Local GPU model serving so structure/design Skills run without remote compute.
 - [ ] More BYOC providers (Modal / SLURM) beyond SSH + NVIDIA NIM.

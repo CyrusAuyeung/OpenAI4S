@@ -47,9 +47,10 @@ NPM_020_UNAVAILABLE_SKILLS = frozenset({"single-cell-rna-analysis"})
 
 #: npm releases of `@pku-yuangroup/openai4s-skills` that are on the registry.
 #: Every `openai4s-skills@X.Y.Z` pin in the docs must name one of these, and
-#: `package.json` may be ahead of them only by the next version to publish:
-#: `npm publish` reads the version from `package.json`, so it moves before the
-#: registry does. Add a version here only after it has actually been published.
+#: `package.json` may be ahead of them only by one release step (the next
+#: patch, minor or major version after the newest one listed): `npm publish`
+#: reads the version from `package.json`, so it moves before the registry
+#: does. Add a version here only after it has actually been published.
 PUBLISHED_NPM_VERSIONS = ("0.2.0",)
 
 #: English prose wraps here; a code span or a link is never split. Chinese

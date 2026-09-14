@@ -183,7 +183,14 @@ tar -xzf OpenAI4S-*-linux-x86_64.tar.gz && cd OpenAI4S-*-linux-x86_64
 
 下载 `OpenAI4S-<version>-windows-x86_64.zip`，解压后双击 `OpenAI4S.cmd`。首次运行会检查 WSL2 与可工作的 bubblewrap 0.8.0+ 沙箱，校验并安装随包 Linux payload，创建 `~/.local/bin/openai4s`，在 WSL 中启动守护进程，再用 Windows 浏览器打开带本地登录引导的安全 URL。应用本体不下载、不 `pip`、不装工具链；支持基线是 Ubuntu 24.04，启动器可配置国内 PyPI/Conda 镜像以及 WSL 可访问的代理。详见双语 [Windows/WSL2 指南](docs/windows-wsl.md)。
 
-`v0.3.0` 是第一个发布这个安装包的版本。[WSL2 一致性审计](docs/windows-wsl-parity-audit_zh.md)列出了尚未验证的范围：Windows on ARM、测试基线之外的发行版与 WSL 网络模式、真实的供应商认证与推理、每一个科学配方，以及 WSL 或 Windows 重启后的完整恢复。
+`v0.3.0` 是第一个发布这个安装包的版本，它的验收证据只覆盖 x86_64 上的 WSL2 和测试所用的 Ubuntu 24.04 发行版。[WSL2 一致性审计](docs/windows-wsl-parity-audit_zh.md)的最后一节（「修复验收记录 — 2026-09-07」）列出以下尚未验证的范围：
+
+- Windows on ARM、其他发行版，以及测试所用之外的 WSL 网络模式。
+- 真实的供应商登录与推理。科学家流程是在 `OPENAI4S_NOTEBOOK_REPL=1` 下运行的，没有调用真实模型。
+- Conda 环境准备，因此 Windows 上的 R 和其他命名环境都未经验证。R 只是作为测试前提装进了测试发行版。
+- 全部领域配方。
+- Windows 整机重启。只测试了重启 WSL 发行版，重启后能重新打开已保存的结果和已存的凭据。
+- 冷启动性能。未经修改的完整浏览器 smoke 未通过：它超过了 20 秒的排队准入等待。并发负载下还出现过 WSL 服务连接超时。
 
 **原生 Windows 不受支持，而且程序会直接拒绝在那里启动内核**，不是「先警告再照跑」——内核要拉起 POSIX 子进程，R 通道靠 shell 重定向走文件描述符 3 和 4，沙箱也没有 Windows 后端。WSL2 报告自己是 Linux，所以这个包跑的就是其他平台跑的同一个构建。如果你还没有 WSL2，启动器会停下来并给出那条确切的命令（管理员 PowerShell 里的 `wsl --install`）。详见：**[平台支持矩阵](docs/platforms.md)**。
 
@@ -268,7 +275,7 @@ npx github:PKU-YuanGroup/OpenAI4S install --collection bioskills # 561 个固定
 
 ### 下一步
 
-- [ ] **发布 Windows 与 Linux 桌面包**，与 macOS 镜像并列，让每个受支持的平台都能免工具链安装。
+- [ ] **经过公证的 macOS 镜像与 arm64 安装包。** Linux 安装包自 `v0.2.0` 起发布，Windows/WSL2 安装包自 `v0.3.0` 起发布，但 `v0.3.0` 没有 macOS 镜像，而且只发布 `x86_64`。有了 Developer ID 签名并经过公证的 `.dmg`，再加上 arm64 Linux 与 Windows on ARM 安装包，每个受支持的平台才都能免工具链安装。
 - [ ] **NVIDIA 科学计算套件** —— 在现有 NVIDIA NIM 集成之外，把 **BioNeMo**（生物分子基础模型）与 **Parabricks**（GPU 加速的基因组学流水线）作为一等公民接入 Skill 与 BYOC 后端。
 - [ ] 本地 GPU 模型服务,让结构/设计类 Skill 无需远程计算即可运行。
 - [ ] SSH + NVIDIA NIM 之外的更多 BYOC 提供方(Modal / SLURM)。
