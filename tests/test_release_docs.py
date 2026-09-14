@@ -182,6 +182,51 @@ def test_the_upgrade_guide_states_the_schema_change_the_backup_and_no_downgrade(
     assert deletes == ("迁移成功后会删除它" in chinese)
 
 
+def test_the_upgrade_guide_says_what_old_records_and_a_failed_upgrade_look_like():
+    """UPG3-07, and the two upgrade behaviours a 0.2.x user meets first.
+
+    Each sentence is tied to the code that makes it true, so a change there
+    fails here until both halves are corrected:
+
+    * `OPENAI4S_WEBUI=legacy` was offered as a fallback, but only the workbench
+      rewrites the `/api/artifacts/<id>` links 0.2.x stored in messages; the
+      frozen app.js inserts them as written and the server has no alias.
+    * a failed migration is one `error:` line naming the kept copy (the CLI
+      catches MigrationError, whose message names the backup);
+    * 0.2.x artifacts' environment reads as Python with the package list
+      unknown (the Store read relabels the `repl` rows, and never fills in a
+      list).
+    """
+    english = _normalised(UPGRADING)
+    chinese = _normalised(UPGRADING_ZH)
+
+    render = (ROOT / "frontend" / "src" / "features" / "md" / "render.ts").read_text(
+        "utf-8"
+    )
+    assert "/^\\/api\\/artifacts\\/([^/?#]+)$/" in render
+    assert '"/api/v1/artifacts/"' in render
+    # The frozen legacy UI has no rewrite of the stored form, in either spelling.
+    legacy = (ROOT / "openai4s" / "server" / "webui" / "app.js").read_text("utf-8")
+    assert "/api/artifacts/" not in legacy and "\\/api\\/artifacts" not in legacy
+    cli = (ROOT / "openai4s" / "cli" / "main.py").read_text("utf-8")
+    assert cli.count("except MigrationError as exc:") >= 2
+    assert "A pre-upgrade backup is at" in MIGRATIONS.read_text("utf-8")
+    storage = (ROOT / "openai4s" / "storage" / "artifacts.py").read_text("utf-8")
+    assert "the package list is unknown" in storage
+
+    for text in (english, chinese):
+        assert "`OPENAI4S_WEBUI=legacy`" in text
+        assert "`/api/artifacts/<id>`" in text
+        assert "`error:`" in text
+        assert "`repl`" in text
+    assert "open only in the default workbench" in english
+    assert "只在默认工作台里能打开" in chinese
+    assert "exit with status 2" in english
+    assert "退出码为 2" in chinese
+    assert "package list is unknown" in english
+    assert "包列表未知" in chinese
+
+
 # -- what each platform can actually download ----------------------------------
 
 WORKFLOWS = ROOT / ".github" / "workflows"
