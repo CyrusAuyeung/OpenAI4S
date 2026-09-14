@@ -766,3 +766,26 @@ def test_a_turn_refused_after_admission_keeps_the_users_message(api, monkeypatch
     users = [m for m in listed if m.get("role") == "user"]
     assert [m.get("content") for m in users] == [text], listed
     assert any(m.get("failure") for m in listed), listed
+
+
+def test_the_rebind_route_does_not_re_pin_a_profile_nothing_can_dispatch(api):
+    """The dead-end loop, driven through the route that answered it.
+
+    `model_revision_unavailable` says "rebind it to continue"; the rebind route
+    unpinned and re-bound to the active profile -- the same keyless one -- and
+    answered 200 `bound:true`, so the next send refused again. It now refuses
+    with the code that names the actual problem, and pins nothing.
+    """
+    runner, call = api
+    created = call(
+        "POST",
+        "/model-profiles",
+        {"name": "no-key", "provider": "claude", "model": "claude-sonnet-4-5"},
+    )
+    call("POST", f"/model-profiles/{created['body']['id']}/activate")
+    frame, _project = _session(runner)
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 409, rebound
+    assert rebound["body"].get("code") == "model_profile_needs_key", rebound
+    assert not (runner.store.get_frame(frame) or {}).get("model_profile_id")
