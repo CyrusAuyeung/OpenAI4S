@@ -260,8 +260,9 @@ def _preauthorized_test_commands_note(commands: Sequence[str]) -> str:
         "verbatim and cite that same string as the test_evidence command:\n"
         f"{listed}\n"
         "Any other host.bash command needs an approval this run may not have: "
-        "run everything else (an entry-point smoke, an import check) as Python "
-        "inside the cell, for example by importing it or with subprocess."
+        "check everything else (an entry-point smoke, an import check) in "
+        "Python inside the cell, by importing the module and calling its "
+        "functions."
     )
 
 

@@ -542,6 +542,11 @@ def test_the_run_tells_the_model_which_exact_commands_are_preauthorized(
     request = str(chat.calls[0][1]["content"])
     assert "host.bash('python -m pytest -q')" in request
     assert "Any other host.bash command" in request
+    # The note steers other checks into Python, never around the gated,
+    # audited runner: it does not recommend spawning a shell from the cell.
+    note = request[request.index("Pre-authorized test commands") :]
+    assert "subprocess" not in note and "os.system" not in note
+    assert "import" in note
 
     plain = _ScriptedChat(["Stopping."])
     monkeypatch.setattr(loop_mod, "chat", plain)
