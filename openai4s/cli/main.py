@@ -157,6 +157,9 @@ _DARWIN_SZOMB = 5
 #: the offset of ``kp_proc.p_stat`` inside it — the record ``ps`` reads.
 _DARWIN_KINFO_PROC_SIZE = 648
 _DARWIN_P_STAT_OFFSET = 36
+#: ``kp_proc.p_starttime`` opens the record: a ``struct timeval`` whose
+#: ``tv_sec`` is a little-endian int64 and ``tv_usec`` the int32 after it.
+_DARWIN_P_STARTTIME_FORMAT = "<qi"
 
 
 def _is_zombie(pid: int) -> bool:
@@ -177,6 +180,30 @@ def _is_zombie(pid: int) -> bool:
 
 def _darwin_process_stat(pid: int) -> int | None:
     """``kp_proc.p_stat`` from ``sysctl kern.proc.pid.<pid>``, or None."""
+    record = _darwin_kinfo_proc(pid)
+    return None if record is None else record[_DARWIN_P_STAT_OFFSET]
+
+
+def _darwin_process_start(pid: int) -> str | None:
+    """``kp_proc.p_starttime`` from ``sysctl kern.proc.pid.<pid>``, or None.
+
+    The kernel stamps it when the process is created and never changes it, so
+    it tells two processes that shared a pid apart the way Linux's field 22
+    does -- at microsecond rather than clock-tick resolution.
+    """
+    import struct
+
+    record = _darwin_kinfo_proc(pid)
+    if record is None:
+        return None
+    seconds, micros = struct.unpack_from(_DARWIN_P_STARTTIME_FORMAT, record, 0)
+    if seconds <= 0 or not 0 <= micros < 1_000_000:
+        return None
+    return f"{seconds}.{micros:06d}"
+
+
+def _darwin_kinfo_proc(pid: int) -> bytes | None:
+    """The raw ``struct kinfo_proc`` for ``pid`` on macOS, or None."""
     try:
         import ctypes
 
@@ -201,7 +228,7 @@ def _darwin_process_stat(pid: int) -> int | None:
     # was not written against, and reading an offset into it would be a guess.
     if size.value != _DARWIN_KINFO_PROC_SIZE:
         return None
-    return record.raw[_DARWIN_P_STAT_OFFSET]
+    return record.raw
 
 
 def _proc_stat_fields(pid: int) -> list[bytes] | None:
@@ -237,15 +264,23 @@ def _process_start_token(pid: int) -> str | None:
     Linux exposes the distinguishing fact: field 22 of ``/proc/<pid>/stat`` is
     the process's start time in clock ticks since boot. Two processes may share
     a pid, but a process that started at a different moment is a different
-    process. Elsewhere — macOS has no procfs — there is nothing cheap and
-    correct to read, so this returns None and the caller keeps the older,
-    weaker answer instead of guessing.
+    process. macOS has no procfs, but the same fact is ``kp_proc.p_starttime``
+    in the ``sysctl`` record ``ps`` reads. Without it a daemon recorded
+    ``pid_start: null``, `_recorded_endpoint` rightly refused that record, and
+    `url` and `status` fell back to the default port for a daemon started with
+    ``--port``. Elsewhere there is nothing cheap and correct to read, so this
+    returns None and the caller keeps the older, weaker answer instead of
+    guessing.
     """
     fields = _proc_stat_fields(pid)
-    # Field 22 overall. Fields 1 and 2 are behind us, so it is index 19 here.
-    if fields is None or len(fields) < 20:
-        return None
-    return fields[19].decode("ascii", "replace")
+    if fields is not None:
+        # Field 22 overall. Fields 1 and 2 are behind us, so it is index 19.
+        if len(fields) < 20:
+            return None
+        return fields[19].decode("ascii", "replace")
+    if sys.platform == "darwin":
+        return _darwin_process_start(pid)
+    return None
 
 
 def _recorded_state(cfg) -> dict[str, object] | None:
@@ -330,9 +365,10 @@ def _recorded_endpoint(cfg, expected_pid: int) -> tuple[str, int] | None:
     to the caller's current config rather than steering a local control request.
     A pid alone is not an identity: after reuse, a stale sidecar could otherwise
     redirect the local access-token URL to an unrelated host that happens to
-    hold the same pid.  Linux provides the process start token needed to bind
-    the endpoint to one generation.  On platforms where that token is
-    unavailable, callers safely fall back to their current configuration.
+    hold the same pid.  Linux (procfs) and macOS (sysctl ``p_starttime``)
+    provide the process start token needed to bind the endpoint to one
+    generation.  On platforms where that token is unavailable, callers safely
+    fall back to their current configuration.
     """
     payload = _recorded_state(cfg)
     if payload is None:
@@ -363,9 +399,9 @@ def _daemon_alive(cfg, pid: int) -> bool:
     """Is the daemon that wrote the pidfile still the process holding ``pid``?
 
     Liveness first, because it is the cheap half and the only half available
-    off Linux. When the statefile corroborates the pidfile — same pid, and a
-    start token to compare — a mismatched token means the pid was reused and
-    the pidfile is stale.
+    where no start token can be read (off Linux and macOS). When the statefile
+    corroborates the pidfile — same pid, and a start token to compare — a
+    mismatched token means the pid was reused and the pidfile is stale.
 
     A statefile naming a *different* pid is deliberately treated as no
     information rather than as evidence of staleness. It is written just after
@@ -692,14 +728,17 @@ def _cmd_serve_detached(args, cfg) -> int:
         except ValueError:
             pass
     deadline = time.monotonic() + ready_timeout
+    exited: int | None = None
     while time.monotonic() < deadline:
-        if process.poll() is not None:
+        exited = process.poll()
+        if exited is not None:
             break
         if _read_pid(cfg) == process.pid and _health_ready(cfg):
             # Re-check both identities after the request.  Another daemon on
             # the same address can answer /health, and a child that loses the
             # bind race can exit while that request is in flight.
-            if process.poll() is not None or _read_pid(cfg) != process.pid:
+            exited = process.poll()
+            if exited is not None or _read_pid(cfg) != process.pid:
                 break
             app_url = _url(cfg)
             print(f"daemon started (pid {process.pid}) at {app_url}")
@@ -717,30 +756,86 @@ def _cmd_serve_detached(args, cfg) -> int:
         time.sleep(0.25)
 
     _cleanup_failed_detached_child(process)
-    # Only inspect this child's bounded log segment, and only render the
-    # numeric schema diagnostic. Never echo arbitrary startup output.
+    # Only inspect this child's bounded log segment, and only render lines
+    # rebuilt from values this process owns (numbers, its config, its paths).
+    # Never echo arbitrary startup output.
     try:
         with log_path.open("rb") as log:
             log.seek(log_start)
             startup = log.read(65536).decode("utf-8", errors="replace")
-        future = re.search(
-            r"\[future_schema\] database schema (\d{1,10}) exceeds supported schema (\d{1,10});",
-            startup,
-        )
-        if future:
-            print(
-                f"error: {FutureSchemaError(int(future[1]), int(future[2]))}",
-                file=sys.stderr,
-            )
-            return 2
     except OSError:
-        pass
+        startup = ""
+    refusal = _detached_startup_refusal(startup, cfg, log_path)
+    if refusal is not None:
+        message, status = refusal
+        print(message, file=sys.stderr)
+        return status
+    if exited is not None:
+        # The child is gone, so no wait ran out: say that, and keep a refusal's
+        # status. Anything else a failed start exits with maps to 1.
+        how = (
+            f"was terminated by signal {-exited}"
+            if exited < 0
+            else f"exited with status {exited}"
+        )
+        print(
+            f"error: detached daemon {how} before it became ready; "
+            f"inspect {log_path}",
+            file=sys.stderr,
+        )
+        return 2 if exited == 2 else 1
     print(
         f"error: detached daemon did not become ready within {ready_timeout:.0f}s "
         f"(OPENAI4S_DETACHED_READY_TIMEOUT overrides); inspect {log_path}",
         file=sys.stderr,
     )
     return 1
+
+
+def _detached_startup_refusal(
+    startup: str, cfg, log_path: Path
+) -> tuple[str, int] | None:
+    """The one-line diagnosis a detached child printed, rebuilt, or None.
+
+    The foreground `serve` ends a refused start with one `error:` line and its
+    exit status; the detached parent's caller should get the same line rather
+    than a pointer to a log. Each shape is matched on its fixed words and
+    re-rendered from what it carries that is safe to repeat -- version numbers,
+    and paths this process computes itself -- so no free text from the log (a
+    SQLite message, a path the log claims) reaches the terminal.
+    """
+    future = re.search(
+        r"\[future_schema\] database schema (\d{1,10}) exceeds supported schema (\d{1,10});",
+        startup,
+    )
+    if future:
+        return (f"error: {FutureSchemaError(int(future[1]), int(future[2]))}", 2)
+    failed = re.search(
+        r"^error: migration to version (\d{1,10}) failed at step (\d{1,10}): "
+        r"[^\n]{0,4096}?\. The database was rolled back and remains at version "
+        r"(\d{1,10}); re-running is safe\.",
+        startup,
+        re.MULTILINE,
+    )
+    if failed:
+        target, step, kept = (int(value) for value in failed.groups())
+        db_path = Path(cfg.db_path)
+        # The name `backup_database` gives the copy; named only if it is there.
+        backup = db_path.with_name(f"{db_path.name}.v{kept}.bak")
+        return (
+            f"error: migration to version {target} failed at step {step}. The "
+            f"database was rolled back and remains at version {kept}; re-running "
+            f"is safe."
+            + (f" A pre-upgrade backup is at {backup}." if backup.exists() else "")
+            + f" The reason is in {log_path}.",
+            2,
+        )
+    lines = set(startup.splitlines())
+    for code in (errno.EADDRINUSE, errno.EACCES, errno.EADDRNOTAVAIL):
+        bind = _bind_failure_message(OSError(code, os.strerror(code)), cfg)
+        if bind is not None and bind in lines:
+            return (bind, 1)
+    return None
 
 
 def cmd_serve(args) -> int:
@@ -956,11 +1051,12 @@ def cmd_status(args) -> int:
         if getattr(args, "json", False):
             # Keyed on the sidecar describing *this* pid, not on
             # `_recorded_endpoint`: that answers a stricter question (is the
-            # recorded generation still the live one, which needs a Linux
-            # process start token) and has nothing to do with which build is
-            # running. Gating on it reported `version: null, bundle_id: null`
-            # for a healthy current daemon, and the Windows launcher renders
-            # that as "your session is still running an older version".
+            # recorded generation still the live one, which needs a process
+            # start token from Linux procfs or macOS sysctl) and has nothing to
+            # do with which build is running. Gating on it reported
+            # `version: null, bundle_id: null` for a healthy current daemon,
+            # and the Windows launcher renders that as "your session is still
+            # running an older version".
             state = _recorded_state(cfg)
             recorded = (state or {}).get("pid")
             if (
@@ -1118,8 +1214,13 @@ def cmd_url(args) -> int:
 #: ``no_progress``, ``cancelled`` and any reason the CLI does not know all map
 #: here, so an unknown terminal fails closed. Not 2, which already means a
 #: refusal (a usage error, a code mode whose test runner nothing can
-#: authorize, environment readiness, a newer database schema).
+#: authorize, environment readiness, a newer database schema, an upgrade
+#: migration that failed and was rolled back).
 RUN_NOT_COMPLETED_EXIT = 3
+
+#: The `--json` code for a Store refusal that is not a newer schema: an upgrade
+#: migration that failed and was rolled back, or one refused before it began.
+MIGRATION_FAILED_CODE = "migration_failed"
 
 _RUN_EXIT_STATUS_HELP = """\
 exit status:
@@ -1129,8 +1230,11 @@ exit status:
      --allow-test-command: invalid_allow_test_command), an explicit --mode
      reusable_pipeline|codebase_change whose test command nothing can
      authorize (code_mode_test_runner_unauthorized), the standard environment
-     is not ready, or the database schema is newer than this build; --json
-     prints the code
+     is not ready, the database schema is newer than this build
+     (future_schema), or an upgrade of an older database failed and was
+     rolled back (migration_failed; the error line names the kept backup);
+     --json prints the error and its code on stdout, and the two database
+     refusals still print their error line on stderr
   3  the run ended without completing: stop_reason max_turns, no_progress,
      cancelled, or any other value
 
@@ -2704,6 +2808,15 @@ def main(argv: list[str] | None = None) -> int:
         # message already names the versions and the kept backup. `serve`
         # still catches it earlier so it can clear the singleton state it
         # already claimed.
+        if getattr(args, "json", False):
+            # The exit-2 contract every other refusal keeps: with --json the
+            # code is on stdout. The stderr line stays -- it is the one line
+            # the upgrade guide tells an operator to look for.
+            payload = {
+                "error": str(exc),
+                "code": getattr(exc, "code", None) or MIGRATION_FAILED_CODE,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

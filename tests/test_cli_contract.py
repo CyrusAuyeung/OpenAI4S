@@ -373,6 +373,146 @@ def test_recorded_endpoint_rejects_stale_or_invalid_state(
     assert module._recorded_endpoint(config, 4321) is None
 
 
+#: What `sysctl kern.proc.pid.<pid>` hands back on LP64 macOS for a running
+#: process that started at 1789000000.123456: ``kp_proc.p_starttime`` (a
+#: ``struct timeval``) opens the record, ``kp_proc.p_stat`` sits at byte 36.
+def _darwin_kinfo_record(*, seconds=1_789_000_000, micros=123_456, p_stat=2):
+    import struct
+
+    record = bytearray(648)
+    struct.pack_into("<qi", record, 0, seconds, micros)
+    record[36] = p_stat
+    return bytes(record)
+
+
+def _as_darwin(module, monkeypatch, record):
+    """Take the macOS branch on any host: no procfs, and this kinfo record."""
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module, "_proc_stat_fields", lambda _pid: None)
+    # raising=False: before the fix nothing reads a kinfo record for a start
+    # token, and the test must fail on the URL, not on a missing attribute.
+    monkeypatch.setattr(
+        module, "_darwin_kinfo_proc", lambda _pid: record, raising=False
+    )
+
+
+def test_a_darwin_start_token_is_the_process_start_time(monkeypatch):
+    """UPG5-05. macOS has no procfs, so there was no start token at all, and a
+    daemon recorded `pid_start: null` -- which `_recorded_endpoint` rightly
+    refuses, sending `url` and `status` to the default port."""
+    module = _cli_module()
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record())
+
+    assert module._process_start_token(4321) == "1789000000.123456"
+
+    monkeypatch.setattr(module, "_darwin_kinfo_proc", lambda _pid: None)
+    assert module._process_start_token(4321) is None
+
+
+def _live_darwin_daemon(tmp_path, *, port=9734):
+    config = SimpleNamespace(
+        host="127.0.0.1",
+        port=8760,
+        data_dir=tmp_path,
+        pidfile=tmp_path / "openai4s.pid",
+        statefile=tmp_path / "daemon.json",
+    )
+    config.pidfile.write_text(str(os.getpid()), encoding="utf-8")
+    config.statefile.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "pid_start": "1789000000.123456",
+                "host": "127.0.0.1",
+                "port": port,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_url_on_macos_names_the_port_the_daemon_was_started_on(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s.server import local_auth
+
+    module = _cli_module()
+    config = _live_darwin_daemon(tmp_path)
+    token = local_auth.load_or_mint(tmp_path)
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record())
+    monkeypatch.setattr(module, "get_config", lambda: config)
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == (f"http://127.0.0.1:9734/?token={token}")
+
+
+def test_status_on_macos_probes_the_port_the_daemon_was_started_on(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _live_darwin_daemon(tmp_path)
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record())
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    opened = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read():
+            return b'{"status":"ok","model":"demo"}'
+
+    def open_daemon(request, *, timeout):
+        opened.append(request)
+        if ":9734/" not in request:
+            raise module.urllib.error.URLError("connection refused")
+        return Response()
+
+    monkeypatch.setattr(module, "_open_daemon", open_daemon)
+
+    assert module.cmd_status(SimpleNamespace()) == 0
+    assert opened == ["http://127.0.0.1:9734/health"]
+    assert "at http://127.0.0.1:9734/" in capsys.readouterr().out
+
+
+def test_a_reused_pid_on_macos_still_falls_back_to_the_callers_config(
+    tmp_path, monkeypatch, capsys
+):
+    """The start token exists to keep a reused pid from steering the token URL
+    to whatever the stale record names; the macOS token must do that too."""
+    module = _cli_module()
+    config = _live_darwin_daemon(tmp_path, port=9734)
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record(micros=654_321))
+    monkeypatch.setattr(module, "get_config", lambda: config)
+
+    assert module._daemon_alive(config, os.getpid()) is False
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip().startswith("http://127.0.0.1:8760/")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads the real macOS sysctl")
+def test_the_darwin_start_token_is_read_from_the_real_kernel():
+    """Read from the live kernel, so the record offset is proven rather than
+    asserted: stable for this process, different for a child started later."""
+    module = _cli_module()
+
+    mine = module._process_start_token(os.getpid())
+    assert mine and mine == module._process_start_token(os.getpid())
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        theirs = module._process_start_token(child.pid)
+        assert theirs and theirs != mine
+    finally:
+        child.kill()
+        child.wait()
+    assert module._process_start_token(child.pid) is None
+
+
 def test_stage1_run_allows_control_only_agent_before_any_readiness_probe(
     tmp_path, monkeypatch, capsys
 ):
@@ -742,6 +882,23 @@ def test_every_exit_2_refusal_code_is_in_the_documented_exit_table(capsys):
         assert code in table_row, ("docs/configuration.md", code)
         for name, row in readme_rows.items():
             assert code in row, (name, code)
+    # RFD-3: `main()` refuses a database it will not open -- one from a newer
+    # release, or one whose upgrade failed and was rolled back -- with exit 2
+    # and these codes, and every table that lists the exit-2 refusals says so.
+    from openai4s.storage.migrations import FutureSchemaError
+
+    # `migration_failed` is pinned by the --json refusal tests below.
+    store_codes = ("future_schema", "migration_failed")
+    assert FutureSchemaError.code == store_codes[0]
+    for code in store_codes:
+        assert code in exit_2, ("run --help", code)
+        assert code in table_row, ("docs/configuration.md", code)
+        for name, row in readme_rows.items():
+            assert code in row, (name, code)
+    assert "backup" in exit_2 and "backup" in table_row
+    assert (
+        "backup" in readme_rows["README.md"] and "备份" in readme_rows["README_zh.md"]
+    )
 
 
 def test_the_cli_readme_halves_carry_the_same_operational_contract():
@@ -767,7 +924,7 @@ def test_the_cli_readme_halves_carry_the_same_operational_contract():
 
 def test_the_upgrade_guide_names_the_longer_stop_wait():
     """0.2.x `stop` gave up (or, with --force, sent SIGKILL) after about 5s;
-    0.3.0 waits the whole --timeout, 30s by default, first."""
+    0.3.0 waits up to --timeout, 30s by default, first."""
 
     module = _cli_module()
     assert module.STOP_TIMEOUT_S == 30.0
@@ -779,6 +936,22 @@ def test_the_upgrade_guide_names_the_longer_stop_wait():
         assert "--timeout" in window, name
         assert "30" in window, name
         assert "--force" in window, name
+
+    # UPG5-06. `cmd_stop` prints `shutting down…` only once the SIGTERM grace
+    # has passed with the daemon still alive; an idle daemon stops in well
+    # under a second and prints only "daemon stopped". "While it waits" read
+    # as a line every stop prints.
+    grace = f"{module.TERM_GRACE_S:g}"
+    english = " ".join((_REPO / "docs" / "upgrading.md").read_text("utf-8").split())
+    chinese = " ".join((_REPO / "docs" / "upgrading_zh.md").read_text("utf-8").split())
+    stop_en = english[english.index("* **`openai4s stop`") :][:700]
+    stop_zh = chinese[chinese.index("* **`openai4s stop`") :][:400]
+    assert "prints a `shutting down…` line while it waits" not in stop_en
+    assert f"still running after the first {grace}s" in stop_en
+    assert "`daemon stopped`" in stop_en
+    assert "等待期间打印一行" not in stop_zh
+    assert f"过了最初 {grace} 秒仍未退出" in stop_zh
+    assert "`daemon stopped`" in stop_zh
 
 
 def test_daemon_health_ignores_environment_proxies_for_a_wsl_nat_host(monkeypatch):
@@ -995,7 +1168,9 @@ def test_detached_serve_does_not_accept_an_unrelated_healthy_daemon(
     assert module._cmd_serve_detached(SimpleNamespace(no_open=True), config) == 1
     output = capsys.readouterr()
     assert "daemon started" not in output.out
-    assert "did not become ready" in output.err
+    # The child exited while the unrelated daemon answered: that is what is
+    # reported, not a readiness wait that never ran out.
+    assert "exited with status 98 before it became ready" in output.err
 
 
 def test_detached_cleanup_escalates_to_kill_and_reaps():
@@ -1399,6 +1574,278 @@ def test_real_detached_child_rejects_future_schema_with_explicit_parent_error(
     assert "future_schema" in error and "did not become ready" not in error
     assert cfg.db_path.read_bytes() == before
     assert not cfg.pidfile.exists() and not cfg.statefile.exists()
+
+
+def _detached_child_that_exits(module, monkeypatch, *, output: str, status: int):
+    """A detached child that writes ``output`` to its log and has exited."""
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return status
+
+        def terminate(self):
+            raise AssertionError("an exited child must not be signalled")
+
+    def spawn(_command, **kwargs):
+        kwargs["stdout"].write(output.encode())
+        return Process()
+
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+
+def test_detached_child_failed_upgrade_is_reported_in_one_line_naming_the_backup(
+    tmp_path, monkeypatch, capsys
+):
+    """LR4-1 / UPG5-04. The foreground `serve` answers a failed upgrade with
+    one `error:` line naming the kept backup and exit 2. The detached parent
+    recognised only `future_schema`, so the same child -- dead after a second
+    -- was reported as "did not become ready within 60s" with exit 1."""
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    (cfg.logs_dir / "app.out").write_text("old log text must not be returned\n")
+    backup = cfg.db_path.with_name("openai4s.db.v27.bak")
+    backup.write_bytes(b"kept")
+    _detached_child_that_exits(
+        module,
+        monkeypatch,
+        status=2,
+        output=(
+            "some startup notice\n"
+            "error: migration to version 32 failed at step 32: there is already "
+            "a table named ix_artifacts_project_created. The database was rolled "
+            "back and remains at version 27; re-running is safe. A pre-upgrade "
+            "backup is at /somewhere/else/openai4s.db.v27.bak.\n"
+            "private diagnostic tail\n"
+        ),
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 2
+
+    err = capsys.readouterr().err
+    errors = [line for line in err.splitlines() if line.startswith("error:")]
+    assert len(errors) == 1, err
+    assert errors[0].startswith("error: migration to version 32 failed at step 32")
+    assert "rolled back and remains at version 27" in errors[0]
+    assert str(backup) in errors[0]
+    assert str(cfg.logs_dir / "app.out") in errors[0]
+    assert "did not become ready" not in err
+    # Built from the numbers, never echoed: not the SQLite detail, not a path
+    # the log claims, not the rest of the log.
+    assert "already a table" not in err and "/somewhere/else" not in err
+    assert "private diagnostic" not in err and "old log" not in err
+
+
+def test_detached_child_failed_upgrade_names_no_backup_that_does_not_exist(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    _detached_child_that_exits(
+        module,
+        monkeypatch,
+        status=2,
+        output=(
+            "error: migration to version 32 failed at step 30: disk I/O error. "
+            "The database was rolled back and remains at version 29; re-running "
+            "is safe.\n"
+        ),
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 2
+
+    err = capsys.readouterr().err
+    assert "error: migration to version 32 failed at step 30" in err
+    assert "backup" not in err
+
+
+def test_detached_child_that_cannot_bind_is_reported_with_its_own_line(
+    tmp_path, monkeypatch, capsys
+):
+    import errno
+
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    line = module._bind_failure_message(OSError(errno.EADDRINUSE, "in use"), cfg)
+    _detached_child_that_exits(
+        module, monkeypatch, status=1, output=f"{line}\nprivate diagnostic tail\n"
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 1
+
+    err = capsys.readouterr().err
+    assert line in err
+    assert "did not become ready" not in err and "private diagnostic" not in err
+
+
+@pytest.mark.parametrize(("status", "expected"), [(1, 1), (2, 2), (-9, 1)])
+def test_detached_child_that_exits_early_is_not_reported_as_a_timeout(
+    tmp_path, monkeypatch, capsys, status, expected
+):
+    """An unrecognised early exit names the exit and the log, never a wait
+    that did not happen; a refusal's status 2 stays 2."""
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    _detached_child_that_exits(
+        module, monkeypatch, status=status, output="private diagnostic tail\n"
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == expected
+
+    err = capsys.readouterr().err
+    assert "within 60s" not in err and "did not become ready" not in err
+    assert "before it became ready" in err
+    assert str(cfg.logs_dir / "app.out") in err
+    assert "private diagnostic" not in err
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _v31_database_whose_upgrade_fails_in_any_process(db_path: Path) -> None:
+    """A real v31 database that step 32 cannot upgrade in *any* process: the
+    name its index needs is taken by a table, so no monkeypatch is involved
+    and a spawned child fails the same way."""
+    import sqlite3
+
+    from openai4s.store import Store
+
+    Store(db_path).close()
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("DROP INDEX IF EXISTS ix_artifacts_project_created")
+        conn.execute("CREATE TABLE ix_artifacts_project_created(x)")
+        conn.execute("DELETE FROM schema_migrations WHERE version>=32")
+        conn.execute("PRAGMA user_version = 31")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="detached sessions require POSIX")
+def test_real_detached_child_failed_upgrade_names_the_backup_and_exits_2(
+    tmp_path, monkeypatch, capsys
+):
+    import sqlite3
+    import time
+
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.port = _free_port()
+    cfg.ensure_dirs()
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI4S_NO_OPEN", "1")
+    monkeypatch.setenv("OPENAI4S_DETACHED_READY_TIMEOUT", "30")
+    _v31_database_whose_upgrade_fails_in_any_process(cfg.db_path)
+
+    started = time.monotonic()
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 2
+    assert time.monotonic() - started < 30
+
+    err = capsys.readouterr().err
+    backup = cfg.db_path.with_name("openai4s.db.v31.bak")
+    assert backup.exists()
+    assert "error: migration to version" in err and str(backup) in err
+    assert "did not become ready" not in err and "already a table" not in err
+    with sqlite3.connect(str(cfg.db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 31
+    assert not cfg.pidfile.exists() and not cfg.statefile.exists()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "hello", "--json"],
+        ["init", "--non-interactive", "--json"],
+        ["user", "list", "--json"],
+    ],
+)
+def test_a_future_schema_refusal_prints_its_code_under_json(
+    tmp_path, monkeypatch, capsys, argv
+):
+    """RFD-2. The exit-2 tables say `--json` prints the refusal's code. The
+    Store refusals are raised inside the Store open and reach `main()`, which
+    wrote only the stderr line: a script calling json.loads on stdout got an
+    empty string for exactly this refusal."""
+    import sqlite3
+
+    import openai4s.config as config_module
+    from openai4s.storage.migrations import SCHEMA_VERSION
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    cfg = config_module.Config()
+    cfg.ensure_dirs()
+    with sqlite3.connect(cfg.db_path) as db:
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    before = cfg.db_path.read_bytes()
+
+    assert module.main(argv) == 2
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["code"] == "future_schema"
+    assert f"database schema {SCHEMA_VERSION + 1}" in payload["error"]
+    # The operator's one line stays where the upgrade guide says it is.
+    assert "error: [future_schema]" in captured.err
+    assert "Traceback" not in captured.err
+    assert cfg.db_path.read_bytes() == before
+
+
+def test_a_failed_upgrade_refusal_prints_its_code_under_json(
+    tmp_path, monkeypatch, capsys
+):
+    import openai4s.config as config_module
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    config_module.Config().ensure_dirs()
+    db = _older_store_whose_upgrade_fails(tmp_path, monkeypatch)
+
+    assert module.main(["run", "say hello", "--json"]) == 2
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["code"] == "migration_failed"
+    assert payload["error"].startswith("migration to version")
+    assert str(db.with_name("openai4s.db.v31.bak")) in payload["error"]
+    assert "error: migration to version" in captured.err
+
+
+def test_a_store_refusal_without_json_prints_nothing_on_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    import openai4s.config as config_module
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    config_module.Config().ensure_dirs()
+    _older_store_whose_upgrade_fails(tmp_path, monkeypatch)
+
+    assert module.main(["run", "say hello"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: migration to version" in captured.err
 
 
 @pytest.mark.parametrize(

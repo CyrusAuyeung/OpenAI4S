@@ -10,9 +10,14 @@ removes the switch that let a local daemon run without an access token.
 
 The first 0.3.0 command that opens the database migrates
 `<data_dir>/openai4s.db` from schema **27** to schema **32**. Starting the
-daemon or running `openai4s run` both do this. The data directory is
-`~/.openai4s` unless `OPENAI4S_DATA_DIR` names another one. A `pip` install,
-the Linux tarball and the v0.2.0 macOS app all use that default.
+daemon or running `openai4s run` both do this. `openai4s doctor` does not: it
+reads the schema version without opening the database for writing, reports
+the pending upgrade as a warning (so it does not exit 0) and leaves the
+database unchanged. `openai4s diagnostics` does not either: its bundle records
+the pending upgrade in `report.json` and leaves the database unchanged.
+The data directory is `~/.openai4s` unless `OPENAI4S_DATA_DIR` names another
+one. A `pip` install, the Linux tarball and the v0.2.0 macOS app all use that
+default.
 
 The migration copies the database to `openai4s.db.v27.bak` before it changes
 anything. It keeps that copy if the migration fails, and **deletes it once the
@@ -21,7 +26,9 @@ left.
 
 If the migration fails, the database is rolled back and stays at schema 27, the
 copy is kept, and the command stops with one `error:` line that names where the
-copy is. `openai4s serve` and `openai4s run` then exit with status 2.
+copy is. `openai4s serve` (with or without `--detached`) and `openai4s run`
+then exit with status 2. Until an upgrade succeeds, `openai4s doctor` fails its
+data check (exit 2) and names the kept copy.
 
 If you might want to go back to 0.2.x, make your own copy first:
 
@@ -113,13 +120,17 @@ and every daemon requires its access token, including one bound to
   limit, no progress or cancellation, exits `3`. The `--json` output still
   carries `stop_reason`. A script that treated any finished run as success
   should check the exit status. A refusal before the run starts also exits
-  `2`: an empty task, an invalid `--allow-test-command`, or an explicit code
-  mode whose test command nothing can authorize.
+  `2`: an empty task, an invalid `--allow-test-command`, an explicit code mode
+  whose test command nothing can authorize, or a database it will not open,
+  one newer than this build (`future_schema`) or one whose upgrade failed
+  (`migration_failed`, see section 1). With `--json` the error and its code
+  are printed on stdout.
 * **`openai4s stop` waits longer.** 0.2.x waited about 5s for the daemon to
   exit before it reported failure or, with `--force`, sent SIGKILL. 0.3.0 waits
-  up to `--timeout`, 30s by default, first, and prints a `shutting down…` line
-  while it waits. A script that relied on the short wait can pass
-  `--timeout 5` (with `--force` for the old SIGKILL).
+  up to `--timeout`, 30s by default, first. A daemon still running after the
+  first 5s gets a `shutting down…` line on stderr while the wait goes on; one
+  that exits sooner prints only `daemon stopped`. A script that relied on the
+  short wait can pass `--timeout 5` (with `--force` for the old SIGKILL).
 * **Container image.** The image runs Python 3.14; the 0.2.0 image ran 3.12. If
   you extended the image or installed packages into a running container,
   rebuild or reinstall them for 3.14.

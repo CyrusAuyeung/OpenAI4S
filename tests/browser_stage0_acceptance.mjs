@@ -244,11 +244,40 @@ function linuxProcessStartToken(pid) {
   return parseLinuxProcessStartToken(raw);
 }
 
+function parseDarwinProcessStartSeconds(lstart) {
+  // `ps -o lstart=` under LC_ALL=C: "Mon Sep 14 11:42:09 2026", local time.
+  const started = Date.parse(String(lstart || "").trim());
+  return Number.isFinite(started) ? Math.floor(started / 1000) : null;
+}
+
+function darwinStartTokenFor(seconds, recorded) {
+  // The daemon records kp_proc.p_starttime as "<seconds>.<microseconds>"; ps
+  // reports that same instant to the second. Answer with the recorded token
+  // only when the seconds agree, and with a value that cannot equal it when
+  // they do not, so the caller's equality check decides either way.
+  if (seconds === null) return null;
+  const match = /^(\d+)\.\d{6}$/.exec(typeof recorded === "string" ? recorded : "");
+  return match && Number(match[1]) === seconds ? recorded : `ps-start-${seconds}`;
+}
+
+function darwinProcessStartToken(pid, recorded) {
+  // macOS has no procfs; the daemon reads its start token from sysctl.
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C" },
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string") return null;
+  return darwinStartTokenFor(parseDarwinProcessStartSeconds(result.stdout), recorded);
+}
+
+const hostProcessStartToken =
+  process.platform === "darwin" ? darwinProcessStartToken : linuxProcessStartToken;
+
 function validateDisposableDataDir(
   base,
   environment = process.env,
   pidLiveness = pidIsLive,
-  processStartToken = linuxProcessStartToken,
+  processStartToken = hostProcessStartToken,
 ) {
   if (Object.prototype.hasOwnProperty.call(environment, "OPENAI4S_TOKEN")) {
     throw new Error("OPENAI4S_TOKEN override is forbidden for disposable acceptance");
@@ -323,7 +352,7 @@ function validateDisposableDataDir(
     throw new Error("disposable daemon pid is not live");
   }
   if (state.pid_start !== null) {
-    const currentStart = processStartToken(pid);
+    const currentStart = processStartToken(pid, state.pid_start);
     if (currentStart === null) {
       throw new Error("disposable daemon start token could not be verified");
     }
@@ -536,6 +565,26 @@ function disposableBindingSelfTest() {
         `7 (worker name with ) punctuation) ${procFields.join(" ")}`,
       ) === "22",
       "Linux process start-token parser did not preserve field 22",
+    );
+    const darwinSeconds = parseDarwinProcessStartSeconds("Mon Sep  4 01:02:03 2026\n");
+    assertion(
+      darwinSeconds === Math.floor(new Date(2026, 8, 4, 1, 2, 3).getTime() / 1000),
+      "macOS ps lstart parser did not read the local start time",
+    );
+    assertion(
+      darwinStartTokenFor(darwinSeconds, `${darwinSeconds}.123456`) ===
+        `${darwinSeconds}.123456`,
+      "a macOS start token whose seconds match ps was not confirmed",
+    );
+    for (const recorded of [`${darwinSeconds + 1}.123456`, `${darwinSeconds}`, null]) {
+      assertion(
+        darwinStartTokenFor(darwinSeconds, recorded) !== recorded,
+        "a macOS start token ps does not confirm was accepted",
+      );
+    }
+    assertion(
+      darwinStartTokenFor(null, `${darwinSeconds}.123456`) === null,
+      "an unreadable macOS start time was not reported as unverifiable",
     );
     const tokenBoundState = { ...state, pid_start: "verified-start-token" };
     fs.writeFileSync(
