@@ -17,6 +17,7 @@ import errno
 import getpass
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -947,6 +948,30 @@ def _wait_pid_exit(
     return not _pid_alive(pid)
 
 
+#: How long `openai4s stop` waits, in total, for the daemon to exit before it
+#: reports failure (or, with ``--force``, escalates to SIGKILL). The first
+#: stretch is the shared SIGTERM grace, ``TERM_GRACE_S``; a daemon tearing down
+#: a first-kernel bootstrap or several live kernels was measured at 8-9s, and
+#: returning 2 at the 5s grace sent scripts toward ``--force`` for a shutdown
+#: that was about to finish by itself.
+STOP_TIMEOUT_S = 30.0
+_STOP_POLL_INTERVAL_S = 0.1
+
+
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
+    return seconds
+
+
+def _poll_attempts(seconds: float) -> int:
+    return max(1, round(seconds / _STOP_POLL_INTERVAL_S))
+
+
 def cmd_stop(args) -> int:
     cfg = get_config()
     pid = _read_pid(cfg)
@@ -954,29 +979,50 @@ def cmd_stop(args) -> int:
         print("daemon: not running")
         _clear_state(cfg)
         return 1
+    timeout = getattr(args, "timeout", None) or STOP_TIMEOUT_S
+    force = getattr(args, "force", False)
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass  # exited between the aliveness check and the signal
-    stopped = _wait_pid_exit(pid)
-    if not stopped and getattr(args, "force", False):
+    grace = min(timeout, TERM_GRACE_S)
+    stopped = _wait_pid_exit(
+        pid, attempts=_poll_attempts(grace), interval=_STOP_POLL_INTERVAL_S
+    )
+    remaining = timeout - grace
+    if not stopped and remaining > 0:
+        # Past the SIGTERM grace a live daemon is usually still tearing down
+        # (a cell's interrupt, kernel workers, the store). Say so and keep
+        # polling instead of calling a shutdown in progress a failure.
+        print(
+            f"daemon (pid {pid}) is shutting down… waiting up to "
+            f"{remaining:g}s more",
+            file=sys.stderr,
+            flush=True,
+        )
+        stopped = _wait_pid_exit(
+            pid, attempts=_poll_attempts(remaining), interval=_STOP_POLL_INTERVAL_S
+        )
+    if not stopped and force:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         stopped = _wait_pid_exit(pid)
     if not stopped:
-        # An in-flight cell can hold shutdown past the grace period. The state
+        # An in-flight cell can hold shutdown past the timeout. The state
         # files must outlive the process they describe: clearing them here left
         # a live daemon on a bound port that `status` and a second `stop` both
         # called "not running", and the next `serve` crashed into.
         hint = (
             "it ignored SIGKILL"
-            if getattr(args, "force", False)
-            else "retry `openai4s stop`, or `openai4s stop --force` to SIGKILL it"
+            if force
+            else "retry `openai4s stop`, `openai4s stop --timeout <seconds>` to "
+            "wait longer, or `openai4s stop --force` to SIGKILL it"
         )
         print(
-            f"error: daemon (pid {pid}) is still shutting down — {hint}",
+            f"error: daemon (pid {pid}) is still shutting down after "
+            f"{timeout:g}s — {hint}",
             file=sys.stderr,
         )
         return 2
@@ -2163,7 +2209,17 @@ def build_parser() -> argparse.ArgumentParser:
     pstop.add_argument(
         "--force",
         action="store_true",
-        help="escalate to SIGKILL if the daemon does not exit in time",
+        help="escalate to SIGKILL if the daemon does not exit within --timeout",
+    )
+    pstop.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=STOP_TIMEOUT_S,
+        metavar="SECONDS",
+        help=(
+            "how long to wait for the daemon to exit before reporting failure "
+            "(exit 2) or, with --force, sending SIGKILL (default: %(default)gs)"
+        ),
     )
     pstop.set_defaults(fn=cmd_stop)
     sub.add_parser("url", help="print the web UI url").set_defaults(fn=cmd_url)

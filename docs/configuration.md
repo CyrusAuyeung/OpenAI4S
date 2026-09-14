@@ -282,7 +282,7 @@ openai4s serve     # daemon + web UI (foreground; --detached to background,
                    # up to 60s for /health, OPENAI4S_DETACHED_READY_TIMEOUT overrides)
 openai4s status    # is it up? (plain URL, never the access token)
 openai4s url       # the sign-in URL; it carries the access token, so keep it out of logs
-openai4s stop      # stop the daemon
+openai4s stop      # stop the daemon; waits up to --timeout (default 30s), --force to SIGKILL
 openai4s run "…"   # one Code-as-Action task in-process, no daemon
 openai4s setup --profile standard          # build Python + R
 openai4s setup --profile standard --update # sync Python + R, no pruning
