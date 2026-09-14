@@ -184,6 +184,7 @@ from openai4s.server.notebook_lineage import (
 from openai4s.server.plans import PlanService
 from openai4s.server.plans import extract_plan_json as _extract_plan_json
 from openai4s.server.plans import normalize_plan as _normalize_plan
+from openai4s.server.plans import plan_draft_instruction
 from openai4s.server.plans import public_plan as _plan_public
 from openai4s.server.plans import short_hash as _short_hash
 from openai4s.server.plans import slugify as _slugify
@@ -1555,6 +1556,7 @@ class WSHub:
             "step",
             "step_update",
             "plan_ready",
+            "plan_not_captured",
             "plan_progress",
             "execution_state",
             "execution_queue",
@@ -1974,6 +1976,9 @@ class SessionState:
         # Per-session model override (from the composer dropdown) + plan flag.
         self.model: str | None = None
         self.plan: bool = False
+        # Whether this plan turn stored a draft. Reset per turn; a plan turn
+        # that ends without one says so on its result and the stream.
+        self.plan_captured: bool = False
         # Explore mode: autonomous deep exploration — larger turn budget and the
         # turn only ends via host.submit_output (prose-only replies are nudged).
         self.explore: bool = False
@@ -2407,8 +2412,9 @@ START INSTANTLY. Your FIRST move of a turn is the first concrete action (a searc
 a fetch, a code cell) — or simply the answer, if the question is conversational. \
 Do NOT open with a plan: no upfront `host.todo_write`, no prose step list, no \
 "here is my plan first". When the user wants to review a plan before execution they \
-switch on Plan mode (which the server enforces and announces in the message); \
-otherwise they chose instant execution, so deliver progress from the very first \
+switch on Plan mode: that turn has no tools and its message carries explicit \
+plan-mode instructions, which take precedence over this paragraph for that turn. \
+Otherwise they chose instant execution, so deliver progress from the very first \
 card. Only for a genuinely long campaign (≳4 distinct stages) may you drop a \
 `host.todo_write` progress tracker — AFTER the work is visibly underway — and \
 keep its statuses current as you go.
@@ -9635,6 +9641,7 @@ class SessionRunner:
         if model:
             st.model = model
         st.plan = bool(plan)
+        st.plan_captured = False
         # plan mode wins: a plan turn never executes, so explore is meaningless
         st.explore = bool(explore) and not st.plan
         # Per turn, not per session: the same session's next request can be a
@@ -9753,6 +9760,15 @@ class SessionRunner:
             )
             if mode_fragment:
                 resolved = resolved + "\n\n" + mode_fragment
+            if st.plan:
+                # Withholding tools is not an instruction: without this a REST
+                # `plan:true` turn never told the model the format to draft in.
+                # Skipped when the request already carries plan-mode text (the
+                # workbench prefix, the revision seed). Model input only, like
+                # the fragments above; the stored user row is unchanged.
+                plan_instruction = plan_draft_instruction(user_text)
+                if plan_instruction:
+                    resolved = resolved + "\n\n" + plan_instruction
             # attach the pinned figure(s) with the pin marker drawn on, so a
             # vision model SEES what the user pointed at (not an x%/y% guess)
             content = (
@@ -10550,6 +10566,20 @@ class SessionRunner:
                         tail_row.get("message_id"),
                         turn_identity,
                     )
+            if st.plan and status == "completed" and not st.plan_captured:
+                # The turn itself completed -- the model answered -- but there
+                # is no draft to approve. Said on the stream and on the result
+                # so an API client is not left polling `GET /plan` for a row
+                # that was never written. The workbench keeps its prose
+                # approval fallback either way.
+                emit(
+                    {
+                        "type": "plan_not_captured",
+                        "frame_id": root_frame_id,
+                        "request_id": turn_request_id,
+                        "reason": "no_plan_steps",
+                    }
+                )
             if (
                 auto_review
                 and status == "completed"
@@ -10648,6 +10678,8 @@ class SessionRunner:
                 "owner": execution.owner.as_dict(),
                 "error": err_text if status == "failed" else None,
                 **turn_identity,
+                # Plan turns only: whether a draft plan row was stored.
+                **({"plan_captured": bool(st.plan_captured)} if st.plan else {}),
             }
         # For direct (non-MessageJob) calls the coordinator completes while the
         # context exits. Keep the historical terminal frame event last; queued
@@ -11600,7 +11632,8 @@ class SessionRunner:
 
     # -- structured plan: capture / persist / approve / revise / discard ----
     def _finalize_plan(self, st: SessionState, reply: str, prose: str, emit) -> None:
-        self.plans.finalize(st, reply, prose, emit)
+        if self.plans.finalize(st, reply, prose, emit):
+            st.plan_captured = True
         plan = self.plans.get_state(st.root_frame_id)
         cursor = ""
         if isinstance(plan, Mapping):

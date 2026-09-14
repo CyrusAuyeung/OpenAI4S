@@ -17,10 +17,69 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from openai4s.server.completions import response_language
 from openai4s.store import Store
 
 EventSink = Callable[[dict[str, Any]], None]
 EmitterFactory = Callable[[str], EventSink]
+
+#: How a request says it already carries plan-mode instructions. The workbench
+#: prepends its localised `plan.prompt.*` text (and the legacy app.js its
+#: Chinese literal) starting with one of these, and the revision seed below
+#: starts with one too; the server adds its own instruction only when none is
+#: present, so a request is never instructed twice.
+PLAN_MODE_PROMPT_MARKERS = ("[Plan Mode]", "[计划模式]")
+
+#: The plan-draft instruction a `plan:true` turn adds to the model input when
+#: the request does not carry one. Appended after the task (the stored user
+#: row is unchanged), mirroring the workbench's `plan.prompt.*` wording so the
+#: JSON block `extract_plan_json` looks for is what the model is asked for.
+PLAN_DRAFT_INSTRUCTIONS = {
+    "en": (
+        "[Plan Mode] Do not execute anything or call any tools yet. Devise a "
+        "structured execution plan for the task above, and output only two "
+        "parts:\n"
+        "1) A brief description of the approach (prose, explaining your chosen "
+        "goal/approach and the main analytical thread);\n"
+        "2) Immediately followed by a ```json code block, strictly using the "
+        "following structure:\n"
+        '{"title":"Plan title","rationale":"One-sentence rationale",'
+        '"confidence":"high|medium|low","steps":[{"id":"s1","title":"Step '
+        'title","detail":"What this step does","deliverables":'
+        '["intermediate-table.csv","figure.png"]}]}\n'
+        "Each step must have a unique id, a clear title, a brief description, "
+        "and a list of expected output filenames for that step; where "
+        "reasonable, make each step yield a viewable intermediate result -- a "
+        "table (.csv) or a figure (.png) -- as a deliverable. Wait for user "
+        "approval before executing."
+    ),
+    "zh": (
+        "[计划模式] 请先不要执行、不要调用任何工具。为上面的任务制定一个结构化执行"
+        "计划，并只输出两部分：\n"
+        "1) 一段简短的方案说明（散文，说明你选择的目标/思路与分析主线）；\n"
+        "2) 紧接着一个 ```json 代码块，严格使用如下结构：\n"
+        '{"title":"计划标题","rationale":"一句话理由","confidence":'
+        '"high|medium|low","steps":[{"id":"s1","title":"步骤标题","detail":'
+        '"这一步做什么","deliverables":["中间结果.csv","图.png"]}]}\n'
+        "每个步骤要有唯一 id、清晰标题、简要说明，以及该步预期产出的结果文件名列表；"
+        "尽量让每一步都产出一个可查看的中间结果——一张表格（.csv）或一张图（.png）"
+        "作为 deliverable。等待用户批准后再执行。"
+    ),
+}
+
+
+def carries_plan_mode_prompt(text: str) -> bool:
+    """Whether ``text`` already opens with plan-mode instructions."""
+    return str(text or "").lstrip().startswith(PLAN_MODE_PROMPT_MARKERS)
+
+
+def plan_draft_instruction(user_text: str) -> str | None:
+    """The instruction a `plan:true` turn appends, or None when the request
+    already carries one. Localised by the request, as the turn's own
+    completion and narration text are."""
+    if carries_plan_mode_prompt(user_text):
+        return None
+    return PLAN_DRAFT_INSTRUCTIONS[response_language(user_text)]
 
 
 class MessageRunner(Protocol):
@@ -66,8 +125,12 @@ class PlanService:
         reply: str,
         prose: str,
         emit: EventSink,
-    ) -> None:
-        """Capture a planner reply as a draft plan and a JSON artifact."""
+    ) -> dict[str, Any] | None:
+        """Capture a planner reply as a draft plan and a JSON artifact.
+
+        Returns the stored draft row, or None when the reply yields no steps
+        -- the caller reports that miss, since nothing is stored for it.
+        """
         root_frame_id = session.root_frame_id
         raw = extract_plan_json(reply)
         task_hint = ""
@@ -80,7 +143,7 @@ class PlanService:
         plan = normalize_plan(raw, prose, task_hint)
         if not plan["steps"]:
             # Keep the prose-only fallback card when no plan can be recovered.
-            return
+            return None
 
         previous = self.store.get_plan_by_frame(root_frame_id)
         reusable = previous if previous and previous.get("status") == "draft" else None
@@ -120,6 +183,7 @@ class PlanService:
                 status="draft",
             )
         self.emit_ready(emit, root_frame_id, row)
+        return row
 
     def write_artifact(
         self,
