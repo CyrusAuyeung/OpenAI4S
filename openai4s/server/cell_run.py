@@ -15,6 +15,10 @@ from typing import Any, Callable, Protocol
 
 from openai4s.agent.actions import is_completion_only_cell
 from openai4s.execution import CaptureResult, CellExecutionResult, CellRequest
+from openai4s.execution.attempts import (
+    attempt_state_for_exception,
+    attempt_state_for_result,
+)
 from openai4s.execution.watchdog import (
     KernelCancellation,
     KernelNotResetCancellation,
@@ -475,7 +479,7 @@ class CellExecutionService:
                 raise record_exc from exc
             self._finish_attempt(
                 attempt_id,
-                "cancelled" if isinstance(exc, KernelCancellation) else "worker_died",
+                attempt_state_for_exception(exc, otherwise="worker_died"),
                 exc,
             )
             if show_in_notebook and request.stream:
@@ -553,7 +557,7 @@ class CellExecutionService:
             raise
         self._finish_attempt(
             attempt_id,
-            _terminal_state(result),
+            attempt_state_for_result(result),
             result.get("error") or None,
         )
         if show_in_notebook and request.stream:
@@ -955,18 +959,6 @@ def _error_result(cell_id: str, message: str) -> dict[str, Any]:
         "trace": {"error_lineno": None, "error_call": None},
         "usage": {},
     }
-
-
-def _terminal_state(result: dict[str, Any]) -> str:
-    if result.get("interrupted"):
-        return "interrupted"
-    error = str(result.get("error") or "")
-    lowered = error.lower()
-    if "timed out" in lowered or "timeout" in lowered:
-        return "timed_out"
-    if error:
-        return "failed"
-    return "completed"
 
 
 __all__ = ["CellExecutionPorts", "CellExecutionService", "activity_title"]
