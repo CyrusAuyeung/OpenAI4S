@@ -29,6 +29,7 @@ class Harness:
         self.run_cell_id = None
         self.capture_cell_id = None
         self.capture_receipts = None
+        self.artifact_steps: list[tuple[str, str]] = []
 
     def ports(self) -> CellExecutionPorts:
         return CellExecutionPorts(
@@ -90,8 +91,11 @@ class Harness:
         self.capture_receipts = artifact_receipts
         return self.capture_result
 
-    def emit_artifact_step(self, session, title, artifacts, emit):
+    def emit_artifact_step(
+        self, session, title, artifacts, emit, environment, language
+    ):
         self.order.append("artifact_step")
+        self.artifact_steps.append((environment, language))
 
     def record_cell(self, **record):
         self.order.append("record")
@@ -295,6 +299,32 @@ def test_submit_output_does_not_skip_capture_or_execution_log(tmp_path):
     assert harness.records[0]["state_revision"] == 1
     assert result.state_revision == 1
     assert result.generation_id is None
+    assert harness.artifact_steps == [("python — struct", "python")]
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [("r", ("r", "r")), ("python", ("python — struct", "python"))],
+)
+def test_the_saving_step_names_the_cell_s_own_runtime(tmp_path, language, expected):
+    """The capture card is a second record of which runtime wrote the files.
+    It was handed nothing about the Cell, so its writer used the Python
+    kernel's label and every R Cell's card said "python"."""
+    harness = Harness()
+    harness.capture_result = CaptureResult(
+        files_written=["table.csv"],
+        artifacts=[{"artifact_id": "artifact-1", "filename": "table.csv"}],
+    )
+    service = CellExecutionService(harness.ports(), id_factory=lambda: "cell-1")
+
+    service.execute(
+        _session(tmp_path),
+        CellRequest("write.csv(x, 'table.csv')", "agent", language=language),
+        lambda _event: None,
+    )
+
+    assert harness.artifact_steps == [expected]
+    assert harness.records[0]["kernel_id"] == expected[0]
 
 
 def test_bind_lineage_records_host_side_reads(tmp_path):

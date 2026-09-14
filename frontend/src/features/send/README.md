@@ -22,7 +22,8 @@ F-11 send chain and live cards. Composer `send()`, turn tickets, step / plan / p
 | [`index.ts`](index.ts) | `installSend` assigns window names, registers WS handlers. DOM-free: `main.tsx` binds the composer after render. |
 | [`install.test.ts`](install.test.ts) | Ten contract names pass `isReady`; does not register `frame_update`. |
 | [`permission.ts`](permission.ts) | Permission gate cards. Frozen DOM classes `.perm-card` / `.resolved` / `.allowed` / `.denied`. |
-| [`plan.ts`](plan.ts) | Structured plan card, progress, approve / revise / discard / resume. |
+| [`plan.ts`](plan.ts) | Structured plan card, progress, approve / revise / discard / resume. A step still `in_progress` pulses only while the plan is executing; a `completed` plan that still has one (rows written before the server refused that pair) is labelled as ended with steps not confirmed, from a feature-local copy table. |
+| [`plan.test.ts`](plan.test.ts) | The terminal plan card: a completed plan with a step in progress is not shown as complete, the live glyph stays while executing, and a fully settled plan still reads complete. |
 | [`problems.ts`](problems.ts) | Attachment problem cards (client wording) and @-ref problem cards (server wording). |
 | [`send.ts`](send.ts) | Composer send chain. Plan-mode payload via F-07 `planModePayload`. `bindComposer` (called from `main.tsx` after `render`). |
 | [`step.ts`](step.ts) | Semantic activity steps, `buildStepCard`, `searchResultHttpUrl`. |

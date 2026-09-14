@@ -22,7 +22,8 @@ F-11 发送全链与现场卡片。作曲框 `send()`、turn ticket、步骤 / �
 | [`index.ts`](index.ts) | `installSend` 往 window 赋值、注册 WS handler。不碰 DOM：作曲框由 `main.tsx` 在 render 之后绑定。 |
 | [`install.test.ts`](install.test.ts) | 十个契约名字通过 `isReady`；不注册 `frame_update`。 |
 | [`permission.ts`](permission.ts) | 权限门卡片。冻结 DOM 类名 `.perm-card` / `.resolved` / `.allowed` / `.denied`。 |
-| [`plan.ts`](plan.ts) | 结构化计划卡、进度、批准 / 修订 / 丢弃 / 恢复。 |
+| [`plan.ts`](plan.ts) | 结构化计划卡、进度、批准 / 修订 / 丢弃 / 恢复。仍为 `in_progress` 的步骤只在计划执行中时才闪烁；`completed` 计划若仍带着这样的步骤（服务端开始拒绝这种组合之前写下的行），会用本功能自带的文案表标成「已结束、有步骤未确认完成」。 |
+| [`plan.test.ts`](plan.test.ts) | 结束态计划卡：带着进行中步骤的已完成计划不显示为完成；执行中仍保留实时图标；步骤全部有结论的计划照常显示完成。 |
 | [`problems.ts`](problems.ts) | 附件问题卡（客户端文案）与 @-引用问题卡（服务端文案）。 |
 | [`send.ts`](send.ts) | 作曲框发送全链。计划模式 payload 走 F-07 `planModePayload`。`bindComposer`（由 `main.tsx` 在 `render` 之后调用）。 |
 | [`step.ts`](step.ts) | 语义活动步骤、`buildStepCard`、`searchResultHttpUrl`。 |

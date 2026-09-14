@@ -17,6 +17,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from openai4s.host.progress import SETTLED_STEP_STATUSES
 from openai4s.server.completions import response_language
 from openai4s.store import Store
 
@@ -410,7 +411,7 @@ class PlanService:
     #: `PLAN_STEP_STATUSES`, `host.plan_update` accepts it, and `app.js` renders
     #: it with its own glyph; only this partition had never heard of it, so
     #: every skipped step was re-run on resume.
-    _SETTLED_STEP_STATUSES = frozenset({"completed", "failed", "skipped"})
+    _SETTLED_STEP_STATUSES = SETTLED_STEP_STATUSES
 
     def unfinished_steps(self, plan: dict[str, Any]) -> list[dict[str, Any]]:
         """The steps a resume still has to run.
@@ -430,6 +431,34 @@ class PlanService:
             if status not in self._SETTLED_STEP_STATUSES:
                 remaining.append(step)
         return remaining
+
+    def _status_after_turn(self, plan_id: str, final_status: str) -> str:
+        """The plan status a finished execution turn may write.
+
+        A completed turn is not a completed plan while a step is still
+        `in_progress`. The model can mark the last step in progress and call
+        `host.submit_output` in the same Cell, which ends the turn before it
+        records the step's outcome; mapping that turn straight to `completed`
+        stored -- and the card showed -- PLAN COMPLETE next to a step still in
+        progress, permanently, since only a paused plan can resume.
+
+        Nothing records whether that step's work landed, so it is not settled
+        on the agent's behalf. The plan pauses instead: the step stays in
+        progress, `unfinished_steps` already counts it, and Resume finishes it.
+        A step the turn never started (`pending`) keeps the existing mapping.
+        """
+        if final_status != "completed":
+            return final_status
+        plan = self.store.get_plan(plan_id) or {}
+        step_status = plan.get("step_status") or {}
+        for index, step in enumerate(plan.get("steps") or []):
+            step_id = step.get("id") or f"s{index + 1}"
+            status = (step_status.get(step_id) or {}).get("status") or step.get(
+                "status"
+            )
+            if status == "in_progress":
+                return "paused"
+        return final_status
 
     def resume_seed(self, plan: dict[str, Any], remaining: list[dict[str, Any]]) -> str:
         """The execution seed for a resume: only what is left, and a standing
@@ -676,6 +705,7 @@ class PlanService:
             final_status = (
                 self.store.get_plan(plan["plan_id"]).get("status") or "completed"
             )
+        final_status = self._status_after_turn(plan["plan_id"], final_status)
         if final_status in ("completed", "failed", "paused"):
             self.store.update_plan(plan["plan_id"], status=final_status)
         self.emit_ready(emit, root_frame_id, self.store.get_plan(plan["plan_id"]))
@@ -757,6 +787,7 @@ class PlanService:
             final_status = (
                 self.store.get_plan(plan["plan_id"]).get("status") or "completed"
             )
+        final_status = self._status_after_turn(plan["plan_id"], final_status)
         if final_status in ("completed", "failed", "paused"):
             self.store.update_plan(plan["plan_id"], status=final_status)
         self.emit_ready(
