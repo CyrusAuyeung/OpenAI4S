@@ -113,3 +113,72 @@ def test_a_cell_cancelled_while_its_kernel_bootstraps_never_runs(tmp_path):
         event for event in hub.events if event.get("type") == "notebook_cell_finished"
     ]
     assert [event["status"] for event in finished] == ["interrupted"]
+
+
+def _session(runner) -> object:
+    frame_id = runner.store.new_frame(kind="turn", project_id="default", status="ready")
+    return runner._state(frame_id, "default")
+
+
+def test_the_stop_marker_alone_refuses_a_cell_with_no_admitted_ticket(tmp_path):
+    """`st.cancel` is what the watchdog and a pre-coordinator holder observe.
+
+    It must refuse the Cell on its own, with no ticket bound to this thread.
+    """
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    runner = gateway_mod.SessionRunner(cfg, _Hub(), start_idle_sweeper=False)
+    try:
+        st = _session(runner)
+        assert runner.executions.current(st.root_frame_id) is None
+        assert not runner._cell_cancelled(st)
+        st.cancel.set()
+        assert runner._cell_cancelled(st)
+    finally:
+        runner.close()
+
+
+def test_a_cancelled_ticket_refuses_the_cell_before_the_stop_marker_is_set(tmp_path):
+    """Stop, session close and shutdown cancel the ticket *first*.
+
+    Only afterwards do they signal the event bound to it, so between the two a
+    Cell about to start sees a cancelled ticket and a clear `st.cancel`. The
+    ticket alone must refuse it -- and only for its own session.
+    """
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    runner = gateway_mod.SessionRunner(cfg, _Hub(), start_idle_sweeper=False)
+    try:
+        st = _session(runner)
+        other = _session(runner)
+        ticket = runner.executions.submit(
+            st.root_frame_id,
+            owner="user_repl",
+            owner_id="notebook",
+            execution_id="repl-cancelled-first",
+            resource_keys=("workspace",),
+        )
+        # Bound to an event other than `st.cancel`, so cancelling the ticket
+        # leaves the session's own marker exactly as the window leaves it.
+        bound = threading.Event()
+        with runner.executions.admitted(ticket, cancel_event=bound, timeout=10):
+            assert not runner._cell_cancelled(st)
+            result = runner.executions.cancel(
+                st.root_frame_id,
+                execution_id="repl-cancelled-first",
+                owner="user_repl",
+                owner_id="notebook",
+            )
+            assert result["ok"], result
+            assert ticket.cancellation.is_set()
+            assert not st.cancel.is_set()
+            assert runner._cell_cancelled(st)
+            assert not runner._cell_cancelled(other)
+    finally:
+        runner.close()
