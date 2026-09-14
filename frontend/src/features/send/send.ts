@@ -13,7 +13,7 @@
  * pinned dispatch id, never whatever `currentId` happens to hold.
  */
 
-import { planModePayload, t } from "../../i18n/runtime";
+import { LANG, planModePayload, t } from "../../i18n/runtime";
 import {
   _environmentStatusRefreshFailed,
   skillsCatalog,
@@ -497,12 +497,7 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
         standardProfileReadiness.value = unavailableReadinessSnapshot();
         renderEnvironmentReadinessBanner();
       }
-      const box = $("#composer") as HTMLTextAreaElement | null;
-      if (box && !box.value.trim()) box.value = text;
-      if (box) {
-        grow();
-        renderComposerRefChips();
-      }
+      restoreDraft(text);
       w.remove();
       if (ownsTurnTicket(turnTicketToken)) turnDone("failed");
       callLane("openCust", "compute");
@@ -510,27 +505,45 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
       void loadSessions();
       return;
     }
-    const err = e as { code?: string };
+    const err = e as { code?: string; status?: number };
+    // A 4xx is the server refusing this message before admission -- a model
+    // profile with no key, a pin that cannot be honoured, nothing active to
+    // rebind to. No user row and no job exist for it, so a reload would not
+    // show the text: it goes back into the composer and the optimistic bubble
+    // goes. A 5xx may still have been admitted, and keeps both as before.
+    const notAdmitted = refused && Number(err.status) < 500;
+    if (notAdmitted) {
+      restoreDraft(text);
+      w.remove();
+    }
+    let lasting = t("toast.sendFailed", apiErrorText(e));
+    let settingsCode = err?.code;
     if (err && (err.code === "model_revision_unavailable" || err.code === "model_revision_ambiguous")) {
       const ask =
         typeof globalThis.confirm === "function" ? globalThis.confirm(t("model.rebind.confirm")) : false;
       if (ask) {
         try {
-          await api(`/frames/${encodeURIComponent(dispatchFrameId)}/model-binding`, {
+          const rebound = await api(`/frames/${encodeURIComponent(dispatchFrameId)}/model-binding`, {
             method: "POST",
           });
-          hint(t("model.rebind.done"));
           if (ownsTurnTicket(turnTicketToken)) turnDone("failed");
+          hint(rebindDoneText(rebound));
           void loadSessions();
           return;
         } catch (rebindError) {
-          hint(apiErrorText(rebindError), true);
+          lasting = apiErrorText(rebindError);
+          settingsCode = (rebindError as { code?: string } | null)?.code;
         }
       }
     }
-    hint(t("toast.sendFailed", apiErrorText(e)), true);
+    // turnDone paints its generic "This turn failed" hint in the same tick, so
+    // it goes first: the server's reason is the hint that has to stay.
     if (ownsTurnTicket(turnTicketToken)) turnDone("failed");
-    else w.classList.add("cancelled");
+    else if (!notAdmitted) w.classList.add("cancelled");
+    hint(lasting, true);
+    if (settingsCode === "model_profile_needs_key" || settingsCode === "model_profile_needs_active") {
+      callLane("openCust", "models");
+    }
     void loadSessions();
     return;
   }
@@ -541,6 +554,41 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
     resumeWatch(dispatchFrameId, dispatchOpenGen);
   }
   void loadSessions();
+}
+
+/** Feature-local copy: `i18n/en.ts` / `zh.ts` are generated extracts of app.js. */
+const REBIND_COPY: Record<"en" | "zh", Record<"unbound" | "backfilled", string>> = {
+  en: {
+    unbound: "No model profile is active: this session now runs on the daemon's global configuration",
+    backfilled: "Re-bound to the saved model profile this session's model matches",
+  },
+  zh: {
+    unbound: "当前没有启用的模型配置：该会话改为使用守护进程的全局配置运行",
+    backfilled: "已改绑到与该会话模型匹配的已保存模型配置",
+  },
+};
+
+/**
+ * What `POST /frames/{id}/model-binding` actually did. "Re-bound to the active
+ * model configuration" was shown for every 200, including `{bound: false}`
+ * from a daemon with no active profile -- a re-bind that bound nothing.
+ */
+export function rebindDoneText(answer: unknown): string {
+  const raw = answer && typeof answer === "object" ? (answer as { binding?: unknown }).binding : null;
+  const binding = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  const copy = REBIND_COPY[LANG === "zh" ? "zh" : "en"];
+  if (binding?.bound === false) return copy.unbound;
+  if (binding?.backfilled === true) return copy.backfilled;
+  return t("model.rebind.done");
+}
+
+/** Put a refused message's text back, unless something new was typed since. */
+function restoreDraft(text: string): void {
+  const box = $("#composer") as HTMLTextAreaElement | null;
+  if (!box) return;
+  if (!box.value.trim()) box.value = text;
+  grow();
+  renderComposerRefChips();
 }
 
 type ComposerDispatch = (text: string) => unknown;
