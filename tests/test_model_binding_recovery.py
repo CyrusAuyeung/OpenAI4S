@@ -508,3 +508,261 @@ def test_the_client_can_act_on_the_ambiguous_refusal_too():
     window = app_js[guard.end() : guard.end() + 700]
     assert "/model-binding" in window
     assert "confirm(" in window
+
+
+# --- one credential rule: readiness, bind and dispatch ---------------------
+#
+# Three call sites answered "does this profile have a usable credential" three
+# different ways. Readiness accepted a loopback endpoint; the fresh bind checked
+# nothing; the already-bound bind and dispatch accepted only the profile's own
+# stored key. So a profile relying on `OPENAI4S_<PROVIDER>_API_KEY`, or a keyless
+# local Ollama profile readiness called `ready`, was activated and pinned on the
+# first send, and dispatch then refused it with `model_revision_unavailable` --
+# which the rebind route "answered" by pinning the same profile again. The
+# user's message was lost on the way: the refusal fired while naming the
+# session, before the user row was written.
+#
+# The rule is now one: the profile's own key; else the SAME provider's key from
+# the daemon's environment (never another provider's); else keyless for a local
+# endpoint. A brokered key that no longer resolves is still a refusal.
+
+#: Not credential-shaped on purpose -- `source_secret_scan.py` would flag one.
+_ENV_KEY = "environment-key-for-this-provider"
+
+
+def _session(runner):
+    project = runner.store.create_project(name="p", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    return runner.create_session(project), project
+
+
+def _dispatch_spy(runner, monkeypatch):
+    """Record the configuration the turn loop was entered under.
+
+    `_loop` is replaced, nothing else: binding, the title summary's config
+    resolution, the user row and the pinned dispatch all run for real, and all of
+    them sit in front of this point.
+    """
+    seen: list = []
+
+    def _loop(st, emit, visible):
+        del emit, visible
+        seen.append(runner._llm_cfg(st))
+        return "submitted"
+
+    monkeypatch.setattr(runner, "_loop", _loop)
+    monkeypatch.setattr(runner, "_spawn_title_summary", lambda *a, **k: None)
+    return seen
+
+
+def _send(runner, call, frame, text):
+    accepted = call(
+        "POST", f"/frames/{frame}/message", {"request": text, "wait": False}
+    )
+    result = None
+    if accepted["code"] == 202:
+        result = next(
+            job for job in runner._jobs.values() if job.root_frame_id == frame
+        ).wait_result()
+    return accepted, result
+
+
+@pytest.mark.stubbed_backend
+def test_a_profile_keyed_by_the_environment_is_ready_bound_and_dispatched(
+    api, monkeypatch
+):
+    runner, call = api
+    monkeypatch.setenv("OPENAI4S_CLAUDE_API_KEY", _ENV_KEY)
+    seen = _dispatch_spy(runner, monkeypatch)
+
+    created = call(
+        "POST",
+        "/model-profiles",
+        {"name": "env-keyed", "provider": "claude", "model": "claude-sonnet-4-5"},
+    )
+    assert created["code"] == 201, created
+    # The profile holds no key of its own, and says so...
+    assert created["body"]["has_api_key"] is False
+    # ...but a credential resolves for it, so it is not `needs_key`.
+    assert created["body"]["readiness"]["state"] == "ready", created["body"]
+    profile_id = created["body"]["id"]
+    activated = call("POST", f"/model-profiles/{profile_id}/activate")
+    assert activated["code"] == 200 and activated["body"]["has_api_key"] is True
+
+    frame, _project = _session(runner)
+    accepted, result = _send(runner, call, frame, "name the capital of Italy")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen, "the turn never reached the model loop"
+    assert seen[-1].provider == "claude"
+    assert seen[-1].model == "claude-sonnet-4-5"
+    assert seen[-1].api_key == _ENV_KEY
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == profile_id
+
+
+@pytest.mark.stubbed_backend
+def test_a_keyless_local_profile_dispatches_without_borrowing_any_key(api, monkeypatch):
+    """The profile Customize → Models' local-discovery "Add" button creates.
+
+    Keyless, and it must stay keyless: `replace()` re-runs `LLMConfig`'s env
+    resolution, which would otherwise hand the daemon's generic key -- set by
+    the suite for another provider -- to whatever is listening on loopback.
+    """
+    runner, call = api
+    seen = _dispatch_spy(runner, monkeypatch)
+    created = call(
+        "POST",
+        "/model-profiles",
+        {
+            "name": "Ollama · llama3.2",
+            "provider": "chatgpt",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "llama3.2",
+        },
+    )
+    assert created["body"]["readiness"]["state"] == "ready", created["body"]
+    call("POST", f"/model-profiles/{created['body']['id']}/activate")
+
+    frame, _project = _session(runner)
+    accepted, result = _send(runner, call, frame, "hello")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen and seen[-1].base_url == "http://127.0.0.1:11434/v1"
+    assert seen[-1].api_key == "", "a key was sent to a keyless local endpoint"
+
+
+@pytest.mark.stubbed_backend
+def test_another_providers_key_is_never_inherited(api, monkeypatch):
+    """The daemon's key belongs to its own provider (`deepseek` here).
+
+    A Claude profile with no key of its own must not be dispatched under it:
+    readiness says `needs_key`, activation does not claim a key, and send
+    refuses before anything is admitted or pinned -- with a code that says what
+    is wrong, rather than the rebind prompt that would re-pin the same profile.
+    """
+    runner, call = api
+    seen = _dispatch_spy(runner, monkeypatch)
+    created = call(
+        "POST",
+        "/model-profiles",
+        {"name": "no-key", "provider": "claude", "model": "claude-sonnet-4-5"},
+    )
+    assert created["body"]["readiness"]["state"] == "needs_key"
+    activated = call("POST", f"/model-profiles/{created['body']['id']}/activate")
+    assert activated["body"]["has_api_key"] is False, activated
+
+    frame, _project = _session(runner)
+    accepted, _result = _send(runner, call, frame, "hello")
+    assert accepted["code"] == 409, accepted
+    assert accepted["body"].get("code") == "model_profile_needs_key", accepted
+    assert not seen, "the turn ran under a credential that is not this provider's"
+    assert not (runner.store.get_frame(frame) or {}).get("model_profile_id")
+
+
+def test_a_revoked_brokered_key_still_refuses_even_with_an_environment_key(
+    api, monkeypatch
+):
+    """Falling back is for a profile that never had a key. One that had a
+    brokered key which no longer resolves asked for *that* credential."""
+    runner, call = api
+    created = call(
+        "POST",
+        "/model-profiles",
+        {
+            "name": "brokered",
+            "provider": "claude",
+            "api_key": "sk-brokered",
+            "model": "claude-sonnet-4-5",
+        },
+    )
+    profile_id = created["body"]["id"]
+    call("POST", f"/model-profiles/{profile_id}/activate")
+    frame, project = _session(runner)
+    assert runner.bind_model_revision(frame)["model_profile_id"] == profile_id
+
+    monkeypatch.setenv("OPENAI4S_CLAUDE_API_KEY", _ENV_KEY)
+    row = next(p for p in runner.store.list_model_profiles() if p["id"] == profile_id)
+    runner.store.secrets.delete(row["api_key"])
+
+    listed = call("GET", "/model-profiles")["body"]["profiles"]
+    card = next(p for p in listed if p["id"] == profile_id)["readiness"]
+    assert card["state"] == "needs_key", card
+    with pytest.raises(GatewayError) as bound:
+        runner.bind_model_revision(frame)
+    assert bound.value.error_code == "model_revision_unavailable"
+    with pytest.raises(GatewayError) as dispatched:
+        runner._llm_cfg(runner._state(frame, project))
+    assert dispatched.value.error_code == "model_revision_unavailable"
+
+
+def test_a_tombstoned_pin_refuses_even_when_the_environment_has_a_key(api, monkeypatch):
+    """Delete destroys the profile's key, which used to be what made a pinned
+    tombstone undispatchable. With an environment fallback that is no longer
+    enough on its own, so the tombstone is refused for being one."""
+    runner, call = api
+    monkeypatch.setenv("OPENAI4S_CLAUDE_API_KEY", _ENV_KEY)
+    created = call(
+        "POST",
+        "/model-profiles",
+        {"name": "env-keyed", "provider": "claude", "model": "claude-sonnet-4-5"},
+    )
+    profile_id = created["body"]["id"]
+    call("POST", f"/model-profiles/{profile_id}/activate")
+    frame, project = _session(runner)
+    frozen = runner.freeze_model_binding(frame)
+    assert frozen["model_profile_id"] == profile_id
+
+    call("DELETE", f"/model-profiles/{profile_id}")
+    state = runner._state(frame, project)
+    state.frozen_model_binding = (profile_id, frozen["model_profile_revision"])
+    with pytest.raises(GatewayError) as refused:
+        runner._llm_cfg(state)
+    assert refused.value.error_code == "model_revision_unavailable"
+
+
+@pytest.mark.stubbed_backend
+def test_a_turn_refused_after_admission_keeps_the_users_message(api, monkeypatch):
+    """A 202 tells the client its text was accepted, and the composer clears.
+
+    A credential revoked between admission and dispatch is refused at dispatch --
+    correctly -- but the refusal fired while resolving the configuration used to
+    name the session, which ran before the user row was written. The failure row
+    was stored and the request itself was not, anywhere but the session title.
+    """
+    runner, call = api
+    created = call(
+        "POST",
+        "/model-profiles",
+        {
+            "name": "revoked-in-flight",
+            "provider": "claude",
+            "api_key": "sk-in-flight",
+            "model": "claude-sonnet-4-5",
+        },
+    )
+    profile_id = created["body"]["id"]
+    call("POST", f"/model-profiles/{profile_id}/activate")
+    monkeypatch.setattr(runner, "_spawn_title_summary", lambda *a, **k: None)
+    frame, _project = _session(runner)
+
+    admit = runner.freeze_model_binding
+
+    def _admit_then_revoke(frame_id):
+        frozen = admit(frame_id)
+        row = next(
+            p for p in runner.store.list_model_profiles() if p["id"] == profile_id
+        )
+        runner.store.secrets.delete(row["api_key"])
+        return frozen
+
+    monkeypatch.setattr(runner, "freeze_model_binding", _admit_then_revoke)
+    text = "the request text that must survive a refusal"
+    accepted, result = _send(runner, call, frame, text)
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "failed", result
+
+    listed = call("GET", f"/frames/{frame}/messages")["body"]["messages"]
+    users = [m for m in listed if m.get("role") == "user"]
+    assert [m.get("content") for m in users] == [text], listed
+    assert any(m.get("failure") for m in listed), listed

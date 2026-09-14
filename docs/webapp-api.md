@@ -401,8 +401,19 @@ profile says today.
 - Binding happens on **send only**. Reading a session never binds it, so an
   unbound legacy session stays fully readable — history, artifacts, Notebook.
 - `409 model_revision_unavailable` — the session is pinned to a revision that
-  no longer exists. Resolving to the nearest one would be the silent
-  follow-latest behaviour this replaces, wearing a number.
+  no longer exists, or whose credential no longer resolves. Resolving to the
+  nearest one would be the silent follow-latest behaviour this replaces,
+  wearing a number.
+- `409 model_profile_needs_key` — the profile a send would pin (the active one,
+  or a legacy session's unique match) has no usable credential, so it is not
+  pinned at all. Rebinding would land on the same profile; the answer is a key.
+- **One credential rule** serves readiness, every binding branch and the pinned
+  dispatch: the profile's own key; else a key the daemon's environment holds for
+  the *same* provider (`OPENAI4S_<PROVIDER>_API_KEY`, the provider's native
+  variable, or — for the daemon's own provider only — its resolved key and an
+  operator-injected `llm` credential), never another provider's; else keyless
+  for a local endpoint. A brokered key that no longer resolves is refused rather
+  than replaced by an environment key.
 - `409 model_revision_ambiguous` — a legacy session whose recorded model
   matches more than one profile. Backfill happens only on a **unique** match;
   an ambiguous one stays unbound and asks, because picking either would be a

@@ -273,3 +273,30 @@ def test_a_probe_never_publishes_what_redaction_does_not_catch(tmp_path, monkeyp
     for leaked in ("10.4.2.17", "/Users/alice", "corp-ca.pem", "org-Acme-Research-Lab"):
         assert leaked not in detail, detail
     assert "not permitted to use this model" in detail
+
+
+def test_the_daemons_key_counts_only_for_the_daemons_own_provider(
+    tmp_path, monkeypatch
+):
+    """The live shape: `OPENAI4S_LLM_PROVIDER=ark` plus one Ark key.
+
+    A keyless Ark profile is dispatched under that key, so it is `ready` -- the
+    card used to say `needs_key` for a profile every turn could run on. The same
+    key is not a Claude credential, so a keyless Claude profile still is not.
+    """
+    monkeypatch.delenv("OPENAI4S_LLM_API_KEY", raising=False)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="ark", api_key="daemon-key-for-the-ark-provider"),
+    )
+    store = get_store(cfg.db_path)
+    service = ModelProfileService(store, cfg, providers=provider_specs)
+    ark = service.create({"name": "ark", "provider": "ark", "model": "m"})
+    claude = service.create({"name": "claude", "provider": "claude", "model": "m"})
+    rows = {row["id"]: row for row in store.list_model_profiles()}
+
+    assert ark["has_api_key"] is False, "the profile holds no key of its own"
+    assert ark["readiness"]["state"] == "ready", ark["readiness"]
+    assert service.credential(rows[ark["id"]]).source == "environment"
+    assert claude["readiness"]["state"] == "needs_key", claude["readiness"]
+    assert service.credential(rows[claude["id"]]).api_key == ""
