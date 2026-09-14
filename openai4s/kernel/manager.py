@@ -191,17 +191,17 @@ def _signal_worker_main_thread(pid: int, signum: int) -> bool:
     """Deliver ``signum`` to the worker's MAIN thread on Linux, via tgkill(2).
 
     A process-directed signal may be handed to ANY thread that has it
-    unblocked. The worker is not single-threaded in practice: the guard
-    phase's ``import matplotlib`` pulls in OpenBLAS, whose pool threads
-    inherit the main thread's empty signal mask. When one of those consumes
-    the SIGINT, CPython's C trampoline only sets a flag -- the Python-level
-    handler runs on the main thread alone -- and a main thread blocked in
-    ``clock_nanosleep`` (``time.sleep``) is never woken by a flag another
-    thread set. Observed on a CI runner as a cell that slept its remaining
-    30 s with ``SigPnd: 0`` on every thread and the main thread parked in
-    ``hrtimer_nanosleep``, then reported ``interrupted=True`` at wall=30.0005
-    -- the stop arrived, was consumed by a BLAS thread, and did nothing until
-    the sleep expired on its own.
+    unblocked. The worker is not single-threaded in practice: a Cell's own
+    ``import numpy`` or ``import matplotlib`` pulls in OpenBLAS, whose pool
+    threads inherit the main thread's empty signal mask and outlive that
+    Cell. When one of those consumes the SIGINT, CPython's C trampoline only
+    sets a flag -- the Python-level handler runs on the main thread alone --
+    and a main thread blocked in ``clock_nanosleep`` (``time.sleep``) is never
+    woken by a flag another thread set. Observed on a CI runner as a cell
+    that slept its remaining 30 s with ``SigPnd: 0`` on every thread and the
+    main thread parked in ``hrtimer_nanosleep``, then reported
+    ``interrupted=True`` at wall=30.0005 -- the stop arrived, was consumed by
+    a BLAS thread, and did nothing until the sleep expired on its own.
 
     tgkill directs the signal at one thread; the main thread's tid equals the
     pid, so it is addressable without reading /proc. R workers ride the same
