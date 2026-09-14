@@ -2,7 +2,7 @@
 
 This ledger covers the approved sequential T0–T9 plan, starting at
 `8127907657d21a4cbb514bd1c21096801fd6cf6a`. It does not change the version,
-schema, release policy or `main`. Each implementation is reviewed and validated
+database schema, release policy or `main`. Each implementation is reviewed and validated
 before pushing `next`; the following item waits for that commit's CI.
 
 本记录跟踪本轮 T0–T9 顺序执行。原有 `TODO_zh.md` 与
@@ -19,8 +19,8 @@ before pushing `next`; the following item waits for that commit's CI.
 | T5 P1-03 Navigation / 导航 | Completed / 完成 | `2f53bf9c`; all 25 applicable CI jobs passed. |
 | T6 P1-02 Provenance and export / 溯源与导出 | Completed / 完成 | `14947d25`; all 25 applicable CI jobs passed; fixed read states, validation and version identity. |
 | T7 P2-01 Snapshot design / 快照准备 | Completed / 完成 | `1216c986`; bilingual retention/restore preparation, 25 applicable CI jobs passed; no migration changes. |
-| T8 P2-02 Slow connection design / 慢连接准备 | Awaiting validation/CI / 等待验证及 CI | Bilingual phase/admission/release contract and 14 future acceptance cases; no new runtime quotas. |
-| T9 Final validation / 最终验收 | Not started / 未开始 | Final SHA gates, package and real Ark evidence. |
+| T8 P2-02 Slow connection design / 慢连接准备 | Completed / 完成 | `cf68ef11`; bilingual phase/admission/release contract, 25 applicable CI jobs passed; 14 future cases, no new runtime quotas. |
+| T9 Final validation / 最终验收 | Local acceptance passed / 本地验收通过 | Final real Ark, three-engine artifact editing/filter/export and independent wheel/sdist installations passed. The delivery reply records this final documentation commit and its own CI result. / 最终回执记录本轮文档提交及其对应 CI。 |
 
 ## Live Ark evidence / Ark 实测
 
@@ -810,3 +810,149 @@ commit still requires its own successful CI before T9.
 干净候选全量 pre-commit/mypy、165 目录／1551 文件清单和 3871 文件密钥扫描通过。
 仅六份文档变化，运行时代码与 T7/T6 一致，复用原完整运行证据；进入 T9 前仍须
 本项提交 CI 通过。
+
+
+## T8 delivery CI / T8 交付 CI
+
+Commit `cf68ef11a57eb47c82ea37fdee1d34e239aa034b` passed **25 applicable
+jobs**, with **4 not-applicable jobs skipped**, in
+[CI 34885167839](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34885167839).
+Independent review verified committed blobs, preserved user edits, job metadata
+and main-gate checkout identities. Python pass/skip counts match the earlier Python table;
+each job reported six warnings and no failures. Three engines each passed 800
+frontend tests, source/dist parity and 14/14 scenarios. Shapes reported 1167
+shapes / 212/212 routes with no breaking drift; this run had only two additive
+observations: `/compute/remote` and `/compute/ssh-aliases`. Container, wheel
+installation, separate Linux interrupt/full sandbox, 38 harness scenarios and
+all remaining applicable gates passed. C01–C14 remain future acceptance.
+
+本项六文档提交的 25 项适用 CI 全部通过、4 项不适用跳过。独立复核核对提交
+及实际 SHA；四 Python 数量同前表，三引擎各 800 单测、构建一致性及 14 场景
+通过。响应捕获 1167 形状／212 路由，无破坏性变化，本次仅上述两项 additive。
+容器、wheel 安装、独立 Linux 两门禁及 38 harness 等全部通过；C01–C14 未执行。
+
+## T9 final acceptance / T9 最终验收
+
+All final runtime checks below used `cf68ef11a57eb47c82ea37fdee1d34e239aa034b`.
+The final delivery changes only this ledger; production, tests, dependencies,
+database schema and committed frontend assets remain identical to that successfully
+validated runtime. The final delivery reply identifies the documentation
+commit and its **own** CI result; this ledger does not predict that result.
+
+Independent read-only acceptance review found no reproducible blockers across
+the six core improvements and two preparation items. It additionally ran
+**175 frontend tests** and **90 artifact backend tests**, all passing. Full
+offline evidence remains **8958 passed / 26 skipped** from T6 on identical
+production and test blobs, supplemented by the four-version T8 CI above.
+Final checks reuse successful evidence for unchanged content and do not count
+skipped jobs, planned P2 cases or metadata-only readiness as executed coverage.
+
+以下最终运行验收针对 `cf68ef11`；交付收尾仅修改本记录，运行内容不变。独立
+只读验收未发现六项核心与两项准备的可复现阻断，另行执行前端 175 项和产物
+后端 90 项，全部通过。相同运行及测试内容复用 T6 完整离线 8958 通过／26 跳过
+和 T8 四版本 CI。最终回复另记本记录提交本身的 CI，不提前宣称该门禁通过。
+
+### Final Ark requests / 最终 Ark 请求
+
+The endpoint and requested/returned models are the same as the live table
+above. Eight HTTP requests were made, each to the configured Ark plan/v3
+endpoint. Text, callback Stop/READY and the first browser call were capped at 1024
+output tokens; the native-tool call and browser artifact recovery at 4096,
+with four calls total across the browser Stop/recovery scenario. The
+seven measured calls total **46,412 tokens**, plus one **unknown** cancelled
+call; that is not a complete aggregate or a cost estimate.
+
+| Scene / 场景 | Request ID / 请求编号 | Seconds / 秒 | Terminal / 终态 | Actual usage: prompt / completion / total / 实际用量 |
+|---|---|---:|---|---|
+| Non-stream text / 非流文本 | `021789414555313f0c372f6e4f4854baf3c7c3163c5b79d137d23` | 2.843 | stop | 53 / 27 / 80 (reasoning 24; cached 0) |
+| Streaming native tool / 流式原生工具 | `021789414558152873b68ad3a5b1c0a1311de00f33c08576b3e81` | 2.772 | tool_calls | 406 / 92 / 498 (reasoning 59; cached 0) |
+| Callback Stop + metered drain / 回调后停止及计量排空 | `021789414561242f836aa75e744066f138d0c171bcc7779eb572c` | 3.773 | stop | 57 / 55 / 112 (reasoning 46; cached 0) |
+| Next call READY / 下一调用恢复 | `021789414565037b6facf02ebac6f8e2d6055a5df25a907808100` | 3.144 | stop | 51 / 26 / 77 (reasoning 25; cached 0) |
+| Browser Stop / 浏览器停止 | `021789414721418474cb012b3b24af2f1528e3bfa9e6caa353044` | 6.426 | Cancelled; transport interrupted; usage unknown / 取消、未知用量 | Unknown / 未知 |
+| Browser recovery 1 / 浏览器恢复 1 | `02178941472784653952e287ddd1b7d9109cd0048896ba0d159ad` | 5.778 | tool_calls | 14882 / 148 / 15030 (reasoning 87; cached 2872) |
+| Browser recovery 2 / 浏览器恢复 2 | `021789414733748fbcc013cde10a689f8f390ac862f8b04d7ea7c` | 8.302 | stop | 14985 / 86 / 15071 (reasoning 28; cached 14648) |
+| Browser recovery 3 / 浏览器恢复 3 | `021789414750933274564af00b8ed8c9fdfc012f2496079304bac` | 5.322 | stop | 15485 / 59 / 15544 (reasoning 1; cached 14648) |
+
+The explicit `live_llm` test cancels after an actual content callback, starts
+the next call, and verifies that the old drained result is accounted exactly
+once (112 tokens) without old callbacks entering the new turn. The next call
+returns READY with 77 tokens. Its raw usage and provider finish reason remain
+in the receipt. The separately exercised browser session is **unmetered**:
+its first transport is interrupted on Stop and returns no usage. This is
+retained as unknown; it is not claimed to have drained or cost zero.
+
+The real Chromium browser received a 33-character `text_chunk` before Stop,
+and a read confirmed the original run was still active. Two message POSTs and
+one cancel produced a completed next turn and `ark-final-notes.txt`. Recovery
+used three model calls and two Cells: the first Cell wrote the file but its
+completion bullet failed the past-tense-verb validation, then the next Cell
+corrected completion and finished. This is not an error-free, single-Cell run. The
+browser visibility predicate also matched the user's prompt, so it does not
+independently prove that assistant text was painted before the click; the
+receipt supports **real stream arrival before Stop**. The separate live test
+proves cancellation after a content callback. No extra live calls were made
+to hide or replace this evidence boundary.
+
+显式 `live_llm` 用例在真实内容回调后取消，随后调用恢复；旧调用排空的 112
+tokens 恰好记一次，旧文本不进入新回合，下一调用 READY 为 77 tokens。独立
+浏览器会话未开启计费排空，停止时中断传输、usage 未返回，仍记未知，不按零。
+浏览器 Stop 前收到 33 字符的真实 `text_chunk`，只读状态确认为运行中；两次
+message POST、一次取消后下一回合最终完成并生成产物。恢复含三次模型调用、
+两个 Cell：首次已写文件但完成摘要未以过去式动词开头，校验失败后下一 Cell
+修复完成；不是无中间错误或单 Cell 执行。原可见性断言也可能匹配
+用户提示，不能单独证明点击前助手文本已绘制；据此仅认定真实流已到达浏览器。
+
+### Final artifact and package checks / 最终产物及包验证
+
+The generated artifact `a-db7ce2017a22` belongs to frame `f-c00422896ae1`
+and project `proj_2acedf8b140c`. Its initial text contained only three synthetic
+lines. Chromium, Firefox and WebKit each passed the real editor suite on this
+artifact, including delayed loading, conditional save, immutable old bytes,
+conflict, draft retention/capacity and lost-response read-only reconciliation.
+After editing, all three engines confirmed generated/uploaded source filters
+and exported the same edited fixed version `v-21deead6db78`. The observer
+recorded no new task POSTs (`taskRequests=[]`) and the server Ark receipt stayed
+at four calls; the helper's constant `modelRequests: 0` field is not independent
+measurement. Six actual downloads were retained and compared:
+
+- Metadata JSON SHA-256: `5102985f554aef273fed669f770ec1aad1fbc0df25b6299448cc10227e9ca12e`.
+- Session Markdown SHA-256: `45a9e21b07bd82f8136b81a076fa1789671d9efbbdf3f76acd4550886dd0d5cc`.
+
+Wheel and sdist were built from a clean candidate excluding the two original
+user edits and passed release-artifact verification. Each was installed with
+`--no-deps` into a **separate fresh Python 3.12 environment**, outside the
+checkout. Both environments contained only OpenAI4S as an installed package
+and passed the isolated import/resource smoke: 13 modules and 604 Skills.
+The sdist was actually built and installed, not merely inspected as an archive.
+The final documentation archive is checked again after this ledger is frozen;
+wheel entry equality ties its runtime back to these installations.
+
+最终真实产物在三浏览器编辑通过，再用同一固定版本核对来源筛选及六份实际
+导出，两个文件摘要如上，属于编辑后版本而非原始模型字节。实际任务 POST
+观察为空，服务端 Ark 回执仍为四次；不以 helper 中固定的零作为调用计量。
+wheel 与 sdist 来自排除原有
+修改的干净候选，各自真正安装到独立新建的 Python 3.12 环境；均只含 OpenAI4S
+自身，仓库外隔离 smoke 的 13 模块和 604 Skills 通过。源码包已实际构建安装，
+并非只验证压缩包存在。冻结本记录后再次核对最终文档归档及 wheel 内容一致性。
+
+### Delivery boundaries / 交付边界
+
+Core remains standard-library based. Database migrations, database schema, version and
+dependency locks are unchanged from the starting commit. P2 specifies only
+future snapshot and slow-connection acceptance; no new runtime feature is
+enabled. Ark verifies the Ark path; Anthropic, Responses and Gemini matrices
+remain protocol-fixture evidence. DNS cannot be force-interrupted by stdlib:
+an unresolved call retains its legacy slot and cannot start an expired
+connection after resolution. Missing usage stays unknown.
+
+The original two user document edits are retained byte-for-byte and excluded
+from commits and release archives. The provided Ark credential is absent from
+delivery sources, retained verification receipts and Git changes. Temporary
+validation servers are closed after use. Final work remains on `next`, with
+no merge to `main`, version change or release publication.
+
+核心仍为标准库；迁移、数据库结构、版本和依赖锁相对起点未变。两项 P2 仅为准备。
+Ark 不代替其他协议夹具；DNS 尚未返回时占用遗留调用名额，返回后不得启动已
+过期连接；未知用量仍未知。原有两文档修改逐字节保留且排除在提交和发布包外，
+Ark 凭据未进入交付、保留回执或 Git。临时服务用后关闭，最终停在 `next`，不
+合并 `main`、修改版本或发布。
