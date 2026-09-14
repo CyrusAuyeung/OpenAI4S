@@ -201,9 +201,15 @@ Sorted.
 | `#cust-content[aria-busy="false"]` | browser_p1_controls.mjs | 1 |
 | `#cust:not(.hidden)` | browser_p1_controls.mjs | 2 |
 | `#customize-btn` | browser_p1_controls.mjs | 1 |
+| `#dash-import-session` | browser_smoke.mjs | 1 |
+| `#dash-new-project` | browser_smoke.mjs | 3 |
+| `#dash-new-project svg > *` | browser_smoke.mjs | 1 |
+| `#dash-project-search` | browser_smoke.mjs | 1 |
 | `#dash-projects` | browser_smoke.mjs | 1 |
 | `#dash-sessions` | browser_smoke.mjs | 1 |
 | `#dashboard` | browser_smoke.mjs | 1 |
+| `#dashboard .lang-btn[data-lang="*"]` | browser_smoke.mjs | 2 |
+| `#dashboard [data-i18n="dash.col.projects"]` | browser_smoke.mjs | 1 |
 | `#dock-files` | browser_stage1_trusted_delivery.mjs | 1 |
 | `#dock-files:not(.hidden)` | browser_stage1_trusted_delivery.mjs | 1 |
 | `#dock-notebook` | browser_smoke.mjs | 1 |
@@ -213,6 +219,7 @@ Sorted.
 | `#dock-notebook:not(.hidden)` | browser_smoke.mjs, browser_stage0_acceptance.mjs | 2 |
 | `#dock-tabs .dock-tab` | browser_smoke.mjs | 5 |
 | `#dock-timeline` | browser_smoke.mjs | 1 |
+| `#dock-toggle` | browser_smoke.mjs | 1 |
 | `#dock-viewer` | browser_smoke.mjs, browser_stage1_trusted_delivery.mjs | 5 |
 | `#dock-viewer .renderer-noscript` | browser_sandbox_preview.mjs | 1 |
 | `#dock-viewer .renderer-source` | browser_smoke.mjs | 4 |
@@ -243,8 +250,11 @@ Sorted.
 | `#revision` | browser_sandbox_preview.mjs | 1 |
 | `#rightdock.collapsed` | browser_smoke.mjs | 3 |
 | `#rightdock:not(.collapsed)` | browser_smoke.mjs | 1 |
+| `#settings-gear` | browser_smoke.mjs | 1 |
+| `#sidebar-collapse` | browser_smoke.mjs | 1 |
 | `#sidebar-reopen` | browser_smoke.mjs | 3 |
 | `#stage0-completion-link-probe a` | browser_stage0_acceptance.mjs | 2 |
+| `#tabbar` | browser_smoke.mjs | 1 |
 | `#team-admin` | browser_team_mode.mjs | 2 |
 | `#team-admin-body` | browser_team_mode.mjs | 1 |
 | `#team-admin-close` | browser_team_mode.mjs | 1 |
@@ -260,7 +270,8 @@ Sorted.
 | `#workspace:not(.hidden) .lang-btn[data-lang="en"]` | browser_smoke.mjs | 1 |
 | `#workspace:not(.hidden) .lang-btn[data-lang="zh"]` | browser_smoke.mjs | 1 |
 | `#workspace:not(.hidden) [data-i18n="ws.nav.files"]` | browser_smoke.mjs | 1 |
-| `#ws-theme` | browser_smoke.mjs | 2 |
+| `#ws-theme` | browser_smoke.mjs | 4 |
+| `#ws-theme svg` | browser_smoke.mjs | 2 |
 | `.annot-layer` | browser_admission_fault.mjs | 1 |
 | `.annot-pin[data-annotation-status]` | browser_admission_fault.mjs | 1 |
 | `.annot-pop .annot-btn.danger` | browser_admission_fault.mjs | 1 |
@@ -357,6 +368,7 @@ Sorted.
 | `.viewer-head .vh-name` | browser_stage1_trusted_delivery.mjs | 2 |
 | `.workbench-empty` | browser_smoke.mjs | 1 |
 | `[` | browser_smoke.mjs | 1 |
+| `[*]` | browser_smoke.mjs | 1 |
 | `[data-action="load-earlier-timeline"]` | browser_smoke.mjs | 4 |
 | `[data-action="load-omitted-timeline"]` | browser_smoke.mjs | 2 |
 | `[data-action="refresh-variables"]` | browser_smoke.mjs | 1 |
@@ -375,15 +387,17 @@ Sorted.
 | `[data-diagnostics-stale]` | browser_smoke.mjs | 1 |
 | `[data-f16-provenance="1"]` | browser_smoke.mjs | 1 |
 | `[data-f16-provenance="back"]` | browser_smoke.mjs | 1 |
+| `[data-i18n="conv.jumpLastLabel"]` | browser_smoke.mjs | 1 |
 | `[data-variable-inspector="python"]` | browser_smoke.mjs | 1 |
 | `a[download="*"]` | browser_smoke.mjs | 1 |
 | `body.sidebar-collapsed` | browser_smoke.mjs | 3 |
 | `button.outline-btn` | browser_auth.mjs | 1 |
 | `button.toggle` | browser_matrix.mjs | 2 |
 | `img.nbc-fig` | browser_smoke.mjs | 3 |
+| `script[src*="/static/dist/"]` | browser_smoke.mjs | 1 |
 | `table.nbc-table` | browser_smoke.mjs | 1 |
 
-Total selectors: 196
+Total selectors: 210
 
 ```json
 {
@@ -488,9 +502,15 @@ Total selectors: 196
     "#cust-content[aria-busy=\"false\"]",
     "#cust:not(.hidden)",
     "#customize-btn",
+    "#dash-import-session",
+    "#dash-new-project",
+    "#dash-new-project svg > *",
+    "#dash-project-search",
     "#dash-projects",
     "#dash-sessions",
     "#dashboard",
+    "#dashboard .lang-btn[data-lang=\"*\"]",
+    "#dashboard [data-i18n=\"dash.col.projects\"]",
     "#dock-files",
     "#dock-files:not(.hidden)",
     "#dock-notebook",
@@ -500,6 +520,7 @@ Total selectors: 196
     "#dock-notebook:not(.hidden)",
     "#dock-tabs .dock-tab",
     "#dock-timeline",
+    "#dock-toggle",
     "#dock-viewer",
     "#dock-viewer .renderer-noscript",
     "#dock-viewer .renderer-source",
@@ -530,8 +551,11 @@ Total selectors: 196
     "#revision",
     "#rightdock.collapsed",
     "#rightdock:not(.collapsed)",
+    "#settings-gear",
+    "#sidebar-collapse",
     "#sidebar-reopen",
     "#stage0-completion-link-probe a",
+    "#tabbar",
     "#team-admin",
     "#team-admin-body",
     "#team-admin-close",
@@ -548,6 +572,7 @@ Total selectors: 196
     "#workspace:not(.hidden) .lang-btn[data-lang=\"zh\"]",
     "#workspace:not(.hidden) [data-i18n=\"ws.nav.files\"]",
     "#ws-theme",
+    "#ws-theme svg",
     ".annot-layer",
     ".annot-pin[data-annotation-status]",
     ".annot-pop .annot-btn.danger",
@@ -644,6 +669,7 @@ Total selectors: 196
     ".viewer-head .vh-name",
     ".workbench-empty",
     "[",
+    "[*]",
     "[data-action=\"load-earlier-timeline\"]",
     "[data-action=\"load-omitted-timeline\"]",
     "[data-action=\"refresh-variables\"]",
@@ -662,12 +688,14 @@ Total selectors: 196
     "[data-diagnostics-stale]",
     "[data-f16-provenance=\"1\"]",
     "[data-f16-provenance=\"back\"]",
+    "[data-i18n=\"conv.jumpLastLabel\"]",
     "[data-variable-inspector=\"python\"]",
     "a[download=\"*\"]",
     "body.sidebar-collapsed",
     "button.outline-btn",
     "button.toggle",
     "img.nbc-fig",
+    "script[src*=\"/static/dist/\"]",
     "table.nbc-table"
   ]
 }
