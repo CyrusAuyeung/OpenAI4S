@@ -51,15 +51,12 @@ function makeSummary(mode = "acceptance") {
       ok: true,
     },
     self_test_checks: null,
+    // `completion_artifact_url_unversioned` used to lead this list: the
+    // default completion link was `/api/artifacts/<artifact_id>`, a 404 on
+    // every contract-v1 daemon. It is closed -- the link is now built under
+    // /api/v1 -- so the facts below require the rendered link to fetch the
+    // uploaded bytes instead of reproducing the 404.
     current_gaps: [
-      {
-        id: "completion_artifact_url_unversioned",
-        current_path: "/api/artifacts/<artifact_id>",
-        current_status: 404,
-        canonical_path: "/api/v1/artifacts/<artifact_id>",
-        canonical_status: 200,
-        planned_fix_stage: 1,
-      },
       {
         id: "ketcher_placeholder",
         current_path: "/ketcher",
@@ -149,7 +146,11 @@ function validateSummarySchema(candidate) {
     const digest = candidate.resource_identity_sha256[kind];
     assertion(digest === null || /^[0-9a-f]{64}$/.test(digest), `summary ${kind} hash invalid`);
   }
-  assertion(Array.isArray(candidate.current_gaps) && candidate.current_gaps.length === 3, "summary current_gaps invalid");
+  assertion(Array.isArray(candidate.current_gaps) && candidate.current_gaps.length === 2, "summary current_gaps invalid");
+  assertion(
+    !candidate.current_gaps.some((gap) => gap && gap.id === "completion_artifact_url_unversioned"),
+    "summary re-lists the closed completion_artifact_url_unversioned gap",
+  );
   assertion(Array.isArray(candidate.failures) && candidate.failures.every((item) => typeof item === "string"), "summary failures invalid");
   assertion(candidate.cleanup && typeof candidate.cleanup === "object", "summary cleanup missing");
   assertion(typeof candidate.cleanup.attempted === "boolean", "summary cleanup.attempted invalid");
@@ -624,7 +625,8 @@ async function redactionAndSchemaSelfTest() {
     "stage0-self-test.txt",
   );
   assertion(
-    projected.includes("/api/artifacts/artifact-stage0-self-test"),
+    projected.includes("](/api/v1/artifacts/artifact-stage0-self-test)") &&
+      !projected.includes("](/api/artifacts/"),
     "production completion child self-test returned an unexpected link",
   );
   disposableBindingSelfTest();
@@ -951,6 +953,7 @@ async function runAcceptance() {
         completion_artifact_url: {
           current_path: normalizedArtifactPath(currentCompletionPath, artifactId),
           current_status: currentArtifact.status,
+          current_sha256: sha256(currentArtifact.bytes),
           canonical_path: normalizedArtifactPath(canonicalArtifactPath, artifactId),
           canonical_status: canonicalArtifact.status,
           canonical_sha256: sha256(canonicalArtifact.bytes),
@@ -976,10 +979,14 @@ async function runAcceptance() {
         facts.ketcher.status === 200 && facts.ketcher.explicit_placeholder === true,
         `${label}: /ketcher was not the explicit placeholder`,
       );
+      // The link the production projector + renderer actually emit must be
+      // the served, versioned route and return the uploaded bytes. This was
+      // pinned to the un-versioned 404 while that gap was open.
       requireFact(
-        facts.completion_artifact_url.current_path === "/api/artifacts/<artifact_id>" &&
-          facts.completion_artifact_url.current_status === 404,
-        `${label}: production completion Artifact URL did not reproduce the known 404`,
+        facts.completion_artifact_url.current_path === "/api/v1/artifacts/<artifact_id>" &&
+          facts.completion_artifact_url.current_status === 200 &&
+          facts.completion_artifact_url.current_sha256 === artifactSha256,
+        `${label}: production completion Artifact URL did not return the uploaded bytes`,
       );
       requireFact(
         facts.completion_artifact_url.canonical_path === "/api/v1/artifacts/<artifact_id>" &&
@@ -1001,7 +1008,7 @@ async function runAcceptance() {
       rendered_href: normalizedArtifactPath(currentCompletionPath, artifactId),
       response_status: clickResponse.status(),
     };
-    requireFact(clickResponse.status() === 404, "current completion Artifact link did not reproduce the known 404 on click");
+    requireFact(clickResponse.status() === 200, "current completion Artifact link did not answer 200 on click");
 
     await openNotebook();
     await page.reload({ waitUntil: "domcontentloaded" });

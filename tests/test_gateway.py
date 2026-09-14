@@ -15,6 +15,7 @@ import pytest
 from openai4s.config import AutoModeConfig, Config, LLMConfig, RoadmapFeatureFlags
 from openai4s.server import gateway as gateway_mod
 from openai4s.server.artifacts import ArtifactOperationError
+from openai4s.server.contract import API_ROOT
 from openai4s.server.urls import artifact_version_url
 from openai4s.store import get_store
 
@@ -2303,8 +2304,11 @@ def test_stage1_flag_off_keeps_legacy_completion_and_skips_delivery_ledger(
         assert runner.stage1_trusted_delivery is False
         assert runner.artifacts.trusted_delivery is False
         assert runner.completion_delivery is None
-        legacy = "/api/artifacts/" + captured["record"]["artifact_id"].replace(
-            "/", "%2F"
+        # Flag-off keeps the mutable Artifact-head link, under the versioned
+        # root the gateway serves (the un-versioned `/api/artifacts/` form it
+        # used to emit is a 404 on every contract-v1 daemon).
+        legacy = f"{API_ROOT}/artifacts/" + quote(
+            captured["record"]["artifact_id"], safe=""
         )
         chunks = "".join(
             str(event.get("chunk") or "")
@@ -2312,12 +2316,109 @@ def test_stage1_flag_off_keeps_legacy_completion_and_skips_delivery_ledger(
             if event.get("type") == "text_chunk"
         )
         assert legacy in chunks
-        assert "/api/v1/artifacts/" not in chunks
+        assert "](/api/artifacts/" not in chunks
+        # ...and never the Stage 1 exact-version namespace.
+        assert f"{API_ROOT}/artifacts/versions/" not in chunks
         count = runner.store._conn.execute(  # noqa: SLF001 - integration proof
             "SELECT COUNT(*) FROM completion_deliveries"
         ).fetchone()[0]
         assert count == 0
     finally:
+        runner.close()
+
+
+def test_default_completion_artifact_links_are_served_over_the_real_socket(
+    tmp_path, monkeypatch
+):
+    """Every link a default (flag-off) completion message carries must fetch.
+
+    The helper built `/api/artifacts/<id>` and every unit test compared that
+    string with itself, while the gateway answers any un-versioned `/api/...`
+    path with a 404 — so each "Artifacts:" link a user clicked was dead. A
+    string assertion cannot see that; only sending the link through the real
+    handler (routing, the versioned-404 catch-all, the token gate) can. The
+    links come from the stored assistant message and the streamed text, i.e.
+    exactly what the workbench renders.
+    """
+    import http.client
+
+    from openai4s.server import local_auth
+    from openai4s.server.completions import completion_message
+    from tests._ports import bound_gateway_server
+
+    httpd, port = bound_gateway_server()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+        max_turns=3,
+        host="127.0.0.1",
+        port=port,
+    )
+    cfg.ensure_dirs()
+    hub = _Hub()
+    runner = gateway_mod.SessionRunner(cfg, hub, start_idle_sweeper=False)
+    content = b"sample,score\nA,1\nB,2\n"
+    captured = _install_artifact_submission(monkeypatch, runner, content=content)
+    httpd.RequestHandlerClass = gateway_mod.make_handler(cfg, hub, runner)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    token = local_auth.load_or_mint(cfg.data_dir)
+
+    def fetch(path):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request("GET", path, headers={local_auth.TOKEN_HEADER: token})
+            response = conn.getresponse()
+            return response.status, response.read()
+        finally:
+            conn.close()
+
+    link_re = re.compile(r"\]\((/[^)\s]+)\)")
+    try:
+        frame_id = runner.store.new_frame(
+            kind="turn", project_id="default", status="ready"
+        )
+        result = runner.run_message(frame_id, "default", "analyze the table")
+        assert result["status"] == "completed"
+        assert runner.stage1_trusted_delivery is False
+
+        stored = [
+            row
+            for row in runner.store.list_branch_message_boundaries(
+                frame_id, branch_id=frame_id
+            )
+            if row["role"] == "assistant"
+        ]
+        stored_links = link_re.findall(stored[-1]["content"])
+        streamed_links = link_re.findall(
+            "".join(
+                str(event.get("chunk") or "")
+                for event in hub.events
+                if event.get("type") == "text_chunk"
+            )
+        )
+        assert stored_links, "the completion message carries no Artifact link"
+        assert stored_links == streamed_links
+
+        # The filename fallback (a record without an artifact id) is the
+        # other flag-off shape; it must reach the same served bytes.
+        fallback_links = link_re.findall(
+            completion_message(
+                {"output": {"summary": "x"}},
+                [{"filename": captured["record"]["filename"]}],
+                require_fallback=False,
+            )
+        )
+        assert fallback_links
+
+        for link in stored_links + fallback_links:
+            status, body = fetch(link)
+            assert status == 200, (link, status, body[:200])
+            assert body == content, link
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
         runner.close()
 
 
