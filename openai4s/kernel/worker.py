@@ -1205,6 +1205,12 @@ def _run_cell(
 # --- read-only variable inspection -----------------------------------------
 
 _INSPECT_HIDDEN = frozenset({"__name__", "__builtins__", "host", "openai4s"})
+#: Reserved prefixes of what the session binds into ``_NS`` on the user's
+#: behalf: dunders, and the skill import gate's helpers (``_o4s_*`` plus its two
+#: classes), which must stay namespace globals because the frozen-sidecar
+#: replay reads that policy back through ``globals()``. Not the user's
+#: variables, so not the inspector's to list.
+_INSPECT_HIDDEN_PREFIXES = ("__", "_o4s_", "_OpenAI4S")
 _SAFE_SCALAR_TYPES = (type(None), bool, int, float, str, bytes)
 _SAFE_CONTAINER_TYPES = (list, tuple, dict, set, frozenset)
 _INSPECT_SAMPLE_ITEMS = 12
@@ -1427,7 +1433,7 @@ def _inspect_namespace(limit: int) -> dict:
         for name in _NS
         if type(name) is str
         and name not in _INSPECT_HIDDEN
-        and not name.startswith("__")
+        and not name.startswith(_INSPECT_HIDDEN_PREFIXES)
     )
     selected = names[:limit]
     return {
