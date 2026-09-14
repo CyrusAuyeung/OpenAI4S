@@ -1,6 +1,6 @@
 /** Window exports, F-06 loadSessions hook, and workbench event wiring. */
 
-import { applyStaticI18n, setLang, t } from "../../i18n";
+import { applyStaticI18n, onLanguageChange, setLang, t } from "../../i18n";
 import { _titleName, currentId, editingProject } from "../../stores/session";
 import { cycleTheme, refreshThemeToggle } from "../theme/theme";
 import { setLoadSessionsImpl } from "../ws/handlers";
@@ -84,6 +84,10 @@ export function bindWorkbench(): Promise<void> {
   // installTheme() ran before the Shell existed, so the theme buttons still
   // carry the markup's "moon"; show the glyph for the theme actually applied.
   refreshThemeToggle();
+  // app.js re-ran it on every language change (and so for the toggle's
+  // aria-label, which no data-i18n attribute covers); that includes the
+  // first dictionary load.
+  onLanguageChange(refreshThemeToggle);
   applyStaticI18n(document);
   watchActivateKeys(document);
   watchDisconnect();

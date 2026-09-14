@@ -313,6 +313,38 @@ describe("F-09 theme", () => {
     });
   });
 
+  describe("toggle title before the dictionaries load", () => {
+    it("does not write the bare key as the toggle's title or aria-label", async () => {
+      const h = installHarness({ theme: "light" });
+      const attrs = new Map<string, string>([["aria-label", "Theme"]]);
+      const button: FakeButton = {
+        dataset: { icon: "moon", iconSize: "20" },
+        title: "主题",
+        attrs,
+        setAttribute(name: string, value: string) {
+          attrs.set(name, value);
+        },
+      };
+      h.buttons.set("#ws-theme", button);
+      // What i18n/index.ts installs while I18N is still empty.
+      const dictionary: Record<string, string> = {};
+      vi.stubGlobal("window", {
+        matchMedia: () => ({ matches: false, addEventListener() {} }),
+        t: (key: string) => dictionary[key] ?? key,
+        tOptional: (key: string) => dictionary[key] ?? null,
+      });
+      const api = await loadTheme();
+      api.refreshThemeToggle();
+      expect(button.title).toBe("主题");
+      expect(attrs.get("aria-label")).toBe("Theme");
+
+      dictionary["theme.toggle"] = "Toggle theme";
+      api.refreshThemeToggle();
+      expect(button.title).toBe("Toggle theme");
+      expect(attrs.get("aria-label")).toBe("Toggle theme");
+    });
+  });
+
   describe("classic bootstrap + CSS single source", () => {
     it("loads theme-bootstrap.js as a classic blocking script in head", () => {
       const html = readFileSync(join(frontendRoot, "index.html"), "utf8");

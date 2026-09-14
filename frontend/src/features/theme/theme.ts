@@ -13,6 +13,7 @@ type MolViewer = {
 type HostWindow = Window & {
   S?: { _molViewer?: MolViewer };
   t?: (key: string, interpolated?: string) => string;
+  tOptional?: (key: string) => string | null;
   hint?: (message: string) => void;
 };
 
@@ -71,8 +72,15 @@ function rethemeMolViewer(dark: boolean): void {
 export function refreshThemeToggle(): void {
   const dark = themeIsDark();
   const name = dark ? "sun" : "moon";
-  const translate = hostWindow().t;
-  const title = isReady(translate) ? translate("theme.toggle") : "";
+  // tOptional, not t: before the locale chunk loads t() answers with the key,
+  // and this runs as soon as the Shell is bound -- a bare "theme.toggle" would
+  // replace the markup's readable title and aria-label.
+  const { t: translate, tOptional } = hostWindow();
+  const title = isReady(tOptional)
+    ? (tOptional("theme.toggle") ?? "")
+    : isReady(translate)
+      ? translate("theme.toggle")
+      : "";
   for (const sel of ["#dash-theme", "#ws-theme"]) {
     const button = document.querySelector(sel);
     if (button === null) continue;
