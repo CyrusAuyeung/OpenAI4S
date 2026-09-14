@@ -529,20 +529,31 @@ _KEYCHAIN_DENIES: tuple[str, ...] = (
 #: place the same cell's `sysctl` returns EPERM and the key is not recovered.
 #:
 #: BOTH denies are required, and neither alone suffices -- measured on macOS
-#: 26.x. For a *detached* target (a `setsid` daemon in another session, which
-#: `openai4s serve` is) the kernel gates the KERN_PROCARGS2 read behind two
-#: authorization paths, the process-info class and the `kern.proc` sysctl name,
-#: and passing *either* allows the read; only denying both closes it. `(target
-#: others)` keeps a cell reading its own `rusage`/`argv` (what libraries such as
-#: psutil do on themselves), which the two-path gate does not touch.
+#: 26.x. Between processes in *different sessions* the kernel gates the
+#: KERN_PROCARGS2 read behind two authorization paths, the process-info class
+#: and the `kern.proc` sysctl name, and passing *either* allows the read; only
+#: denying both closes it. `(target others)` keeps a cell reading its own
+#: `rusage`/`argv`, which the gate does not touch.
 #:
-#: Nuance, documented in docs/security.md: this closes the read of a detached
-#: daemon's environment, not of a process in the cell's *own* session -- but the
-#: daemon is always the former, and a same-session same-uid process is inside
-#: the operator trust boundary this sandbox already disclaims. Measured to leave
-#: the science stack intact under enforce (numpy/pandas, matplotlib savefig,
-#: scikit-learn n_jobs=2, multiprocessing, subprocess, os.cpu_count, an R cell,
-#: urllib HTTPS) and a normal live analysis turn completing.
+#: The session is what decides whether the gate applies at all, not whether the
+#: daemon is detached. A reader in its target's own session is let through with
+#: both denies in place, and the daemon is not reliably detached (`start.sh`
+#: runs `openai4s serve` in the foreground; only `serve --detached` calls
+#: setsid). What holds is the reader's side: `PipeTransport` starts every kernel
+#: worker with `start_new_session=True`, and the BYOC helper profile reuses these
+#: rules with the same spawn flag, so a cell is never in the daemon's session.
+#: That flag is load-bearing here; see the comment at its assignment in
+#: `kernel/transport.py`.
+#:
+#: The cost: the `kern.proc` deny also applies to a cell's queries about *other*
+#: processes, so `psutil.process_iter()` / `Process().children()` raise
+#: PermissionError under enforce. It cannot be narrowed without reopening the
+#: read, which is named under `kern.proc` too. Measured to leave the science
+#: stack intact under enforce (numpy/pandas, matplotlib savefig, scikit-learn
+#: n_jobs=2, multiprocessing, ProcessPoolExecutor, subprocess, os.cpu_count, an R
+#: cell, urllib HTTPS) and a normal live analysis turn completing. A process in
+#: the cell's *own* session stays readable; that is inside the same-uid operator
+#: trust boundary this sandbox already disclaims (docs/security.md).
 _PROCESS_INFO_DENIES: tuple[str, ...] = (
     "(deny process-info* (target others))",
     '(deny sysctl-read (sysctl-name-prefix "kern.proc"))',

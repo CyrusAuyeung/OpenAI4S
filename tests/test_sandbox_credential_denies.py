@@ -153,12 +153,19 @@ def test_the_default_instance_is_not_double_listed(tmp_path, monkeypatch, spelli
 # That is where a daemon whose LLM key is configured by environment variable /
 # .env holds it in cleartext. bubblewrap masks /proc/<daemon>/environ on Linux
 # for the same reason (`test_the_daemon_environ_is_masked_on_linux`); the
-# Seatbelt profile had no analog. The two denies are the Seatbelt-side narrowing
-# -- and BOTH are required: for a detached (setsid) target, which the daemon is,
-# the kernel gates KERN_PROCARGS2 behind both the process-info class and the
-# kern.proc sysctl name and passing *either* allows the read, so neither deny
-# alone closes it (measured on macOS 26.x; the behavioural test below asserts
-# the closure directly).
+# Seatbelt profile had no analog.
+#
+# BOTH denies are required: between processes in different sessions the kernel
+# gates KERN_PROCARGS2 behind both the process-info class and the kern.proc
+# sysctl name, and passing *either* allows the read, so neither deny alone
+# closes it. Whether that gate applies at all depends on the *session*, not on
+# the target being detached: a reader in its target's own session is let
+# through with both denies in place (measured on macOS 26.6). The daemon is not
+# reliably detached -- `start.sh` runs `openai4s serve` in the foreground, and
+# only `serve --detached` calls setsid. What holds is the reader's side:
+# `PipeTransport` starts every kernel worker with `start_new_session=True`, so a
+# cell is never in the daemon's session. The tests below use that topology for
+# a detached and a foreground target, and then drive the real kernel spawn path.
 
 
 def test_the_profile_denies_the_process_info_channel(tmp_path, monkeypatch):
@@ -226,73 +233,108 @@ def test_the_process_info_denies_do_not_break_a_real_cell(tmp_path, monkeypatch)
 
 # The reader that mounts the exploit: sysctl(CTL_KERN=1, KERN_PROCARGS2=49, pid)
 # and report whether the marker env var was recovered from the target's block.
-_PROCARGS_READER = r"""
-import ctypes, ctypes.util, os, re, sys
-pid = int(sys.argv[1])
-libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-mib = (ctypes.c_int * 3)(1, 49, pid)
-size = ctypes.c_size_t(0)
-if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or not size.value:
-    print("BLOCKED", ctypes.get_errno()); raise SystemExit
-buf = ctypes.create_string_buffer(size.value)
-if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
-    print("BLOCKED", ctypes.get_errno()); raise SystemExit
-parts = [p for p in buf.raw[: size.value].split(b"\0")
-         if re.match(rb"^[A-Za-z_][A-Za-z0-9_]*=", p)]
-print("RECOVERED" if any(p.startswith(b"SANDBOX_MARKER_ENV=") for p in parts)
-      else "ABSENT", len(parts))
+# A function, so the same code runs as a script and as a kernel Cell.
+_PROCARGS_READ_FN = r"""
+import ctypes, ctypes.util, re
+
+
+def procargs_verdict(pid, marker=b"SANDBOX_MARKER_ENV="):
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, pid)
+    size = ctypes.c_size_t(0)
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or not size.value:
+        return "BLOCKED %d" % ctypes.get_errno()
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return "BLOCKED %d" % ctypes.get_errno()
+    parts = [p for p in buf.raw[: size.value].split(b"\0")
+             if re.match(rb"^[A-Za-z_][A-Za-z0-9_]*=", p)]
+    found = any(p.startswith(marker) for p in parts)
+    return "%s %d" % ("RECOVERED" if found else "ABSENT", len(parts))
 """
 
-# A detached session leader that parks with a marker env var, standing in for
-# the `setsid` daemon whose environment the exploit targets.
-_MARKED_DAEMON = r"""
+_PROCARGS_READER = _PROCARGS_READ_FN + (
+    "\nimport sys\nprint(procargs_verdict(int(sys.argv[1])))\n"
+)
+
+# A parked process holding a marker env var, standing in for the daemon whose
+# environment the exploit targets: either a `setsid` session leader (`serve
+# --detached`) or an ordinary process left in the launching session (`start.sh`
+# in the foreground). The pid file is renamed into place, so a reader never sees
+# it created but not yet written.
+_MARKED_TARGET = r"""
 import os, sys, time
 if os.fork() > 0:
     os._exit(0)
-os.setsid()
-if os.fork() > 0:
-    os._exit(0)
-open(sys.argv[1], "w").write(str(os.getpid()))
+if sys.argv[2] == "detached":
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+partial = sys.argv[1] + ".partial"
+with open(partial, "w") as fh:
+    fh.write(str(os.getpid()))
+os.replace(partial, sys.argv[1])
 time.sleep(60)
 """
 
 
+def _start_marked_target(tmp_path, shape):
+    import subprocess
+
+    spawner = tmp_path / "target.py"
+    spawner.write_text(_MARKED_TARGET, encoding="utf-8")
+    pidfile = tmp_path / f"{shape}.pid"
+    env = {**os.environ, "SANDBOX_MARKER_ENV": "sandbox-marker-value"}
+    subprocess.run(
+        [sys.executable, str(spawner), str(pidfile), shape],
+        env=env,
+        timeout=30,
+        check=True,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            return int(pidfile.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    pytest.fail(f"the marked {shape} target did not start")
+
+
+def _verdict(completed) -> str:
+    words = completed.stdout.split()
+    return words[0] if words else ""
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is macOS-only")
-def test_a_sandboxed_cell_cannot_read_a_daemons_environ(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shape", ("detached", "foreground"))
+def test_a_sandboxed_cell_cannot_read_a_daemons_environ(tmp_path, monkeypatch, shape):
     """The macOS analog of `test_the_daemon_environ_is_masked_on_linux`.
 
-    A detached (`setsid`) sibling holds a marker env var, exactly where the
-    daemon holds an env/.env LLM key. Verify against the real kernel — not the
-    profile text — that a Seatbelt-wrapped reader cannot recover that marker
-    through `sysctl(KERN_PROCARGS2)`, and that an *unsandboxed* reader can (so
-    the assertion is about the sandbox, not about the marker being absent).
+    A target holds a marker env var, exactly where the daemon holds an env/.env
+    LLM key. Verify against the real kernel -- not the profile text -- that a
+    Seatbelt-wrapped reader in a session of its own, which is how every kernel
+    worker is started, cannot recover that marker through
+    `sysctl(KERN_PROCARGS2)`, and that an *unsandboxed* reader can (so the
+    assertion is about the sandbox, not about the marker being absent). Both
+    daemon shapes, because the protection must not depend on how the daemon was
+    launched.
     """
     import subprocess
 
     reader = tmp_path / "reader.py"
     reader.write_text(_PROCARGS_READER, encoding="utf-8")
-    spawner = tmp_path / "daemon.py"
-    spawner.write_text(_MARKED_DAEMON, encoding="utf-8")
-    pidfile = tmp_path / "daemon.pid"
-
-    env = {**os.environ, "SANDBOX_MARKER_ENV": "sandbox-marker-value"}
-    subprocess.run([sys.executable, str(spawner), str(pidfile)], env=env, timeout=30)
-    for _ in range(100):
-        if pidfile.exists():
-            break
-        time.sleep(0.05)
-    assert pidfile.exists(), "the marked daemon did not start"
-    daemon_pid = int(pidfile.read_text().strip())
+    target_pid = _start_marked_target(tmp_path, shape)
     try:
         # Control: without the sandbox the marker IS recoverable, so a later
-        # ABSENT really means the sandbox blocked the read.
+        # BLOCKED really means the sandbox refused the read.
         control = subprocess.run(
-            [sys.executable, str(reader), str(daemon_pid)],
+            [sys.executable, str(reader), str(target_pid)],
             capture_output=True,
             text=True,
             timeout=30,
+            start_new_session=True,
         )
-        assert control.stdout.split()[0] == "RECOVERED", (
+        assert _verdict(control) == "RECOVERED", (
             "control read did not recover the marker; the test would be "
             f"vacuous: {control.stdout!r} {control.stderr[:200]!r}"
         )
@@ -309,26 +351,94 @@ def test_a_sandboxed_cell_cannot_read_a_daemons_environ(tmp_path, monkeypatch):
                 str(written),
                 sys.executable,
                 str(reader),
-                str(daemon_pid),
+                str(target_pid),
             ],
             capture_output=True,
             text=True,
             timeout=60,
+            start_new_session=True,
         )
-        verdict = sandboxed.stdout.split()[0] if sandboxed.stdout.split() else ""
-        assert verdict != "RECOVERED", (
-            "a Seatbelt-wrapped cell recovered the daemon's environment via "
+        assert _verdict(sandboxed) == "BLOCKED", (
+            f"a Seatbelt-wrapped cell read the {shape} daemon's environment via "
             f"KERN_PROCARGS2: {sandboxed.stdout!r} {sandboxed.stderr[:200]!r}"
-        )
-        assert verdict in ("BLOCKED", "ABSENT"), (
-            f"unexpected reader output under the sandbox: {sandboxed.stdout!r} "
-            f"{sandboxed.stderr[:200]!r}"
         )
     finally:
         try:
-            os.kill(daemon_pid, 9)
+            os.kill(target_pid, 9)
         except ProcessLookupError:
             pass
+
+
+# The daemon stand-in for the product path: a foreground (non-setsid) process
+# holding the marker in its exec-time environment that starts a real `Kernel`
+# and runs the reader as a Cell against its own pid.
+_KERNEL_DAEMON = r"""
+import os, sys
+
+from openai4s.kernel import Kernel
+from openai4s.security.sandbox import create_kernel_sandbox
+
+workspace, mode, cell_path = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(cell_path, encoding="utf-8") as fh:
+    cell = fh.read() + "\nprint('VERDICT', procargs_verdict(%d))\n" % os.getpid()
+sandbox = create_kernel_sandbox(workspace, mode=mode)
+print("ENFORCED", sandbox.status.enforced, flush=True)
+with Kernel(cwd=workspace, sandbox=sandbox) as kernel:
+    result = kernel.execute(cell)
+print((result.get("stdout") or "").strip())
+print("ERROR", result.get("error"))
+"""
+
+
+def _run_kernel_daemon(tmp_path, mode):
+    import subprocess
+
+    root = tmp_path / mode
+    (root / "ws").mkdir(parents=True)
+    cell = root / "cell.py"
+    cell.write_text(_PROCARGS_READ_FN, encoding="utf-8")
+    daemon = root / "daemon.py"
+    daemon.write_text(_KERNEL_DAEMON, encoding="utf-8")
+    env = {**os.environ, "SANDBOX_MARKER_ENV": "sandbox-marker-value"}
+    proc = subprocess.run(
+        [sys.executable, str(daemon), str(root / "ws"), mode, str(cell)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=240,
+    )
+    verdicts = [
+        line.split()[1:]
+        for line in proc.stdout.splitlines()
+        if line.startswith("VERDICT")
+    ]
+    assert proc.returncode == 0 and verdicts, (
+        f"the kernel daemon did not run the cell: rc={proc.returncode} "
+        f"stdout={proc.stdout[-400:]!r} stderr={proc.stderr[-800:]!r}"
+    )
+    return proc.stdout, verdicts[-1][0]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is macOS-only")
+def test_an_enforced_kernel_cannot_read_its_daemons_environ(tmp_path):
+    """The real spawn path, so the session property is guarded where it lives.
+
+    The profile's denies hold only because `PipeTransport` starts the worker in
+    a new session; a Cell left in the daemon's session read its environment with
+    both denies in place. The synthetic tests above choose the session
+    themselves, so only this one fails if that flag is ever dropped.
+    """
+    control_out, control = _run_kernel_daemon(tmp_path, "off")
+    assert (
+        control == "RECOVERED"
+    ), f"an unsandboxed Cell could not read the daemon; vacuous: {control_out!r}"
+
+    enforced_out, enforced = _run_kernel_daemon(tmp_path, "enforce")
+    assert "ENFORCED True" in enforced_out, enforced_out
+    assert enforced == "BLOCKED", (
+        "a Cell in an enforced kernel read its daemon's exec-time environment "
+        f"via KERN_PROCARGS2: {enforced_out!r}"
+    )
 
 
 # --------------------------------------------------------------------------

@@ -61,22 +61,45 @@ KERN_PROCARGS2, <pid>)`, and for a daemon whose LLM key is configured by
 environment variable / `.env` that block holds the key in cleartext. This is
 the same threat bubblewrap closes on Linux by masking `/proc/<daemon>/environ`.
 The Seatbelt profile denies the `process-info` introspection class (for other
-processes) **and** the `kern.proc` sysctls; for a detached (`setsid`) target —
-which `openai4s serve` always is — the kernel gates the KERN_PROCARGS2 read
-behind both authorization paths and passing *either* allows it, so **both**
-denies are required and neither alone suffices. Verified end to end against a
-live daemon under `enforce`: with the denies removed a cell recovers the
-daemon's real API key via KERN_PROCARGS2 (fingerprint match); with them in
-place the cell's `sysctl` returns `EPERM` and the key is not recovered, while a
-normal analysis turn and the science stack (numpy/pandas, matplotlib,
-scikit-learn `n_jobs=2`, multiprocessing, subprocess, an R cell, urllib HTTPS)
-keep working. What this does **not** cover is a process in the cell's *own*
-session (a same-UID sibling started alongside it): that read stays open, which
-is consistent with the same-UID trust boundary above — the daemon is a detached
-session leader, not such a sibling. As defence in depth, and for the same-UID
-case, macOS deployments running untrusted cells can also keep the key in the
-keychain SecretBroker (the `auto` default), where it is never placed in the
-daemon environment at all.
+processes) **and** the `kern.proc` sysctls. Between processes in different
+sessions the kernel gates the KERN_PROCARGS2 read behind both authorization
+paths, and passing *either* allows it, so **both** denies are required and
+neither alone suffices.
+
+That gate applies only when the reader and its target are in **different
+sessions**; a reader in its target's own session is let through with both
+denies in place (measured on macOS 26.6). The daemon is not reliably detached:
+`start.sh` runs `openai4s serve` in the foreground, and only `serve --detached`
+calls `setsid`. The guarantee comes from the reader's side instead:
+`PipeTransport` starts every kernel worker with `start_new_session=True`, and
+the BYOC provider helper is spawned the same way, so neither a cell nor a
+provider shim is ever in the daemon's session, however the daemon was launched.
+That flag therefore carries security weight on macOS.
+`test_an_enforced_kernel_cannot_read_its_daemons_environ` drives the real
+kernel spawn path and fails if the flag is dropped.
+
+Verified end to end against a live daemon under `enforce`: with the denies
+removed a cell recovers the daemon's real API key via KERN_PROCARGS2
+(fingerprint match); with them in place the cell's `sysctl` returns `EPERM` and
+the key is not recovered, while a normal analysis turn and the science stack
+(numpy/pandas, matplotlib, scikit-learn `n_jobs=2`, multiprocessing,
+subprocess, an R cell, urllib HTTPS) keep working.
+
+What the denies cost: an enforced cell can no longer query other processes'
+details. `psutil.process_iter()` and `psutil.Process().children()` raise
+`PermissionError` (measured on macOS 26.6 with psutil installed). loky's
+`kill_process_tree` calls `Process().children()` when psutil is present, yet
+`executor.shutdown(kill_workers=True)` still completed in the same measurement,
+and joblib `Parallel` is unaffected. The denies cannot be
+narrowed without reopening the read, because KERN_PROCARGS2 is named under
+`kern.proc`. A process's reads of its *own* details are unaffected.
+
+What the denies do **not** cover is a process in the cell's *own* session, for
+example a same-UID sibling the cell started. That read stays open, which is
+consistent with the same-UID trust boundary above. As defence in depth,
+macOS deployments running untrusted cells can also keep the key in the keychain
+SecretBroker (the `auto` default), where it is never placed in the daemon
+environment at all.
 
 [`openai4s.security`](../openai4s/security) adds independent policy layers:
 
