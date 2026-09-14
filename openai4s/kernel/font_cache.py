@@ -309,7 +309,13 @@ def _validated_fontlist(name: Any, content: Any) -> bytes | None:
     if not isinstance(parsed, dict) or parsed.get("__class__") != "FontManager":
         return None
     version = parsed.get("_version")
-    if not isinstance(version, str) or name != f"fontlist-v{version}.json":
+    # matplotlib 3.11 versions its list with a string ("3.11.0"); up to 3.10
+    # it was an int (`FontManager.__version__ = 390`), and those interpreters
+    # (the py3.10 floor among them) otherwise never got a list. The exact type
+    # matters: `True` is an int too, and a float would name a list no release
+    # writes. The bytes are kept as the builder wrote them, because 3.10 loads a
+    # list only when `_version == 390` -- a string "390" would be ignored.
+    if type(version) not in (str, int) or name != f"fontlist-v{version}.json":
         return None
     return data
 

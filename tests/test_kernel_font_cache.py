@@ -53,7 +53,7 @@ def _isolated_font_cache_state(tmp_path, monkeypatch):
     font_cache._failed_at.clear()
 
 
-def _fontlist(version: str = "3.11.0", **extra) -> str:
+def _fontlist(version: object = "3.11.0", **extra) -> str:
     return json.dumps(
         {
             "__class__": "FontManager",
@@ -205,6 +205,10 @@ def test_a_font_list_a_kernel_wrote_never_reaches_another_kernel(tmp_path):
         {"name": "fontlist-v3.11.0.json", "content": "{not json"},
         {"name": "fontlist-v3.11.0.json", "content": _fontlist(pad="x" * 4096)},
         {"error": "ModuleNotFoundError"},
+        {"name": "fontlist-v390.json", "content": _fontlist(391)},
+        # Neither spelling matplotlib has used: its version is a str (3.11+)
+        # or an int (up to 3.10), never a float that happens to format alike.
+        {"name": "fontlist-v390.0.json", "content": _fontlist(390.0)},
     ],
     ids=[
         "path",
@@ -213,6 +217,8 @@ def test_a_font_list_a_kernel_wrote_never_reaches_another_kernel(tmp_path):
         "not-json",
         "oversize",
         "error",
+        "integer-version-mismatch",
+        "float-version",
     ],
 )
 def test_builder_output_that_is_not_a_font_list_is_not_stored(
@@ -227,6 +233,42 @@ def test_builder_output_that_is_not_a_font_list_is_not_stored(
         is None
     )
     assert not (data_dir / "cache").exists()
+
+
+def test_a_matplotlib_before_3_11_list_is_stored_as_written_and_seeded(tmp_path):
+    """matplotlib up to 3.10 versions its font list with an int.
+
+    ``FontManager.__version__ = 390`` there, so the list is
+    ``fontlist-v390.json`` carrying ``"_version": 390``. Refusing it left the
+    py3.10 floor (and any environment still on 3.10) scanning in every
+    enforced kernel, with a doomed rebuild every ``RETRY_FAILED_BUILD_AFTER_S``.
+    It is stored byte for byte: matplotlib 3.10 loads a list only when
+    ``_version == 390``, so a copy re-serialised with a string version would be
+    ignored inside the kernel.
+    """
+
+    data_dir = tmp_path / "data"
+    content = _fontlist(390)
+    built = font_cache.build_font_cache(
+        INTERPRETER,
+        data_dir=data_dir,
+        runner=_builder_runner({"name": "fontlist-v390.json", "content": content}),
+    )
+    assert built is not None and built.name == "fontlist-v390.json"
+    assert built.read_text(encoding="utf-8") == content
+    manifest = json.loads((built.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["fontlist"] == "fontlist-v390.json"
+
+    sandbox = _enforced_sandbox(tmp_path)
+    try:
+        assert font_cache.seed_kernel_font_cache(
+            sandbox, interpreter=INTERPRETER, data_dir=data_dir
+        )
+        seeded = _kernel_mplconfigdir(sandbox) / "fontlist-v390.json"
+        assert seeded.read_text(encoding="utf-8") == content
+        assert json.loads(content)["_version"] == 390
+    finally:
+        sandbox.close()
 
 
 @pytest.mark.parametrize(
@@ -605,17 +647,45 @@ def _font_manager_source() -> Path:
     return Path(list(spec.submodule_search_locations)[0]) / "font_manager.py"
 
 
-def _font_manager_version() -> str | None:
-    spec = importlib.util.find_spec("matplotlib")
-    if spec is None or not spec.submodule_search_locations:
-        return None
-    source = _font_manager_source()
+def _parse_font_manager_version(source: str) -> int | str | None:
+    """``FontManager.__version__`` as matplotlib's own source spells it.
+
+    An int up to 3.10 (``__version__ = 390``), a string from 3.11 on. Typed as
+    written: the list's ``_version`` must compare equal to it inside the kernel.
+    """
+
     match = re.search(
-        r"^\s+__version__\s*=\s*['\"]([^'\"]+)['\"]",
-        source.read_text(encoding="utf-8"),
+        r"^\s+__version__\s*=\s*(\d+|'[^']+'|\"[^\"]+\")\s*(?:#.*)?$",
+        source,
         re.MULTILINE,
     )
-    return match.group(1) if match else None
+    if match is None:
+        return None
+    literal = match.group(1)
+    return int(literal) if literal.isdigit() else literal[1:-1]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("    __version__ = 390\n", 390),
+        ("    __version__ = '3.11.0'\n", "3.11.0"),
+        ('    __version__ = "3.12.0"  # a comment\n', "3.12.0"),
+        ("    __version__ = _version.version\n", None),
+    ],
+    ids=["int-before-3.11", "str-3.11", "double-quoted", "not-a-literal"],
+)
+def test_the_end_to_end_test_reads_every_font_manager_version_spelling(line, expected):
+    """A version it cannot read makes the end-to-end test skip, not fail.
+
+    It only understood the quoted 3.11 form, so on matplotlib 3.10 -- the
+    py3.10 floor -- it skipped as "matplotlib is not installed" and the CI leg
+    where seeding did nothing stayed green.
+    """
+
+    source = f"class FontManager:\n{line}    def __init__(self):\n        pass\n"
+    parsed = _parse_font_manager_version(source)
+    assert parsed == expected and type(parsed) is type(expected)
 
 
 def test_a_sandboxed_kernel_uses_the_seeded_list_instead_of_scanning(
@@ -629,9 +699,13 @@ def test_a_sandboxed_kernel_uses_the_seeded_list_instead_of_scanning(
     unconfined kernel keeps the shared runtime cache instead.
     """
 
-    version = _font_manager_version()
-    if version is None:
+    spec = importlib.util.find_spec("matplotlib")
+    if spec is None or not spec.submodule_search_locations:
         pytest.skip("matplotlib is not installed")
+    source = _font_manager_source()
+    version = _parse_font_manager_version(source.read_text(encoding="utf-8"))
+    if version is None:
+        pytest.skip(f"cannot read FontManager.__version__ from {source}")
     data_dir = Path(os.environ["OPENAI4S_DATA_DIR"])
     payload = {
         "name": f"fontlist-v{version}.json",
