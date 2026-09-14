@@ -365,9 +365,10 @@ def _recorded_endpoint(cfg, expected_pid: int) -> tuple[str, int] | None:
     to the caller's current config rather than steering a local control request.
     A pid alone is not an identity: after reuse, a stale sidecar could otherwise
     redirect the local access-token URL to an unrelated host that happens to
-    hold the same pid.  Linux provides the process start token needed to bind
-    the endpoint to one generation.  On platforms where that token is
-    unavailable, callers safely fall back to their current configuration.
+    hold the same pid.  Linux (procfs) and macOS (sysctl ``p_starttime``)
+    provide the process start token needed to bind the endpoint to one
+    generation.  On platforms where that token is unavailable, callers safely
+    fall back to their current configuration.
     """
     payload = _recorded_state(cfg)
     if payload is None:
@@ -398,9 +399,9 @@ def _daemon_alive(cfg, pid: int) -> bool:
     """Is the daemon that wrote the pidfile still the process holding ``pid``?
 
     Liveness first, because it is the cheap half and the only half available
-    off Linux. When the statefile corroborates the pidfile — same pid, and a
-    start token to compare — a mismatched token means the pid was reused and
-    the pidfile is stale.
+    where no start token can be read (off Linux and macOS). When the statefile
+    corroborates the pidfile — same pid, and a start token to compare — a
+    mismatched token means the pid was reused and the pidfile is stale.
 
     A statefile naming a *different* pid is deliberately treated as no
     information rather than as evidence of staleness. It is written just after
@@ -1050,11 +1051,12 @@ def cmd_status(args) -> int:
         if getattr(args, "json", False):
             # Keyed on the sidecar describing *this* pid, not on
             # `_recorded_endpoint`: that answers a stricter question (is the
-            # recorded generation still the live one, which needs a Linux
-            # process start token) and has nothing to do with which build is
-            # running. Gating on it reported `version: null, bundle_id: null`
-            # for a healthy current daemon, and the Windows launcher renders
-            # that as "your session is still running an older version".
+            # recorded generation still the live one, which needs a process
+            # start token from Linux procfs or macOS sysctl) and has nothing to
+            # do with which build is running. Gating on it reported
+            # `version: null, bundle_id: null` for a healthy current daemon,
+            # and the Windows launcher renders that as "your session is still
+            # running an older version".
             state = _recorded_state(cfg)
             recorded = (state or {}).get("pid")
             if (

@@ -924,7 +924,7 @@ def test_the_cli_readme_halves_carry_the_same_operational_contract():
 
 def test_the_upgrade_guide_names_the_longer_stop_wait():
     """0.2.x `stop` gave up (or, with --force, sent SIGKILL) after about 5s;
-    0.3.0 waits the whole --timeout, 30s by default, first."""
+    0.3.0 waits up to --timeout, 30s by default, first."""
 
     module = _cli_module()
     assert module.STOP_TIMEOUT_S == 30.0
