@@ -150,7 +150,13 @@ class CellExecutionPorts:
         ],
         CaptureResult,
     ]
-    emit_artifact_step: Callable[[CellSession, str, list[dict], EventSink], None]
+    # (session, title, artifacts, emit, environment, language). The last two
+    # are this Cell's runtime label and language: the step card is a second
+    # record of which runtime wrote the files, and it said "python" for every
+    # R Cell while the artifact's env snapshot said "r".
+    emit_artifact_step: Callable[
+        [CellSession, str, list[dict], EventSink, str, str], None
+    ]
     record_cell: Callable[..., None]
     # Admission runs before allocating a Cell id/revision/attempt or touching a
     # runtime. Stage 1 uses it for local environment readiness; a refusal must
@@ -565,7 +571,14 @@ class CellExecutionService:
             if attempt_id is not None:
                 self.ports.mark_attempt_capture(attempt_id)
             if capture.artifacts and request.stream:
-                self.ports.emit_artifact_step(session, title, capture.artifacts, emit)
+                self.ports.emit_artifact_step(
+                    session,
+                    title,
+                    capture.artifacts,
+                    emit,
+                    kernel_id,
+                    request.language,
+                )
             if self.ports.bind_lineage is not None:
                 # Stage 8 lineage is evidence used by review/completion.  A
                 # failed binding must therefore make capture fail, not publish

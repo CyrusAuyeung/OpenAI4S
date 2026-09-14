@@ -11831,12 +11831,23 @@ class SessionRunner:
         }
 
     def _emit_artifact_step(
-        self, st: SessionState, title: str, saved: list[dict], emit
+        self,
+        st: SessionState,
+        title: str,
+        saved: list[dict],
+        emit,
+        environment: str | None = None,
+        language: str | None = None,
     ) -> None:
         """Persist + stream a completed artifact-kind step for the files a cell
         produced. Mirrors the host.save_artifact step shape (kind='artifact',
         input={files, environment}, output={artifacts:[…]}) so the same step
-        renderer and the reopen reconstruction both show a "Saving …" card."""
+        renderer and the reopen reconstruction both show a "Saving …" card.
+
+        ``environment``/``language`` are the producing Cell's runtime label and
+        language. Without them every R Cell's card said "python". A row that
+        records ``language`` is read as written; rows without it (0.2.x) are
+        read through their producing Cell by the Store."""
         rid = st.root_frame_id
         files = [a["filename"] for a in saved]
         label = (
@@ -11846,7 +11857,9 @@ class SessionRunner:
                 "Saving " + (files[0] if len(files) == 1 else f"{len(files)} artifacts")
             )
         )
-        step_input = {"files": files, "environment": self._kernel_id(st)}
+        step_input = {"files": files, "environment": environment or self._kernel_id(st)}
+        if language:
+            step_input["language"] = language
         step_output = {"artifacts": saved}
         summary = f"{len(saved)} artifact" + ("" if len(saved) == 1 else "s")
         sid = "s-" + uuid.uuid4().hex[:12]
