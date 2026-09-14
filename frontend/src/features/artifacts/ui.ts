@@ -15,7 +15,7 @@ import {
   resolveArtifactVersion,
   versionResolveMessage,
 } from "./deeplink";
-import { browseFiles, filesGridArtifacts, visibleArtifacts } from "./files-index";
+import { browseFiles, currentFilesFilter, filesGridArtifacts, filesListingIsCurrent, visibleArtifacts } from "./files-index";
 import { loadArtifacts, loadProjectArtifacts } from "./load";
 import { renderArtifactBody } from "./renderers";
 import { filesIndexError, filesIndexItems, viewerVersionState } from "./state";
@@ -229,19 +229,22 @@ export function renderFilesGrid(): void {
   list.innerHTML = "";
   if (count) count.textContent = String(arts.length);
   paintVersionBanner(list);
-  const indexErr = filesIndexError.value;
+  const indexErr = filesListingIsCurrent() ? filesIndexError.value : null;
   if (indexErr && filesIndexItems.value.length === 0 && !arts.length) {
     list.appendChild(el("div", "files-empty", indexErr));
     return;
   }
   if (!arts.length) {
-    const msg =
-      filesScope.value === "project" ? translate("files.emptyProject") : translate("files.empty");
+    const filter = currentFilesFilter();
+    const msg = filter.q || filter.contentType || filter.origin
+      ? filesT("files.noMatches")
+      : filesScope.value === "project" ? translate("files.emptyProject") : translate("files.empty");
     list.appendChild(el("div", "files-empty", msg));
     return;
   }
   arts.forEach((a) => {
     const card = el("div", "art");
+    card.dataset.artifactId = a.id;
     card.appendChild(tileThumbBig(a));
     card.appendChild(
       el("div", "a-name", ((a.priority || 0) > 0 ? "⭐ " : "") + (a.filename || "artifact")),

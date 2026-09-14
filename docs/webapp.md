@@ -232,3 +232,22 @@ so save or copy first. Nothing is written to browser persistent storage.
 Ship the backend, frontend source and committed Vite dist together, and roll
 back that same set together; no schema or migration change is involved.
 后端、前端源码与已提交 Vite dist 必须配套交付和整套回退；不涉及 schema 或迁移修改。
+
+
+### Files filtering and pages / 文件筛选与分页
+
+Files combines filename, content-type and Uploaded/Generated filters. The cards,
+displayed count, empty message and Load more all describe the same result. A
+session starts at 50 files and adds 50 per click; changing any filter or the
+session/scope starts a new first page. Refresh preserves the number of requested
+slots, including a partially filled final page. Hidden files stay excluded and
+distinct artifact IDs remain distinct even when their names match. Project scope
+keeps the server's artifact-index order and pagination, with hidden rows excluded
+before the page limit. Late responses and
+artifact events from a previous session cannot replace the current cards.
+
+Files 可组合文件名、内容类型及上传/生成来源筛选。卡片、显示数量、空状态和
+「加载更多」基于同一结果。会话首次显示 50 项，每次再加载 50 项；改变筛选、
+会话或范围会重置第一页。刷新保留已请求的容量，包括尚未填满的最后一页。
+隐藏文件不显示，同名但不同 ID 的产物不合并；项目范围沿用服务端索引顺序，并在分页前排除隐藏记录。
+上一会话的迟到响应和产物事件不能覆盖当前卡片。

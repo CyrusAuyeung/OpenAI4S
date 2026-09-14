@@ -1,6 +1,7 @@
 import { signal } from "@preact/signals";
 import type { ArtifactRow, FilesOrigin, VersionResolve } from "./types";
 import { ArtifactEditorStore } from "./editor";
+import { FILES_PAGE_SIZE } from "./types";
 
 /** Memory drafts survive Files resets, tab switches and session navigation. */
 export const artifactDraftRevision = signal(0);
@@ -26,6 +27,8 @@ export const filesNextCursor = signal<string | null>(null);
 export const filesCursorFilter = signal<string | null>(null);
 /** Accumulated pages currently painted. First screen ≤ FILES_PAGE_SIZE. */
 export const filesIndexItems = signal<ArtifactRow[]>([]);
+/** Requested capacity survives a short last page and refresh-time deletions. */
+export const filesLoadedLimit = signal(FILES_PAGE_SIZE);
 export const filesIndexLoading = signal(false);
 export const filesIndexMode = signal<FilesIndexMode>("idle");
 export const filesIndexError = signal<string | null>(null);
@@ -42,6 +45,7 @@ export function resetFilesIndexState(): void {
   filesNextCursor.value = null;
   filesCursorFilter.value = null;
   filesIndexItems.value = [];
+  filesLoadedLimit.value = FILES_PAGE_SIZE;
   filesIndexLoading.value = false;
   filesIndexMode.value = "idle";
   filesIndexError.value = null;

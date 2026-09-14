@@ -18,6 +18,7 @@ const REQUESTED = (process.argv.find((a) => a.startsWith("--browser=")) || "").s
 const ENGINES = REQUESTED ? [REQUESTED] : ["chromium", "firefox", "webkit"];
 import { authenticate } from "./browser_auth.mjs";
 import { editorChecks } from "./browser_editor.mjs";
+import { filesChecks } from "./browser_files.mjs";
 
 const baseUrl = process.env.OPENAI4S_BROWSER_URL || "http://127.0.0.1:8760/";
 
@@ -144,6 +145,11 @@ async function runEngine(engineName) {
     await check(engineName, "conditional editor survives races and lost responses", async () => {
       const result = await editorChecks(page, api, frameId);
       return `posts=${result.posts} version=${result.finalVersion}`;
+    });
+
+    await check(engineName, "Files cards, filters, pages and refresh agree", async () => {
+      const result = await filesChecks(page, api);
+      return `pages=${result.firstPages.join("/")} refreshed=${result.refreshed}`;
     });
 
     // ---- consent: the privacy control, in this engine --------------------

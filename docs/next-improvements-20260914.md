@@ -14,8 +14,8 @@ before pushing `next`; the following item waits for that commit's CI.
 | T0 Baseline / 基线 | Completed / 完成 | Locked Python 3.12 science + chemistry, frontend and three Playwright browsers installed; 90 LLM baseline tests passed. Baseline [CI 34819967908](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34819967908) succeeded at the starting SHA. |
 | T1 P0-01 Retry and compatibility / 重试与降级 | Completed / 完成 | Shared three-send state, one compatibility POST, structured stream refusal only, cancellation before sends, semantic replay veto. Initial regression run reproduced 11 failures. Independent review passed after five findings were fixed; 144 targeted tests passed. |
 | T2 P0-03 Editing / 编辑保护 | Completed / 完成 | Conditional writes, immutable editor baseline, bounded recoverable drafts and read-only reconciliation; backend, frontend and dist together. |
-| T3 P0-02 Resource bounds / 资源边界 | Local validation passed; CI pending / 本地验收通过，待 CI | Shared total deadline, bounded input, backpressure and original usage evidence; independent review passed. |
-| T4 P1-01 Files | Not started / 未开始 | Shared filtering and pagination. |
+| T3 P0-02 Resource bounds / 资源边界 | Completed / 完成 | Shared total deadline, bounded input, backpressure and original usage evidence; independent review passed. |
+| T4 P1-01 Files | Local validation passed; CI pending / 本地验收通过，待 CI | Shared owned filtering, pagination and refresh; 705 frontend tests passed. |
 | T5 P1-03 Navigation / 导航 | Not started / 未开始 | Navigation identity and request generations. |
 | T6 P1-02 Provenance and export / 溯源与导出 | Not started / 未开始 | Honest read states, validated responses and fixed version identity. |
 | T7 P2-01 Snapshot design / 快照准备 | Not started / 未开始 | Design and acceptance only; no migration changes. |
@@ -177,7 +177,7 @@ T3 的慢头、滴流、心跳、长行、背压和协议终态由本地可控�
 Ark 实测覆盖流式停止、旧调用回记和下一调用恢复。浏览器取消发生于
 可见文本之前，记录明确保留该边界；不把未知计量或失败验证写成成功。
 三浏览器矩阵 33/33 已通过，wheel/sdist 验证及独立无依赖安装 smoke
-（13 个模块、604 个 Skills）已通过。完整离线套件也已通过，提交 CI 待核验。
+（13 个模块、604 个 Skills）已通过。完整离线套件及提交 CI 均已通过。
 
 
 The first full T3 run reported three failures. Two characterization assertions
@@ -208,4 +208,96 @@ migration and merging to main remain outside this work.
 最终本地验证通过：8,957 项通过、26 项跳过，耗时 823.09 秒；全部 worker 的
 响应捕获完整合并，1,167 种响应形状无破坏性变化，212 条路由全部覆盖。
 修复夹具后的全量 pre-commit 与 38 个 PR 场景均通过。
-最终分发包从干净候选构建，排除两份原有文档修改；远端 CI 通过后才进入 T4。
+最终分发包从干净候选构建，排除两份原有文档修改；远端 CI 通过后进入 T4。
+
+
+T3 commit `cc801345ccb10cecd14910f8ca177675258ab212` passed all 25 applicable
+jobs (four not applicable jobs skipped) in [CI 34848725299](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34848725299).
+The first local CI watcher exited on a TLS handshake timeout; a timestamped
+read-only API monitor recovered and confirmed completion. No CI jobs were
+cancelled or restarted.
+
+T3 提交的 25 项适用 CI 作业全部通过；四项不适用作业跳过。首次本地监视进程
+因 TLS 握手超时退出，随后恢复只读监视并核实最终状态，未取消或重跑 CI 作业。
+
+## T4 Files validation / Files 验证
+
+The initial regression run reproduced five failures: frame cards bypassed the
+paged result, closed-dock loads did not populate filters, refresh lost requested
+capacity, partial final pages did not grow correctly, and session switches could
+paint previous cards. Cards, count, empty state and load-more now read the same
+owned result. Frame data has a separate session/generation identity; project
+refresh walks the existing artifact-index while retaining requested capacity.
+Filters reset to 50, in-place WS updates re-slice current data, hidden rows stay
+excluded, and conversation artifact visibility and retained drafts are unchanged.
+
+Independent read-only review found no remaining implementation blockers. Its
+project refresh and ownership probes were added to the fixed tests, including
+second-page interleavings, repeated cursors and zero-progress failure. The full
+frontend suite passed 705 tests; browser checks and full offline validation passed.
+
+首轮复现五处失败。现在卡片、数量、空状态及加载更多共用具备会话归属的结果；
+初始读取和 WS 更新都会重算，刷新保留已请求的容量，筛选变更回到第一页。
+独立只读复核暂无阻断问题，补充的项目多页刷新与迟到响应测试已通过；
+全量前端 705 项、浏览器检查和完整离线验证通过。
+
+
+The real Chromium fixture found an additional server boundary: the project index
+applied its limit before priority-hidden rows were removed by the client, so a
+50-row response painted 49 cards. The index repository now excludes priority-hidden
+rows before LIMIT; ordering, cursors, response shape and the legacy array endpoint
+are preserved. Independent read-only review confirmed this scope. A real-route
+regression covers 60 newer hidden rows in front of 125 visible rows, 50/50/25
+pages, combined filters, all-hidden empty state and the unchanged legacy array.
+The old in-progress full run was stopped after 3,801 passes and ten skips so the
+updated candidate can receive a complete response-capture run; that partial run
+is not final verification.
+
+真实 Chromium 另发现项目索引的隐藏过滤发生于分页后，导致 50 行响应只显示
+49 张卡片。现于 LIMIT 前排除 priority 隐藏行，排序、游标、响应结构及旧数组
+接口保持；独立只读复核认可范围。新增真实路由回归覆盖 60 个隐藏新记录和
+125 个可见记录的分页、组合筛选、全隐藏空状态及旧数组兼容性。
+正在运行的旧候选完整测试在 3,801 项通过、10 项跳过后主动停止，后续以新候选
+重新完成完整响应捕获，不把部分运行作为最终验证。
+
+
+The three-engine matrix first passed 36/36. After strengthening the delayed-read
+and REST-refresh assertions, all three Files scenes passed again, while the
+existing WebKit editor scene timed out once waiting for ready (35/36 overall).
+Its standalone recheck and the entire WebKit matrix then passed with unchanged
+timeouts (12/12). Independent review found no T4 editor-state dependency that
+explains this observation; its cause remains unproven and the failure is retained.
+The final Files checks also compare both real DOM IDs for equal names in two
+sessions, rather than relying only on intermediate arrays.
+
+The existing Ark artifact `a-e173b9ee7826` / `ark-edit-notes.txt` passed Generated
+versus Uploaded filtering in Chromium, Firefox and WebKit, with no new model
+requests. The observed version was `v-37083588ebbd`, the head after T2 editor
+validation; the original generation receipt records `v-4d33b4cdb21b`. These are
+separate observations, not an assertion that editing left the original head intact.
+
+三引擎矩阵首次 36/36 通过。加强迟到读取与 REST 刷新断言后，Files 三引擎再次
+通过，但既有 WebKit 编辑器发生一次就绪超时；原阈值独立复查及整个 WebKit
+矩阵随后通过（12/12）。未证明超时根因，保留失败记录；最终 Files 检查也在
+真实 DOM 中核对跨会话同名文件的两个不同 ID。
+
+复用 Ark 产物的来源筛选在三引擎均通过，本项没有新增模型请求。当前观察版本
+为 T2 编辑验证后的 `v-37083588ebbd`，原始生成记录为 `v-4d33b4cdb21b`，
+分别记录原始生成与本次读取事实。
+
+
+Final T4 offline verification passed **8,958 tests, 26 skipped**,
+with zero failures/errors in 916.088 seconds. All workers' response evidence
+assembled successfully: **1,167 shapes, 212/212 routes**, no breaking drift.
+The full frontend suite passed 705 cases; 58 targeted backend cases, typecheck,
+i18n extraction, clean-candidate all-files pre-commit, 38 PR harness scenarios,
+165-directory bilingual coverage (1,537 direct assets), source secret scan
+(3,857 files), 212-route contract check, and Skills installer/package checks
+(16 selftests; 2,283 files / 604 Skills) passed. Final source and dist are paired.
+The two original document modifications remain byte-identical and excluded.
+
+T4 完整离线验证：8,958 项通过、26 项跳过，零失败/错误，
+耗时 916.088 秒；全部响应证据完整合并，1,167 种形状无破坏性漂移，
+212 条路由全部覆盖。前端、针对性后端、类型、双语提取、全量 pre-commit、
+harness、目录清单、secret scan、响应契约和 Skills 包检查均通过。
+原有两份未提交文档保持逐字节一致，前端源码和 dist 同批交付。

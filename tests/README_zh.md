@@ -472,3 +472,5 @@ OpenAI4S 的离线正确性门禁。`uv run pytest` 用确定性 fake 跑完这�
 | [`test_response_contract_downloads.py`](test_response_contract_downloads.py) | 成功时返回字节的那几条 route，以及唯一一处没套信封的拒绝。notebook 导出、Session 包和 artifact 下载此前都被固化成 `kinds: ["json"], statuses: [404]`：无参扫描没有东西可要，而四个未实现的动词照样产出那个 404，于是覆盖门把一个下载端点算作已覆盖，客户端真正依赖的东西却哪里都没写下来。`PATCH\|POST\|PUT /annotations/<id>` 用 `{"annotation": null}` 回 404，是这张表面上唯一落在 PublicFailure 信封之外的拒绝，前端 `api()`（它用 `j.error` 构造错误）因此报出一个什么都没说的失败。 |
 
 - [`browser_editor.mjs`](browser_editor.mjs): 真实条件编辑动作、延迟读取、冲突、保存响应丢失和刷新保护；由浏览器矩阵复用。
+
+- [`browser_files.mjs`](browser_files.mjs): 真实 Files 控件、125 项分页、组合筛选、实时刷新、延迟会话读取和可选复用真实 Ark 产物；三个引擎矩阵共用。
