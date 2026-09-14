@@ -157,6 +157,9 @@ _DARWIN_SZOMB = 5
 #: the offset of ``kp_proc.p_stat`` inside it — the record ``ps`` reads.
 _DARWIN_KINFO_PROC_SIZE = 648
 _DARWIN_P_STAT_OFFSET = 36
+#: ``kp_proc.p_starttime`` opens the record: a ``struct timeval`` whose
+#: ``tv_sec`` is a little-endian int64 and ``tv_usec`` the int32 after it.
+_DARWIN_P_STARTTIME_FORMAT = "<qi"
 
 
 def _is_zombie(pid: int) -> bool:
@@ -177,6 +180,30 @@ def _is_zombie(pid: int) -> bool:
 
 def _darwin_process_stat(pid: int) -> int | None:
     """``kp_proc.p_stat`` from ``sysctl kern.proc.pid.<pid>``, or None."""
+    record = _darwin_kinfo_proc(pid)
+    return None if record is None else record[_DARWIN_P_STAT_OFFSET]
+
+
+def _darwin_process_start(pid: int) -> str | None:
+    """``kp_proc.p_starttime`` from ``sysctl kern.proc.pid.<pid>``, or None.
+
+    The kernel stamps it when the process is created and never changes it, so
+    it tells two processes that shared a pid apart the way Linux's field 22
+    does -- at microsecond rather than clock-tick resolution.
+    """
+    import struct
+
+    record = _darwin_kinfo_proc(pid)
+    if record is None:
+        return None
+    seconds, micros = struct.unpack_from(_DARWIN_P_STARTTIME_FORMAT, record, 0)
+    if seconds <= 0 or not 0 <= micros < 1_000_000:
+        return None
+    return f"{seconds}.{micros:06d}"
+
+
+def _darwin_kinfo_proc(pid: int) -> bytes | None:
+    """The raw ``struct kinfo_proc`` for ``pid`` on macOS, or None."""
     try:
         import ctypes
 
@@ -201,7 +228,7 @@ def _darwin_process_stat(pid: int) -> int | None:
     # was not written against, and reading an offset into it would be a guess.
     if size.value != _DARWIN_KINFO_PROC_SIZE:
         return None
-    return record.raw[_DARWIN_P_STAT_OFFSET]
+    return record.raw
 
 
 def _proc_stat_fields(pid: int) -> list[bytes] | None:
@@ -237,15 +264,23 @@ def _process_start_token(pid: int) -> str | None:
     Linux exposes the distinguishing fact: field 22 of ``/proc/<pid>/stat`` is
     the process's start time in clock ticks since boot. Two processes may share
     a pid, but a process that started at a different moment is a different
-    process. Elsewhere — macOS has no procfs — there is nothing cheap and
-    correct to read, so this returns None and the caller keeps the older,
-    weaker answer instead of guessing.
+    process. macOS has no procfs, but the same fact is ``kp_proc.p_starttime``
+    in the ``sysctl`` record ``ps`` reads. Without it a daemon recorded
+    ``pid_start: null``, `_recorded_endpoint` rightly refused that record, and
+    `url` and `status` fell back to the default port for a daemon started with
+    ``--port``. Elsewhere there is nothing cheap and correct to read, so this
+    returns None and the caller keeps the older, weaker answer instead of
+    guessing.
     """
     fields = _proc_stat_fields(pid)
-    # Field 22 overall. Fields 1 and 2 are behind us, so it is index 19 here.
-    if fields is None or len(fields) < 20:
-        return None
-    return fields[19].decode("ascii", "replace")
+    if fields is not None:
+        # Field 22 overall. Fields 1 and 2 are behind us, so it is index 19.
+        if len(fields) < 20:
+            return None
+        return fields[19].decode("ascii", "replace")
+    if sys.platform == "darwin":
+        return _darwin_process_start(pid)
+    return None
 
 
 def _recorded_state(cfg) -> dict[str, object] | None:

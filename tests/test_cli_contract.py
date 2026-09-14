@@ -373,6 +373,146 @@ def test_recorded_endpoint_rejects_stale_or_invalid_state(
     assert module._recorded_endpoint(config, 4321) is None
 
 
+#: What `sysctl kern.proc.pid.<pid>` hands back on LP64 macOS for a running
+#: process that started at 1789000000.123456: ``kp_proc.p_starttime`` (a
+#: ``struct timeval``) opens the record, ``kp_proc.p_stat`` sits at byte 36.
+def _darwin_kinfo_record(*, seconds=1_789_000_000, micros=123_456, p_stat=2):
+    import struct
+
+    record = bytearray(648)
+    struct.pack_into("<qi", record, 0, seconds, micros)
+    record[36] = p_stat
+    return bytes(record)
+
+
+def _as_darwin(module, monkeypatch, record):
+    """Take the macOS branch on any host: no procfs, and this kinfo record."""
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module, "_proc_stat_fields", lambda _pid: None)
+    # raising=False: before the fix nothing reads a kinfo record for a start
+    # token, and the test must fail on the URL, not on a missing attribute.
+    monkeypatch.setattr(
+        module, "_darwin_kinfo_proc", lambda _pid: record, raising=False
+    )
+
+
+def test_a_darwin_start_token_is_the_process_start_time(monkeypatch):
+    """UPG5-05. macOS has no procfs, so there was no start token at all, and a
+    daemon recorded `pid_start: null` -- which `_recorded_endpoint` rightly
+    refuses, sending `url` and `status` to the default port."""
+    module = _cli_module()
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record())
+
+    assert module._process_start_token(4321) == "1789000000.123456"
+
+    monkeypatch.setattr(module, "_darwin_kinfo_proc", lambda _pid: None)
+    assert module._process_start_token(4321) is None
+
+
+def _live_darwin_daemon(tmp_path, *, port=9734):
+    config = SimpleNamespace(
+        host="127.0.0.1",
+        port=8760,
+        data_dir=tmp_path,
+        pidfile=tmp_path / "openai4s.pid",
+        statefile=tmp_path / "daemon.json",
+    )
+    config.pidfile.write_text(str(os.getpid()), encoding="utf-8")
+    config.statefile.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "pid_start": "1789000000.123456",
+                "host": "127.0.0.1",
+                "port": port,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_url_on_macos_names_the_port_the_daemon_was_started_on(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s.server import local_auth
+
+    module = _cli_module()
+    config = _live_darwin_daemon(tmp_path)
+    token = local_auth.load_or_mint(tmp_path)
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record())
+    monkeypatch.setattr(module, "get_config", lambda: config)
+
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip() == (f"http://127.0.0.1:9734/?token={token}")
+
+
+def test_status_on_macos_probes_the_port_the_daemon_was_started_on(
+    tmp_path, monkeypatch, capsys
+):
+    module = _cli_module()
+    config = _live_darwin_daemon(tmp_path)
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record())
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    opened = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read():
+            return b'{"status":"ok","model":"demo"}'
+
+    def open_daemon(request, *, timeout):
+        opened.append(request)
+        if ":9734/" not in request:
+            raise module.urllib.error.URLError("connection refused")
+        return Response()
+
+    monkeypatch.setattr(module, "_open_daemon", open_daemon)
+
+    assert module.cmd_status(SimpleNamespace()) == 0
+    assert opened == ["http://127.0.0.1:9734/health"]
+    assert "at http://127.0.0.1:9734/" in capsys.readouterr().out
+
+
+def test_a_reused_pid_on_macos_still_falls_back_to_the_callers_config(
+    tmp_path, monkeypatch, capsys
+):
+    """The start token exists to keep a reused pid from steering the token URL
+    to whatever the stale record names; the macOS token must do that too."""
+    module = _cli_module()
+    config = _live_darwin_daemon(tmp_path, port=9734)
+    _as_darwin(module, monkeypatch, _darwin_kinfo_record(micros=654_321))
+    monkeypatch.setattr(module, "get_config", lambda: config)
+
+    assert module._daemon_alive(config, os.getpid()) is False
+    assert module.cmd_url(SimpleNamespace()) == 0
+    assert capsys.readouterr().out.strip().startswith("http://127.0.0.1:8760/")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads the real macOS sysctl")
+def test_the_darwin_start_token_is_read_from_the_real_kernel():
+    """Read from the live kernel, so the record offset is proven rather than
+    asserted: stable for this process, different for a child started later."""
+    module = _cli_module()
+
+    mine = module._process_start_token(os.getpid())
+    assert mine and mine == module._process_start_token(os.getpid())
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        theirs = module._process_start_token(child.pid)
+        assert theirs and theirs != mine
+    finally:
+        child.kill()
+        child.wait()
+    assert module._process_start_token(child.pid) is None
+
+
 def test_stage1_run_allows_control_only_agent_before_any_readiness_probe(
     tmp_path, monkeypatch, capsys
 ):
