@@ -129,11 +129,92 @@ def _read_pid(cfg) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` names a process that has not exited yet.
+
+    ``os.kill(pid, 0)`` only says the pid is still allocated, and an exited
+    process keeps its pid as a zombie until its parent reaps it. A detached
+    daemon is reparented to init/launchd, which reaps at once, but a
+    supervisor that runs ``serve`` as its own child and then ``openai4s stop``
+    holds the corpse for as long as it waits on ``stop``. The release smoke
+    did exactly that: ``stop`` polled the zombie for its whole timeout, called
+    a finished shutdown "still shutting down" and returned 2 — and ``--force``
+    would have reported that the corpse "ignored SIGKILL".
+    """
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    return not _is_zombie(pid)
+
+
+#: ``p_stat`` of an exited, unreaped process in XNU's ``<sys/proc.h>``.
+_DARWIN_SZOMB = 5
+#: ``sizeof(struct kinfo_proc)`` on LP64 macOS (arm64 and x86_64 alike), and
+#: the offset of ``kp_proc.p_stat`` inside it — the record ``ps`` reads.
+_DARWIN_KINFO_PROC_SIZE = 648
+_DARWIN_P_STAT_OFFSET = 36
+
+
+def _is_zombie(pid: int) -> bool:
+    """True only when the platform positively reports ``pid`` as a zombie.
+
+    Where the state cannot be read the answer is False, so the caller keeps
+    the older pid-existence answer instead of guessing that a live daemon is
+    gone.
+    """
+    fields = _proc_stat_fields(pid)
+    if fields:
+        # Field 3: Z is a zombie; X (dead) is never meant to be visible.
+        return fields[0] in (b"Z", b"X", b"x")
+    if sys.platform == "darwin":
+        return _darwin_process_stat(pid) == _DARWIN_SZOMB
+    return False
+
+
+def _darwin_process_stat(pid: int) -> int | None:
+    """``kp_proc.p_stat`` from ``sysctl kern.proc.pid.<pid>``, or None."""
+    try:
+        import ctypes
+
+        sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+    except (ImportError, OSError, AttributeError):
+        return None
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+    record = ctypes.create_string_buffer(_DARWIN_KINFO_PROC_SIZE)
+    size = ctypes.c_size_t(_DARWIN_KINFO_PROC_SIZE)
+    if sysctl(mib, 4, record, ctypes.byref(size), None, 0) != 0:
+        return None
+    # Zero bytes means no such process; any other size is a layout this code
+    # was not written against, and reading an offset into it would be a guess.
+    if size.value != _DARWIN_KINFO_PROC_SIZE:
+        return None
+    return record.raw[_DARWIN_P_STAT_OFFSET]
+
+
+def _proc_stat_fields(pid: int) -> list[bytes] | None:
+    """Fields 3 onward of Linux ``/proc/<pid>/stat``, or None where unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    # comm (field 2) is the one field that may contain spaces and parentheses,
+    # and it is always parenthesised — so split after its *last* ')' rather
+    # than on whitespace, which a process named "(x) 1 2 3" would otherwise
+    # shift by four fields.
+    close = raw.rfind(b")")
+    if close == -1:
+        return None
+    return raw[close + 2 :].split()
 
 
 def _process_start_token(pid: int) -> str | None:
@@ -156,21 +237,9 @@ def _process_start_token(pid: int) -> str | None:
     correct to read, so this returns None and the caller keeps the older,
     weaker answer instead of guessing.
     """
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as handle:
-            raw = handle.read()
-    except OSError:
-        return None
-    # comm (field 2) is the one field that may contain spaces and parentheses,
-    # and it is always parenthesised — so split after its *last* ')' rather
-    # than on whitespace, which a process named "(x) 1 2 3" would otherwise
-    # shift by four fields.
-    close = raw.rfind(b")")
-    if close == -1:
-        return None
-    fields = raw[close + 2 :].split()
+    fields = _proc_stat_fields(pid)
     # Field 22 overall. Fields 1 and 2 are behind us, so it is index 19 here.
-    if len(fields) < 20:
+    if fields is None or len(fields) < 20:
         return None
     return fields[19].decode("ascii", "replace")
 

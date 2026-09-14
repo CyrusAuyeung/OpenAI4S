@@ -280,6 +280,9 @@ PARITY_AUDIT = ROOT / "docs" / "windows-wsl-parity-audit.md"
 #: each README half must use to disclose it. Keyed by the audit's own wording,
 #: so an audit that later certifies one of them releases the docs from it.
 _WINDOWS_LIMITATIONS = {
+    # D13 names this one first; the audit's final section says it "does not
+    # certify macOS execution" because the macOS side was read from source.
+    "macOS execution": ("side-by-side macOS run", "与 macOS 并排运行"),
     "Windows reboot": ("A Windows reboot", "Windows 整机重启"),
     "Conda provisioning": ("Conda environment provisioning", "Conda 环境准备"),
     "real provider login/inference": (
@@ -334,6 +337,29 @@ def test_the_windows_limitations_follow_the_audits_final_verification():
         "full browser smoke did not pass",
     ):
         assert fact in decisions, f"D13 in v03-decisions.md does not name {fact!r}"
+
+
+def test_security_does_not_credit_the_one_file_environ_mask_with_linux():
+    """The single-user bubblewrap policy keeps the host PID namespace and masks
+    exactly one file, `/proc/<daemon>/environ`. The same environment is also
+    `/proc/<daemon>/task/<tid>/environ`, and MCP connector children and a
+    `uv run` parent carry secrets in theirs. What refuses those reads on a
+    default Linux host is bubblewrap's user namespace; setuid bubblewrap runs
+    without one and leaves them readable. The doc said the mask "closes" the
+    threat, a parity claim with macOS the mask cannot meet."""
+    text = _normalised(ROOT / "docs" / "security.md")
+    assert "closes on Linux by masking" not in text
+    linux = text.split("**Linux — reading another process's environment.**", 1)
+    assert len(linux) == 2, "docs/security.md lost its Linux environ paragraph"
+    paragraph = linux[1].split("**", 1)[0]
+    for claim in (
+        "user namespace",
+        "task/<tid>/environ",
+        "backstop",
+        "setuid",
+        "--unshare-pid",
+    ):
+        assert claim in paragraph, f"the Linux environ paragraph omits {claim!r}"
 
 
 def test_platforms_names_the_published_container_image():

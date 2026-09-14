@@ -66,11 +66,10 @@ def _spawn_sigterm_ignoring_child() -> subprocess.Popen:
 def slow_daemon():
     """A SIGTERM-ignoring child registered in the pidfile.
 
-    The reaper thread matters: the child is *our* child, so once SIGKILLed it
-    would sit as a zombie — which ``os.kill(pid, 0)`` still counts as alive —
-    unless something wait()s it. The real daemon is never the CLI's child, so
-    only the test needs this. Tests shorten the wait through the real
-    ``--timeout`` flag rather than by replacing the poll.
+    The reaper thread keeps the child from lingering as a zombie once it is
+    SIGKILLed; ``_pid_alive`` reads a zombie as exited on Linux and macOS, and
+    the unreaped case is pinned on its own below. Tests shorten the wait through
+    the real ``--timeout`` flag rather than by replacing the poll.
     """
     cfg = cli_main.get_config()
     proc = _spawn_sigterm_ignoring_child()
@@ -127,10 +126,9 @@ def test_stop_timeout_leaves_status_and_retry_able_to_see_the_daemon(
 def test_stop_force_escalates_to_sigkill(slow_daemon, capsys):
     cfg, proc = slow_daemon
     # The SIGTERM half times out after --timeout (the child ignores it). After
-    # SIGKILL the child sits as a zombie — which os.kill(pid, 0) counts as
-    # alive — until the reaper thread gets scheduled to wait() it; the
-    # post-kill poll is the full TERM_GRACE_S ladder, a realistic budget for
-    # that on a busy runner.
+    # SIGKILL the post-kill poll is the full TERM_GRACE_S ladder; a zombie
+    # counts as exited, so this does not depend on when the reaper thread
+    # gets scheduled.
     rc = cli_main.main(["stop", "--force", "--timeout", "0.1"])
 
     out, err = capsys.readouterr()
@@ -157,6 +155,119 @@ def test_stop_of_a_promptly_exiting_daemon_still_reports_success(monkeypatch, ca
     assert rc == 0
     assert "daemon stopped" in capsys.readouterr().out
     assert not cfg.pidfile.exists()
+
+
+_ZOMBIE_AWARE = pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="zombie state is read from /proc (Linux) or kern.proc (macOS)",
+)
+
+
+def _wait_for_zombie(proc: subprocess.Popen, *, seconds: float = 10.0) -> None:
+    """Block until ``proc`` has exited but is deliberately still unreaped.
+
+    The pid must stay allocated — ``os.kill(pid, 0)`` still succeeds — or the
+    test would prove nothing about zombies, only that the exit happened.
+    """
+    state = ""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(proc.pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if state.startswith("Z"):
+            break
+        time.sleep(0.02)
+    else:  # pragma: no cover - diagnostic
+        pytest.fail(f"pid {proc.pid} never became a zombie (last state {state!r})")
+    os.kill(proc.pid, 0)  # still allocated: nothing has reaped it
+
+
+@_ZOMBIE_AWARE
+def test_pid_alive_reads_an_unreaped_zombie_as_exited():
+    """A zombie has exited; only its pid is still allocated.
+
+    ``os.kill(pid, 0)`` succeeds on it, so a stop polling that answer waited
+    its whole timeout for a daemon that was already gone whenever the daemon's
+    parent was not reaping it — the release smoke spawned ``serve`` as its own
+    child and then blocked in ``subprocess.run(stop)``, which returned 2 after
+    30s.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        assert cli_main._pid_alive(proc.pid), "a running child is alive"
+        proc.kill()
+        _wait_for_zombie(proc)
+        assert not cli_main._pid_alive(proc.pid)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+
+
+@_ZOMBIE_AWARE
+def test_stop_of_a_daemon_nothing_reaps_returns_promptly(capsys):
+    """A supervisor that spawns ``serve`` as a non-reaping child and then runs
+    ``openai4s stop`` gets a clean stop, not a full timeout and exit 2."""
+    cfg = cli_main.get_config()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time\nprint('ready', flush=True)\ntime.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+    cfg.pidfile.write_text(str(proc.pid), "utf-8")
+    try:
+        started = time.monotonic()
+        rc = cli_main.main(["stop", "--timeout", "10"])
+        elapsed = time.monotonic() - started
+        out, err = capsys.readouterr()
+        # stop observed the exit while the child was still unreaped.
+        os.kill(proc.pid, 0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+
+    assert rc == 0, err
+    assert "daemon stopped" in out
+    assert "still shutting down" not in err
+    assert not cfg.pidfile.exists()
+    assert elapsed < 5, f"stop polled an exited daemon for {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    ("state", "alive"),
+    [(b"S", True), (b"R", True), (b"D", True), (b"Z", False), (b"X", False)],
+)
+def test_the_linux_branch_reads_state_after_the_last_parenthesis(
+    monkeypatch, state, alive
+):
+    """Forces the procfs branch, which macOS never takes.
+
+    The comm field is attacker-shaped: a process may name itself so that a
+    whitespace split lands on a fake state. ``os.getpid()`` keeps the
+    ``os.kill(pid, 0)`` half genuinely true, so only the state decides.
+    """
+    pid = os.getpid()
+    stat = b"%d (evil) Z 1 2) " % pid + state + b" 1 %d %d 0 -1" % (pid, pid)
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == f"/proc/{pid}/stat":
+            import io
+
+            return io.BytesIO(stat)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(cli_main, "open", fake_open, raising=False)
+    assert cli_main._pid_alive(pid) is alive
 
 
 def test_stop_keeps_waiting_past_the_sigterm_grace_for_a_daemon_still_exiting(

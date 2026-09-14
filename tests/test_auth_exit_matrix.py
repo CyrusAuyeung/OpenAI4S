@@ -466,3 +466,40 @@ def test_require_token_zero_is_ignored_off_loopback(tmp_path, monkeypatch):
         ), "a non-loopback bind honoured OPENAI4S_REQUIRE_TOKEN=0 and minted no token"
     finally:
         runner.close()
+
+
+def test_no_browser_gate_still_configures_the_retired_token_switch():
+    """A gate that pins `OPENAI4S_REQUIRE_TOKEN` in its daemon's environment
+    reads as though the credential gate were still a setting. It is not, so a
+    pinned value documents a contract 0.3.0 removed. Comments may still name
+    the variable to explain its removal; code may not set it."""
+    offenders = []
+    for gate in sorted(Path(__file__).resolve().parent.glob("*.mjs")):
+        for number, line in enumerate(gate.read_text("utf-8").splitlines(), 1):
+            code = line.strip()
+            if code.startswith(("//", "*", "/*")):
+                continue
+            if "OPENAI4S_REQUIRE_TOKEN" in code:
+                offenders.append(f"{gate.name}:{number}: {code}")
+    assert offenders == []
+
+
+def test_no_python_test_arms_the_retired_token_switch():
+    """The Python half of the same dead contract. A test that sets
+    `OPENAI4S_REQUIRE_TOKEN` to an arming value reads as though its gate were
+    off without it; the gate is on regardless. The tests that set the retired
+    opt-out values to prove they are ignored are the point, and stay."""
+    import re
+
+    arming = re.compile(
+        r"""(?:setenv\(|environ\[)\s*["']OPENAI4S_REQUIRE_TOKEN["']\s*[\],]\s*=?\s*"""
+        r"""["'](?:1|true|yes|on)["']""",
+        re.IGNORECASE,
+    )
+    offenders = []
+    for test_file in sorted(Path(__file__).resolve().parent.glob("*.py")):
+        text = test_file.read_text("utf-8", errors="replace")
+        for number, line in enumerate(text.splitlines(), 1):
+            if arming.search(line):
+                offenders.append(f"{test_file.name}:{number}: {line.strip()}")
+    assert offenders == []

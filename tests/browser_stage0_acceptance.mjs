@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import util from "node:util";
 
 import { authenticate } from "./browser_auth.mjs";
 
@@ -663,12 +664,87 @@ async function redactionAndSchemaSelfTest() {
       new URL(onboardingPosts[0]).pathname === "/api/v1/onboarding/complete",
     "authenticate did not attempt the documented first-run skip",
   );
+  // A daemon that rejects the token (another data dir, or another process on
+  // the port) leaves the page on the bootstrap URL, `?token=` and all. The
+  // failure message used to quote that URL, writing a live credential into
+  // CI output from browser_matrix, admission_fault, p1_controls and smoke.
+  const rejectedToken = "captured-rejected-token-0123456789";
+  let rejectedUrl = "";
+  let rejection = null;
+  try {
+    await authenticate(
+      {
+        goto: async (url) => {
+          rejectedUrl = url;
+          return { status: () => 401 };
+        },
+        url: () => rejectedUrl,
+      },
+      "http://127.0.0.1:18999/",
+      rejectedToken,
+    );
+  } catch (error) {
+    rejection = error;
+  }
+  assertion(rejection !== null, "authenticate accepted a bootstrap the daemon rejected");
+  assertion(
+    !String(rejection.message).includes(rejectedToken) &&
+      !String(rejection.stack || "").includes(rejectedToken),
+    "authenticate printed the rejected access token",
+  );
+  assertion(
+    String(rejection.message).includes("did not accept the access token") &&
+      String(rejection.message).includes("401"),
+    "authenticate did not name the rejected bootstrap",
+  );
+  // The other way a bootstrap fails: page.goto() itself throws, because
+  // nothing listens on the port or a non-HTTP process holds it. Playwright
+  // quotes the navigation URL, `?token=` and all, in the message, the Call
+  // log and the error's own `log` array, and Node prints every one of them
+  // for an uncaught error -- which is what p1_controls, admission_fault and
+  // smoke do with it. The double throws that shape.
+  const unreachableToken = "captured-unreachable-token-0123456789";
+  let unreachable = null;
+  try {
+    await authenticate(
+      {
+        goto: async (url) => {
+          const error = new Error(
+            `page.goto: net::ERR_CONNECTION_REFUSED at ${url}\n` +
+              `Call log:\n  - navigating to "${url}", waiting until "domcontentloaded"\n`,
+          );
+          error.log = [`  - navigating to "${url}", waiting until "domcontentloaded"`];
+          throw error;
+        },
+        url: () => "chrome-error://chromewebdata/",
+      },
+      "http://127.0.0.1:18999/",
+      unreachableToken,
+    );
+  } catch (error) {
+    unreachable = error;
+  }
+  assertion(unreachable !== null, "authenticate swallowed a bootstrap navigation that threw");
+  assertion(
+    !util.inspect(unreachable, { depth: 8 }).includes(unreachableToken) &&
+      !String(unreachable.message).includes(unreachableToken) &&
+      !String(unreachable.stack || "").includes(unreachableToken),
+    "authenticate printed the access token when the bootstrap navigation threw",
+  );
+  assertion(
+    String(unreachable.message).includes("could not reach the daemon") &&
+      String(unreachable.message).includes("http://127.0.0.1:18999/") &&
+      String(unreachable.message).includes("ERR_CONNECTION_REFUSED"),
+    "authenticate did not name the unreachable bootstrap",
+  );
   const selfTestSummary = makeSummary("self_test");
   selfTestSummary.self_test_checks = {
     redaction: true,
     schema: true,
     disposable_binding: true,
     captured_token_authentication: true,
+    rejected_token_redaction: true,
+    unreachable_token_redaction: true,
     production_completion: true,
     pid_liveness_portability: true,
   };

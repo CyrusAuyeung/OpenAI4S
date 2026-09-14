@@ -58,8 +58,9 @@ trust boundary above.
 **macOS — reading the daemon's exec-time environment.** On macOS a process's
 argument and environment block is reachable through `sysctl(CTL_KERN,
 KERN_PROCARGS2, <pid>)`, and for a daemon whose LLM key is configured by
-environment variable / `.env` that block holds the key in cleartext. This is
-the same threat bubblewrap closes on Linux by masking `/proc/<daemon>/environ`.
+environment variable / `.env` that block holds the key in cleartext. Linux
+exposes the same block through procfs, and what refuses the read there is a
+different mechanism, described after the macOS discussion below.
 The Seatbelt profile denies the `process-info` introspection class (for other
 processes) **and** the `kern.proc` sysctls. Between processes in different
 sessions the kernel gates the KERN_PROCARGS2 read behind both authorization
@@ -100,6 +101,36 @@ consistent with the same-UID trust boundary above. As defence in depth,
 macOS deployments running untrusted cells can also keep the key in the keychain
 SecretBroker (the `auto` default), where it is never placed in the daemon
 environment at all.
+
+**Linux — reading another process's environment.** Linux exposes the same
+block as `/proc/<pid>/environ`, and again as `/proc/<pid>/task/<tid>/environ`.
+The single-user bubblewrap policy keeps the host PID namespace, so that an
+interrupt can be delivered to the worker bubblewrap starts, and that leaves the
+daemon's procfs entries visible to a cell. What refuses the read on a default
+install is bubblewrap's user namespace, not a mount. For a daemon running as an
+ordinary user with a bubblewrap that is not installed setuid, bubblewrap always
+puts the cell in a new user namespace. Every `environ` open goes through the
+kernel's ptrace read check (`cap_ptrace_access_check`), which allows it only to
+a caller in the target's own user namespace holding at least the target's
+capabilities, or to one with `CAP_SYS_PTRACE` in the target's namespace. A cell
+in bubblewrap's child namespace is neither, so the read fails for every process
+outside the sandbox and by every path: the daemon's `environ` and
+`task/<tid>/environ`, MCP stdio connector children (a connector's declared
+`env`, credentials included, is their exec-time environment), and a `uv run`
+parent. A daemon running as root fails the same check another way, because
+bubblewrap drops the cell's capabilities. The policy's
+`--ro-bind /dev/null /proc/<daemon>/environ` mask is a single-file backstop
+behind the check; it covers neither
+`task/<tid>/environ` nor any other process. Setuid bubblewrap (older EL7-style
+installs) runs the cell without a user namespace, as the daemon's UID in the
+daemon's namespace, and there those other paths stay readable: use an
+unprivileged bubblewrap, or keep keys out of the daemon's environment through
+the SecretBroker. Team read isolation and WSL policies add `--unshare-pid`, so
+their `/proc` shows only the sandbox's own processes. This account of the Linux
+boundary follows the kernel's check and has not been measured: the Linux tests
+in `tests/test_sandbox_credential_denies.py` inspect bubblewrap's argv, and
+`harness.smoke.linux_sandbox` does not read another process's environment from
+inside the sandbox.
 
 [`openai4s.security`](../openai4s/security) adds independent policy layers:
 

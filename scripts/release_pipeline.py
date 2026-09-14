@@ -1202,10 +1202,11 @@ class Pipeline:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        served = ""
         try:
             deadline = time.monotonic() + 90
             last = ""
-            while time.monotonic() < deadline:
+            while not served and time.monotonic() < deadline:
                 if daemon.poll() is not None:
                     output = (daemon.stdout.read() or b"") if daemon.stdout else b""
                     raise ReleaseError(
@@ -1219,28 +1220,87 @@ class Pipeline:
                         env,
                         f"http://127.0.0.1:{port}/",
                     )
-                    return f"served authenticated Web UI on 127.0.0.1:{port}"
+                    served = f"served authenticated Web UI on 127.0.0.1:{port}"
                 except ReleaseError as error:
                     # Deliberately contains no token or authenticated URL. The
                     # CLI bootstrap URL is a credential and must not leak into
                     # a release log just because readiness took another tick.
                     last = str(error)
-                time.sleep(1)
-            raise ReleaseError(f"the installed daemon never served a page: {last}")
+                    time.sleep(1)
+            if not served:
+                raise ReleaseError(f"the installed daemon never served a page: {last}")
         finally:
-            subprocess.run(
-                [str(python), "-I", "-m", "openai4s", "stop"],
-                cwd=str(root),
-                env=env,
-                capture_output=True,
-                timeout=120,
-            )
+            # Always stopped. On a failure path the stop's own verdict must not
+            # replace the error that explains why the smoke failed, so it is
+            # only enforced below, once the daemon has actually served.
+            stop_failure = self._stop_installed_daemon(python, root, env, daemon)
+        if stop_failure:
+            raise ReleaseError(stop_failure)
+        return served
+
+    @staticmethod
+    def _stop_installed_daemon(
+        python: Path,
+        root: Path,
+        env: dict[str, str],
+        daemon: subprocess.Popen,
+    ) -> str:
+        """Stop the smoke daemon through the installed CLI; return why it failed.
+
+        An empty string means `openai4s stop` exited 0 and the daemon really
+        exited. The daemon is this pipeline's own child, so nothing else can
+        reap it: while `stop` polls for it to exit, an unreaped daemon lingers
+        as a zombie, which a pid-existence check reads as still running. The
+        smoke used to block in `subprocess.run(stop)` meanwhile, so every
+        release smoke sat out stop's whole timeout, got exit 2, and threw the
+        status away. Reaping while `stop` runs keeps the pipeline from
+        manufacturing that zombie; checking the status makes the claim a gate.
+        """
+        failure = ""
+        # A file, not a pipe: nothing reads the output until stop has exited,
+        # and a filled pipe would block it forever.
+        with tempfile.TemporaryFile() as output:
+            try:
+                stopper = subprocess.Popen(
+                    [str(python), "-I", "-m", "openai4s", "stop"],
+                    cwd=str(root),
+                    env=env,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+            except OSError as error:
+                stopper = None
+                failure = f"the installed CLI could not run `openai4s stop`: {error}"
+            if stopper is not None:
+                deadline = time.monotonic() + 120
+                returncode = stopper.poll()
+                while returncode is None and time.monotonic() < deadline:
+                    daemon.poll()  # reap the daemon the moment it exits
+                    time.sleep(0.05)
+                    returncode = stopper.poll()
+                if returncode is None:
+                    stopper.kill()
+                    stopper.wait()
+                    failure = "`openai4s stop` did not return within 120s"
+                elif returncode != 0:
+                    output.seek(0)
+                    said = output.read().decode("utf-8", "replace").strip()
+                    failure = f"`openai4s stop` exited {returncode}: {said[-800:]}"
+        if daemon.poll() is None:
+            if not failure:
+                # stop saw the pid exit; the reap may be a poll interval behind.
+                try:
+                    daemon.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    failure = "`openai4s stop` exited 0 but the daemon kept running"
             if daemon.poll() is None:
                 daemon.terminate()
-            try:
-                daemon.wait(timeout=30)
-            except subprocess.TimeoutExpired:  # pragma: no cover
-                daemon.kill()
+                try:
+                    daemon.wait(timeout=30)
+                except subprocess.TimeoutExpired:  # pragma: no cover
+                    daemon.kill()
+                    daemon.wait()
+        return failure
 
     @staticmethod
     def _probe_installed_daemon(

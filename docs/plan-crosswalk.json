@@ -245,7 +245,7 @@
       "tests": "tests/test_auth_exit_matrix.py,tests/test_gateway_host_allowlist.py,tests/test_token_query_bootstrap.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "560630deeda39e96420a673b9772a3d48d0721567283183d9275f3f509663198"
+      "evidence_digest": "88903e3fec7ebba0629469e230ddb888435121d7a97a3ab7a66b596fb083badc"
     },
     {
       "source": "R3",
@@ -439,7 +439,7 @@
       "tests": "tests/test_token_query_bootstrap.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "027f42a082e7e4e9796cf50562ea3a0f01688ddec565d541914163c82fdb7753"
+      "evidence_digest": "6f2484d2b4cc42bc48163f1f016ce66feac50d74d0153ceff7a7a59de75f050e"
     },
     {
       "source": "R4",

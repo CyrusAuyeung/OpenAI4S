@@ -52,11 +52,49 @@ export async function authenticate(page, baseUrl, explicitToken = undefined) {
   if (!token) return null;
   const url = new URL(baseUrl);
   url.searchParams.set("token", token);
-  await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
+  // Every spelling of the credential a navigation error can quote: the raw
+  // value, and the encoded form the query string actually carries.
+  const spellings = [
+    token,
+    encodeURIComponent(token),
+    url.searchParams.toString().slice("token=".length),
+  ];
+  let response;
+  try {
+    response = await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
+  } catch (error) {
+    // Nothing listens on the port, a non-HTTP process holds it, or the page
+    // never loaded. Playwright quotes the bootstrap URL in the message, the
+    // Call log and the error's own `log` array, and an uncaught error prints
+    // all three. So the original error is replaced, never wrapped or kept as
+    // a `cause`: only a redacted copy of its text leaves this function.
+    const reason = redactSecrets(String(error?.message || error), ...spellings);
+    const target = new URL(baseUrl);
+    target.searchParams.delete("token");
+    throw new Error(
+      redactSecrets(
+        `could not reach the daemon at ${target} to bootstrap the access token; ` +
+          "check that an OpenAI4S daemon is serving HTTP on this port " +
+          `(OPENAI4S_BROWSER_URL)\n${reason.trimEnd()}`,
+        ...spellings,
+      )
+    );
+  }
   const landed = new URL(page.url());
   if (landed.searchParams.has("token")) {
+    // No 303 stripped the credential, so this daemon rejected the token: a
+    // token file from another data dir, or another process on this port. The
+    // landed URL still carries the credential and this message reaches CI
+    // output, so it is never quoted as-is.
+    landed.searchParams.delete("token");
+    const status = typeof response?.status === "function" ? response.status() : "unknown";
     throw new Error(
-      `the token bootstrap did not strip the credential from the URL: ${page.url()}`
+      redactSecrets(
+        `the daemon did not accept the access token (HTTP ${status} at ${landed}); ` +
+          "check that OPENAI4S_DATA_DIR or OPENAI4S_TOKEN belongs to this daemon " +
+          "and that no other process holds its port",
+        ...spellings,
+      )
     );
   }
   await skipFirstRunWizard(page, baseUrl);
