@@ -402,7 +402,12 @@ profile says today.
 - `409 model_revision_unavailable` — the session is pinned to a revision that
   no longer exists, or whose credential no longer resolves. Resolving to the
   nearest one would be the silent follow-latest behaviour this replaces,
-  wearing a number.
+  wearing a number. A pinned revision whose provider or effective endpoint (an
+  empty `base_url` is the protocol's default) is not the one the profile names
+  now is refused the same way: the profile's key is shared across revisions and
+  belongs to its current configuration, so it is never sent to an older
+  revision's endpoint — nor is an environment key substituted for it. A
+  model-only revision keeps provider and endpoint and still dispatches.
 - `409 model_profile_needs_key` — the profile a send would pin (the active one,
   or a legacy session's unique match) has no usable credential, so it is not
   pinned at all. Rebinding would land on the same profile; the answer is a key.

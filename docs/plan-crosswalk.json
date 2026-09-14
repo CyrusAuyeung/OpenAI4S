@@ -537,7 +537,7 @@
       "tests": "tests/test_model_profile_identity.py,tests/test_model_revision_binding.py,tests/test_model_binding_recovery.py,tests/test_model_catalog.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "27519cf51c9fcb1698c3cc98aed55dd8f06d491a045f411dc6e601a34211bf9a"
+      "evidence_digest": "e6df513fac9237fdb1425078b3b58a5c724074ca0023f6c5ae6be00e64f6a4bf"
     },
     {
       "source": "R5",

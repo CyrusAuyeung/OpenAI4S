@@ -78,6 +78,9 @@ CREDENTIAL_LOCAL = "local"
 CREDENTIAL_REVOKED = "revoked"
 CREDENTIAL_DELETED = "deleted"
 CREDENTIAL_MISSING = "missing"
+#: A pinned revision whose provider or endpoint is not the one the profile
+#: names now. The profile's credential belongs to its current configuration.
+CREDENTIAL_SCOPE_MISMATCH = "revision_scope_mismatch"
 _USABLE_CREDENTIALS = frozenset(
     (CREDENTIAL_PROFILE, CREDENTIAL_ENVIRONMENT, CREDENTIAL_LOCAL)
 )
@@ -269,11 +272,28 @@ class ModelProfileService:
         `configuration` is the revision being dispatched, when that is not the
         profile's current one: an inherited or keyless answer is about the
         provider and endpoint the request will actually reach.
+
+        0. Before any of that, a revision whose provider or effective endpoint
+           is not the profile's current one is refused
+           (`CREDENTIAL_SCOPE_MISMATCH`). The key is shared across revisions
+           and `edit()` stores a replacement while provider or base_url moves,
+           so "the profile's own key" is the key entered for the configuration
+           the profile names NOW. Returned first, it sent that key to a pinned
+           older revision's endpoint -- the real OpenAI key to the third-party
+           proxy the profile used to name, an Ark key to Anthropic. No
+           environment fallback either: `OPENAI_API_KEY` to that same proxy is
+           the same disclosure. A model-only revision keeps provider and
+           endpoint, so it still dispatches; the rest are answered by
+           `POST /frames/{id}/model-binding`.
         """
         if profile.get("deleted_at"):
             # Delete destroyed the key; an environment fallback must not bring
             # a tombstone back to life.
             return ProfileCredential("", CREDENTIAL_DELETED)
+        if configuration is not None and self._credential_scope(
+            configuration
+        ) != self._credential_scope(profile):
+            return ProfileCredential("", CREDENTIAL_SCOPE_MISMATCH)
         own = self.resolve_key(profile)
         if own:
             return ProfileCredential(own, CREDENTIAL_PROFILE)
@@ -289,6 +309,20 @@ class ModelProfileService:
         if inherited:
             return ProfileCredential(inherited, CREDENTIAL_ENVIRONMENT)
         return ProfileCredential("", CREDENTIAL_MISSING)
+
+    def _credential_scope(self, configuration: Mapping[str, Any]) -> tuple[str, str]:
+        """`(provider, effective endpoint)`: where a request under it is sent.
+
+        An empty base_url dispatches to the protocol's default, so `""` and the
+        default spelled out are one endpoint; `normalize_endpoint` makes a
+        trailing slash or a stripped query the same one too.
+        """
+        provider = str(configuration.get("provider") or "").strip().lower()
+        endpoint = normalize_endpoint(str(configuration.get("base_url") or ""))
+        if not endpoint:
+            spec = self._providers().get(provider, {})
+            endpoint = normalize_endpoint(str(spec.get("base_url") or ""))
+        return provider, endpoint
 
     def _provider_key(self, provider: str) -> str:
         if not provider:

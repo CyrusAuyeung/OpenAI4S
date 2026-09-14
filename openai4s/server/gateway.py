@@ -176,6 +176,9 @@ from openai4s.server.execution_coordinator import (
 from openai4s.server.execution_views import ExecutionViewService
 from openai4s.server.global_views import GlobalResearchViewService
 from openai4s.server.model_discovery import LocalModelDiscoveryService
+from openai4s.server.model_profiles import (
+    CREDENTIAL_SCOPE_MISMATCH as _CREDENTIAL_SCOPE_MISMATCH,
+)
 from openai4s.server.model_profiles import ModelProfileError, ModelProfileService
 from openai4s.server.model_profiles import clean_api_key as _clean_api_key
 from openai4s.server.model_profiles import migrate_provider_alias
@@ -8991,13 +8994,7 @@ class SessionRunner:
                 # A revoked key, or none for this provider. Falling through to
                 # the active profile here is the substitution this method exists
                 # to stop.
-                raise GatewayError(
-                    409,
-                    "this session is pinned to a model profile whose credential "
-                    "is not available; add its API key in Customize -> Models or "
-                    "rebind the session to continue",
-                    "model_revision_unavailable",
-                )
+                raise self._unusable_pin_error(credential.source)
             from dataclasses import replace
 
             pinned = replace(
@@ -9362,14 +9359,9 @@ class SessionRunner:
             # this a revoked key passed the bind and was only discovered at
             # dispatch, where the old code answered by silently using the active
             # profile instead.
-            if not self._profile_credential(profile, recorded).usable:
-                raise GatewayError(
-                    409,
-                    "this session is pinned to a model profile whose credential "
-                    "is not available; add its API key in Customize -> Models or "
-                    "choose another configuration to continue",
-                    "model_revision_unavailable",
-                )
+            credential = self._profile_credential(profile, recorded)
+            if not credential.usable:
+                raise self._unusable_pin_error(credential.source)
             return {
                 "model_profile_id": bound_id,
                 "model_profile_revision": int(bound_revision or 0),
@@ -9503,6 +9495,30 @@ class SessionRunner:
             "model_profile_revision": revision,
             "bound": True,
         }
+
+    @staticmethod
+    def _unusable_pin_error(source: str) -> GatewayError:
+        """The 409 for a pinned revision no credential may be dispatched under.
+
+        One sentence for the bind and the dispatch, which used to carry two
+        spellings of it. A scope mismatch gets its own: "add its API key" is
+        advice that cannot help when the key the profile holds belongs to the
+        provider or endpoint the profile names now, not the pinned one.
+        """
+        if source == _CREDENTIAL_SCOPE_MISMATCH:
+            message = (
+                "this session is pinned to an earlier configuration of its model "
+                "profile, and the profile now names a different provider or "
+                "endpoint; its credential is not sent to the old one. Rebind the "
+                "session to continue"
+            )
+        else:
+            message = (
+                "this session is pinned to a model profile whose credential is "
+                "not available; add its API key in Customize -> Models or rebind "
+                "the session to continue"
+            )
+        return GatewayError(409, message, "model_revision_unavailable")
 
     def _profile_credential(self, profile: dict, configuration: dict | None = None):
         return ModelProfileService(
