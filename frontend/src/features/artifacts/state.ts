@@ -1,5 +1,11 @@
 import { signal } from "@preact/signals";
 import type { ArtifactRow, FilesOrigin, VersionResolve } from "./types";
+import { ArtifactEditorStore } from "./editor";
+
+/** Memory drafts survive Files resets, tab switches and session navigation. */
+export const artifactDraftRevision = signal(0);
+export const artifactEditors = new ArtifactEditorStore();
+artifactEditors.onChange = () => { artifactDraftRevision.value += 1; };
 
 /** How the Files dock obtained the current project listing. */
 export type FilesIndexMode = "idle" | "index" | "error";

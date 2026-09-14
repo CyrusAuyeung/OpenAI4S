@@ -17,6 +17,7 @@
 const REQUESTED = (process.argv.find((a) => a.startsWith("--browser=")) || "").split("=")[1];
 const ENGINES = REQUESTED ? [REQUESTED] : ["chromium", "firefox", "webkit"];
 import { authenticate } from "./browser_auth.mjs";
+import { editorChecks } from "./browser_editor.mjs";
 
 const baseUrl = process.env.OPENAI4S_BROWSER_URL || "http://127.0.0.1:8760/";
 
@@ -138,6 +139,11 @@ async function runEngine(engineName) {
       if (listed.status >= 400) throw new Error(`GET artifacts → ${listed.status}`);
       const rows = listed.body.artifacts ?? listed.body ?? [];
       return `${Array.isArray(rows) ? rows.length : 0} artifact(s)`;
+    });
+
+    await check(engineName, "conditional editor survives races and lost responses", async () => {
+      const result = await editorChecks(page, api, frameId);
+      return `posts=${result.posts} version=${result.finalVersion}`;
     });
 
     // ---- consent: the privacy control, in this engine --------------------

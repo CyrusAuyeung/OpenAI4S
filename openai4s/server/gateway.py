@@ -4658,12 +4658,14 @@ class SessionRunner:
         artifact_id: str,
         content: str,
         *,
+        expected_version_id: str | None = None,
         broadcast=None,
     ) -> dict:
         with self._external_artifact_mutation(artifact_id=artifact_id):
             return self.artifacts.edit(
                 artifact_id,
                 content,
+                expected_version_id=expected_version_id,
                 broadcast=broadcast,
             )
 
@@ -17556,8 +17558,20 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 return
             m = re.fullmatch(r"/artifacts/([^/]+)/edit", sub)
             if m and method in ("POST", "PUT", "PATCH"):
+                body = self._body()
+                expected = body.get("expected_version_id")
+                if "expected_version_id" in body and (
+                    not isinstance(expected, str) or not expected.strip()
+                ):
+                    raise GatewayError(
+                        400, "expected_version_id must be a nonempty string"
+                    )
                 self._json(
-                    self._edit_artifact(m.group(1), self._body().get("content", ""))
+                    self._edit_artifact(
+                        m.group(1),
+                        body.get("content", ""),
+                        expected_version_id=expected,
+                    )
                 )
                 return
             m = re.fullmatch(r"/artifacts/([^/]+)/rename", sub)
@@ -18832,7 +18846,13 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
         def _lineage(self, artifact_id: str, version_id: str | None = None) -> dict:
             return execution_views.artifact_lineage(artifact_id, version_id=version_id)
 
-        def _edit_artifact(self, artifact_id: str, content: str) -> dict:
+        def _edit_artifact(
+            self,
+            artifact_id: str,
+            content: str,
+            *,
+            expected_version_id: str | None = None,
+        ) -> dict:
             try:
                 artifact = store.get_artifact(artifact_id)
                 if artifact and artifact.get("root_frame_id"):
@@ -18842,12 +18862,15 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 return runner.edit_artifact(
                     artifact_id,
                     content,
+                    expected_version_id=expected_version_id,
                     broadcast=lambda root_frame_id, event: hub.broadcast(
                         root_frame_id, event
                     ),
                 )
             except ArtifactOperationError as error:
-                raise GatewayError(error.code, error.message) from error
+                raise GatewayError(
+                    error.code, error.message, error.error_code
+                ) from error
 
         def _restore_version(self, artifact_id: str, version_id: str) -> dict:
             artifact = store.get_artifact(artifact_id)

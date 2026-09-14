@@ -37,6 +37,8 @@ it.each([true, false])("the Viewer menu copy respects exact=%s", (exact) => {
     innerHTML = ""; textContent = ""; className = ""; title = "";
     onclick?: () => void;
     appendChild(child: Node) { this.children.push(child); return child; }
+    append(...children: Node[]) { this.children.push(...children); }
+    dataset: Record<string, string> = {};
     setAttribute() {}
   }
   resetStoreFields(); menu.open.mockReset();
@@ -68,6 +70,8 @@ it.each([true, false])("Edit is offered only on the latest tab (exact=%s)", (exa
     innerHTML = ""; textContent = ""; className = ""; title = "";
     onclick?: () => void;
     appendChild(child: Node) { this.children.push(child); return child; }
+    append(...children: Node[]) { this.children.push(...children); }
+    dataset: Record<string, string> = {};
     setAttribute() {}
   }
   resetStoreFields(); menu.open.mockReset();
