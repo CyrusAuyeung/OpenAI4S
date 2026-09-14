@@ -31,7 +31,10 @@ from openai4s.artifact_restore import (
 from openai4s.execution import CaptureResult
 from openai4s.security.fsprobe import lstat_is_symlink
 from openai4s.server.errors import record_diagnostic
-from openai4s.storage.artifacts import ArtifactDeliveryReferenceError
+from openai4s.storage.artifacts import (
+    LEGACY_PYTHON_KERNEL_MODES,
+    ArtifactDeliveryReferenceError,
+)
 
 _JUNK_DIR_SEGMENTS = frozenset({"__pycache__", "node_modules", "site-packages", "venv"})
 _EMBEDDED_IMAGE_TYPES = frozenset(
@@ -771,8 +774,9 @@ def _write_confined_text(workspace: Path, relative: Path, content: str) -> Path:
 
 #: Kernel protocol modes (``Kernel.mode``) that older supervisors persisted as
 #: a Python generation's ``runtime``. They name the worker's host facade, not
-#: a language.
-_LEGACY_PYTHON_KERNEL_MODES = frozenset({"repl", "script", "analysis"})
+#: a language. One definition, shared with the Store's read of rows those
+#: supervisors' captures already froze.
+_LEGACY_PYTHON_KERNEL_MODES = LEGACY_PYTHON_KERNEL_MODES
 
 
 def _remote_generation(environment: dict[str, Any]) -> bool:
