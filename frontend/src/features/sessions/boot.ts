@@ -17,11 +17,12 @@ import { hint, watchActivateKeys, watchDisconnect } from "./chrome";
 import { newSession, routeInitialView } from "./conversation";
 import { setScopedExecutionRequest } from "../notebook/kernel";
 import { scopedExecutionRequest } from "../timeline/execution-request";
-import { showDashboard } from "./dashboard";
+import { loadDashboard, showDashboard } from "./dashboard";
 import { $, down, grow, setSidebar, setTitle, syncMobileChrome, updateJumpPill } from "./dom";
 import { paintIcons } from "./icon";
 import { callLane, hostWindow } from "./lane";
-import { loadSessions } from "./load";
+import { loadSessions, renderSessions } from "./load";
+import { renderEmptySession } from "../messages/list";
 import {
   fetchAllMessages,
   fetchOlderMessages,
@@ -84,16 +85,43 @@ let initialViewReady: Promise<void> | null = null;
  */
 export const I18N_ROUTE_WAIT_MS = 8000;
 
-/** Resolves when the dictionaries load, fail to load, or the wait runs out. */
-function dictionariesSettled(): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const done = () => {
+/**
+ * Resolves when the dictionaries load, fail to load, or the wait runs out --
+ * with `true` only in the last case, when the first view renders without them.
+ */
+function dictionariesSettled(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const done = (timedOut: boolean) => {
       clearTimeout(timer);
-      resolve();
+      resolve(timedOut);
     };
-    const timer = setTimeout(done, I18N_ROUTE_WAIT_MS);
-    i18nReady().then(done, done);
+    const timer = setTimeout(() => done(true), I18N_ROUTE_WAIT_MS);
+    i18nReady().then(
+      () => done(false),
+      () => done(false),
+    );
   });
+}
+
+/**
+ * The dictionaries landed after the first view gave up waiting for them.
+ * The boot repaint reaches static labels only, so the lists that first view
+ * rendered through `t()` kept their bare keys -- "dash.meta.sessions" on the
+ * dashboard, "date.bucket.today" and the empty session's starters in the
+ * workspace -- until something else happened to re-render them. Once only:
+ * a later language switch is not this path.
+ */
+function repaintListsRenderedWithoutDictionaries(): void {
+  const dash = $("#dashboard");
+  if (dash && !dash.classList.contains("hidden")) void loadDashboard();
+  renderSessions();
+  // Only an empty session has this node, and it is all that session shows.
+  const host = $("#messages");
+  const empty = host?.querySelector(":scope > .empty-session");
+  if (host && empty) {
+    empty.remove();
+    renderEmptySession(host);
+  }
 }
 
 export function bindWorkbench(): Promise<void> {
@@ -250,10 +278,24 @@ export function bindWorkbench(): Promise<void> {
   // "dash.meta.sessions" / "dash.sessions.empty" on screen whenever the chunk
   // was slower than the API. The handlers above are bound already; only this
   // render waits.
+  let routedWithoutDictionaries = false;
   initialViewReady = dictionariesSettled()
-    .then(() => routeInitialView())
+    .then((timedOut) => {
+      routedWithoutDictionaries = timedOut;
+      return routeInitialView();
+    })
     .catch(() => {
       showDashboard();
+    })
+    .finally(() => {
+      // The Shell's deep-link indicator (dashboard.css retires it as soon as a
+      // view is shown); the first route has settled either way.
+      const pending = $("#route-loading");
+      if (pending) pending.hidden = true;
+      // After the route, so the repaint cannot run ahead of the lists it fixes.
+      if (routedWithoutDictionaries) {
+        void i18nReady().then(repaintListsRenderedWithoutDictionaries, () => undefined);
+      }
     });
   return initialViewReady;
 }

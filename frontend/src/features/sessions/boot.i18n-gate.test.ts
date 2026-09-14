@@ -32,7 +32,8 @@ const route = vi.hoisted(() => ({
   routeInitialView: vi.fn(async () => {}),
   newSession: vi.fn(async () => {}),
 }));
-const dashboard = vi.hoisted(() => ({ showDashboard: vi.fn() }));
+const dashboard = vi.hoisted(() => ({ showDashboard: vi.fn(), loadDashboard: vi.fn() }));
+const lists = vi.hoisted(() => ({ renderSessions: vi.fn(), renderEmptySession: vi.fn() }));
 
 vi.mock("../../i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../i18n")>()),
@@ -40,6 +41,14 @@ vi.mock("../../i18n", async (importOriginal) => ({
 }));
 vi.mock("./conversation", () => route);
 vi.mock("./dashboard", () => dashboard);
+vi.mock("./load", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./load")>()),
+  renderSessions: lists.renderSessions,
+}));
+vi.mock("../messages/list", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../messages/list")>()),
+  renderEmptySession: lists.renderEmptySession,
+}));
 vi.mock("./chrome", () => ({
   hint: vi.fn(),
   watchActivateKeys: vi.fn(),
@@ -52,13 +61,16 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
 
-let clicks: Record<string, { onclick?: unknown }>;
+let clicks: Record<string, Record<string, unknown>>;
 
 beforeEach(() => {
   vi.resetModules();
   gate.arm();
   route.routeInitialView.mockClear();
   dashboard.showDashboard.mockClear();
+  dashboard.loadDashboard.mockClear();
+  lists.renderSessions.mockClear();
+  lists.renderEmptySession.mockClear();
   clicks = { "#new-session": {}, "#dash-new-project": {} };
   vi.stubGlobal("document", {
     documentElement: { lang: "" },
@@ -100,6 +112,52 @@ describe("bindWorkbench and the locale chunks", () => {
     gate.fail(new Error("Failed to fetch dynamically imported module"));
     await expect(ready).resolves.toBeUndefined();
     expect(route.routeInitialView).toHaveBeenCalledTimes(1);
+  });
+
+  it("repaints the data-driven lists when the dictionaries arrive after the wait", async () => {
+    // Routing gave up on the chunk, so the lists rendered through t() with
+    // nothing to translate with ("dash.meta.sessions", "date.bucket.today",
+    // "empty.title"...), and the boot repaint only reaches static labels.
+    const emptySession = { remove: vi.fn() };
+    const messages = {
+      querySelector: (selector: string) =>
+        selector === ":scope > .empty-session" ? emptySession : null,
+      addEventListener: vi.fn(),
+    };
+    clicks["#dashboard"] = { classList: { contains: () => false } };
+    clicks["#messages"] = messages;
+    vi.useFakeTimers();
+    try {
+      const { bindWorkbench, I18N_ROUTE_WAIT_MS } = await import("./boot");
+      const ready = bindWorkbench();
+      await vi.advanceTimersByTimeAsync(I18N_ROUTE_WAIT_MS);
+      await ready;
+      expect(route.routeInitialView).toHaveBeenCalledTimes(1);
+      expect(lists.renderSessions).not.toHaveBeenCalled();
+
+      gate.release();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(dashboard.loadDashboard).toHaveBeenCalledTimes(1);
+      expect(lists.renderSessions).toHaveBeenCalledTimes(1);
+      expect(emptySession.remove).toHaveBeenCalledTimes(1);
+      expect(lists.renderEmptySession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not repaint the lists when the dictionaries arrived in time", async () => {
+    clicks["#dashboard"] = { classList: { contains: () => false } };
+    const { bindWorkbench } = await import("./boot");
+    const ready = bindWorkbench();
+    gate.release();
+    await ready;
+    await flush();
+    expect(route.routeInitialView).toHaveBeenCalledTimes(1);
+    expect(dashboard.loadDashboard).not.toHaveBeenCalled();
+    expect(lists.renderSessions).not.toHaveBeenCalled();
+    expect(lists.renderEmptySession).not.toHaveBeenCalled();
   });
 
   it("does not wait forever on a stalled locale chunk", async () => {

@@ -73,12 +73,37 @@ function applyDocumentLang(lang: Lang): void {
   document.documentElement.lang = lang === "en" ? "en" : "zh";
 }
 
+/**
+ * Load what `t()` reads for `lang`: that dictionary and, for en, the zh one
+ * it falls back to.
+ *
+ * Both requests start together. Awaiting them one after the other made an
+ * English reader wait for two chunk round trips, and the first view waits for
+ * this -- so a deep link showed the wrong screen for twice the chunk latency.
+ *
+ * Only the active dictionary decides the outcome. A zh fallback that fails to
+ * load leaves `t()` answering from the active language (a missing entry shows
+ * its key, as before), and is retried by the next load; letting it reject
+ * skipped the repaint, so an English reader kept the markup's Chinese
+ * tooltips even though the English dictionary had arrived.
+ */
+async function loadDictionaries(lang: Lang): Promise<void> {
+  const active = loadLocale(lang);
+  if (lang !== "zh") {
+    const fallback = loadLocale("zh").then(
+      () => undefined,
+      () => undefined,
+    );
+    await Promise.all([active, fallback]);
+    return;
+  }
+  await active;
+}
+
 export function i18nReady(): Promise<void> {
   if (!boot) {
     boot = (async () => {
-      await loadLocale(LANG);
-      // t() falls back to zh when the active (en) entry is missing.
-      if (LANG !== "zh") await loadLocale("zh");
+      await loadDictionaries(LANG);
       const inactive: Lang = LANG === "zh" ? "en" : "zh";
       // Prefetch only, and deliberately not awaited: the page is already
       // usable in the active language. Left unhandled, a chunk request the
@@ -107,7 +132,9 @@ export function i18nReady(): Promise<void> {
 }
 
 applyDocumentLang(LANG);
-void i18nReady();
+// The callers that depend on the outcome ask for it themselves; this one only
+// starts the load, and must not report a failed chunk as an uncaught rejection.
+void i18nReady().catch(() => undefined);
 
 // t("key", ...args) — current-language string with {0},{1}… positional interpolation; falls back to zh, then the key.
 // `t` falls back to the key itself, which is right for a missing translation
@@ -195,8 +222,7 @@ export async function setLang(lang: string): Promise<void> {
   } catch {
     /* ignore quota / missing storage */
   }
-  await loadLocale(LANG);
-  if (LANG !== "zh") await loadLocale("zh");
+  await loadDictionaries(LANG);
   repaintLanguage();
 }
 
