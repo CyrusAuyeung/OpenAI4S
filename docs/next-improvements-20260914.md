@@ -16,9 +16,9 @@ before pushing `next`; the following item waits for that commit's CI.
 | T2 P0-03 Editing / 编辑保护 | Completed / 完成 | Conditional writes, immutable editor baseline, bounded recoverable drafts and read-only reconciliation; backend, frontend and dist together. |
 | T3 P0-02 Resource bounds / 资源边界 | Completed / 完成 | Shared total deadline, bounded input, backpressure and original usage evidence; independent review passed. |
 | T4 P1-01 Files | Completed / 完成 | Shared owned filtering, pagination and refresh; 705 frontend tests passed. |
-| T5 P1-03 Navigation / 导航 | Awaiting commit/CI / 等待提交及 CI | Local full suite, browser and package gates passed; independent review passed. |
-| T6 P1-02 Provenance and export / 溯源与导出 | Not started / 未开始 | Honest read states, validated responses and fixed version identity. |
-| T7 P2-01 Snapshot design / 快照准备 | Not started / 未开始 | Design and acceptance only; no migration changes. |
+| T5 P1-03 Navigation / 导航 | Completed / 完成 | `2f53bf9c`; all 25 applicable CI jobs passed. |
+| T6 P1-02 Provenance and export / 溯源与导出 | Completed / 完成 | `14947d25`; all 25 applicable CI jobs passed; fixed read states, validation and version identity. |
+| T7 P2-01 Snapshot design / 快照准备 | Awaiting commit/CI / 等待提交及 CI | Bilingual retention/restore contract and 12 future acceptance cases; no migration changes. |
 | T8 P2-02 Slow connection design / 慢连接准备 | Not started / 未开始 | Design and acceptance only; no new runtime quotas. |
 | T9 Final validation / 最终验收 | Not started / 未开始 | Final SHA gates, package and real Ark evidence. |
 
@@ -692,3 +692,73 @@ are recorded in the following stage or the final delivery receipt.
 10 项本地端口初始化错误和 npm 缓存写入受限，对应最终检查均已按所需权限
 通过。未暂存的旧 dist 删除项也曾影响目录清单，正确暂存的干净候选已通过。
 这些失败不算成功证据；最终 SHA 与 CI 结果写入下一阶段或最终交付记录。
+
+
+## T6 delivery CI / T6 交付 CI
+
+Commit `14947d25c4ef55aa205ea11f6101c801e2f56ac9` passed all **25 applicable
+jobs**, with **4 not-applicable jobs skipped**, in
+[CI 34876890803](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34876890803).
+Independent review checked job metadata and checkout SHA against that commit.
+Chromium, Firefox and WebKit each passed 800 frontend tests, source/dist parity
+and 14 browser scenarios, including the new provenance controls.
+
+| Python | Passed / 通过 | Skipped / 跳过 |
+|---|---|---|
+| 3.10 | 8913 | 71 |
+| 3.12 | 8922 | 62 |
+| 3.13 | 8916 | 68 |
+| 3.14 | 8916 | 68 |
+
+Each Python job had zero failures and six warnings; per-test skip reasons were
+not printed and are not inferred. Frozen response shapes reported 1167 shapes,
+212/212 routes and no breaking drift, with additive `/compute/remote` and
+`/compute/ssh-aliases` observations. That job did not print a pytest total.
+Container, independent wheel installs and separate Linux interrupt/full sandbox
+jobs passed. The interrupt job allows raw network; egress denial is proved by
+the separate full sandbox job. Independent sdist installation remains a T9 gate.
+Stage 1 standard-profile readiness uses metadata fixtures, not runtime proof.
+
+该提交 25 项适用 CI 全部成功、4 项不适用跳过。独立审查核对了作业与 checkout
+身份；三浏览器各 800 单测、构建一致性与 14 场景通过。各 Python 版本的跳过数
+按表保留，不推断未打印的具体原因。响应捕获为 1167 形状、212/212 路由，无
+破坏性变化，但有两项 additive 观察，不能称为零差异。容器、独立 wheel 安装
+及两项不同边界的 Linux 验证通过；sdist 独立安装继续留在 T9。
+
+## T7 snapshot preparation / T7 快照准备
+
+The [English](pre-upgrade-snapshot-design.md) and
+[Chinese](pre-upgrade-snapshot-design_zh.md) design fixes location, owner-only
+permissions, 4 GiB image / 8 GiB plus 1 MiB replacement capacity, independent
+validation, publication and restore boundaries. S01–S12 are explicitly **future
+acceptance cases**, not implemented or executed snapshot-retention tests.
+
+Review closed the distinction between pre-numbered-migration backup and
+pre-initialization snapshot, missing versus hot-journal preflight, source logical
+state versus recovery byte changes, legacy backup capacity, publication uncertainty
+after pointer replacement, full directory fsync ordering, aggregate metadata
+limits, and cleanup before starting another candidate. Restore inspection uses
+raw read-only SQLite; a separate directory alone cannot isolate absolute file
+paths, old authorization or keychain references. No automatic task replay or
+credential rollback is claimed.
+
+Existing `tests/test_schema_migrations.py` completed **46 tests successfully**,
+including the current successful-migration backup cleanup contract. Independent
+read-only review found no remaining blockers. Clean-candidate all-file pre-commit
+and mypy passed; bilingual directory coverage passed (165 directories / 1549
+files), and source secret scan passed (3869 files). Only six documentation files
+change: production, tests, dependencies, schema and committed frontend assets
+remain byte-identical to T6. T6 full offline/frontend/browser evidence therefore
+continues to apply to that unchanged content; the documentation commit's own CI
+is still required before T8. Original user document edits remain excluded.
+
+双语设计明确位置、仅所有者权限、单镜像 4 GiB／替换期 8 GiB 加 1 MiB 容量、
+独立校验、发布及恢复边界。S01–S12 全部标为未来验收，未实现快照保留。复核已
+关闭初始化前挂点、热日志、源字节与逻辑状态、遗留备份容量、指针替换后不确定、
+目录 fsync、元数据合计及旧代清理等问题；恢复先用原始只读 SQLite，独立目录
+不等于隔离旧路径、授权或秘密引用，不承诺自动执行或凭据回滚。
+
+现有迁移 46 项通过，独立只读审查无剩余阻断；干净候选全量 pre-commit/mypy、
+165 目录／1549 文件清单及 3869 文件密钥扫描通过。本项仅 6 份文档变化，生产、
+测试、依赖、schema 与前端资产和 T6 字节一致，相应完整测试复用 T6 证据；仍须
+等待本项提交自己的 CI 通过才进入 T8。用户原有文档修改保持排除。
