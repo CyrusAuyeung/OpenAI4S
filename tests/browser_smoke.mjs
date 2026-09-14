@@ -2336,8 +2336,26 @@ try {
     throw new Error(`expected html data-theme dark|light, got ${themeBefore}`);
   }
   const themeAfter = themeBefore === "dark" ? "light" : "dark";
+  // icon() answers an unknown name with an empty <svg>: a missing table entry
+  // leaves a blank button that still takes space and clicks. The theme toggle
+  // must also repaint its drawing, not only swap data-icon.
+  const iconFor = (theme) => (theme === "dark" ? "sun" : "moon");
+  async function requireDrawnIcon(selector) {
+    if ((await page.locator(`${selector} svg > *`).count()) === 0) {
+      throw new Error(`${selector} renders an empty icon (data-icon=${await page.locator(selector).getAttribute("data-icon")})`);
+    }
+  }
+  for (const selector of ["#ws-theme", "#sidebar-collapse", "#dock-toggle", "#settings-gear"]) {
+    await requireDrawnIcon(selector);
+  }
+  const themeDrawingBefore = await page.locator("#ws-theme svg").innerHTML();
   await themeBtn.click();
   await waitUntil("data-theme flip", async () => (await htmlAttr("data-theme")) === themeAfter);
+  await waitUntil(`#ws-theme data-icon=${iconFor(themeAfter)}`, async () => (await themeBtn.getAttribute("data-icon")) === iconFor(themeAfter));
+  await requireDrawnIcon("#ws-theme");
+  if ((await page.locator("#ws-theme svg").innerHTML()) === themeDrawingBefore) {
+    throw new Error("#ws-theme kept its old drawing after the theme flipped");
+  }
   const storedTheme = await page.evaluate(() => localStorage.getItem("os-theme"));
   if (storedTheme !== themeAfter) {
     throw new Error(`os-theme localStorage is ${JSON.stringify(storedTheme)}, expected ${themeAfter}`);
@@ -2349,6 +2367,10 @@ try {
   if (storedThemeAfterReload !== themeAfter) {
     throw new Error(`os-theme did not survive reload: ${JSON.stringify(storedThemeAfterReload)}`);
   }
+  // installTheme() runs before the Shell exists; the reloaded toggle must still
+  // show the glyph for the applied theme, not the markup's default.
+  await waitUntil(`reloaded #ws-theme data-icon=${iconFor(themeAfter)}`, async () => (await page.locator("#ws-theme").getAttribute("data-icon")) === iconFor(themeAfter));
+  await requireDrawnIcon("#ws-theme");
 
   await page.locator("#ws-theme").waitFor({ state: "visible" });
   const filesLabel = page.locator('#workspace:not(.hidden) [data-i18n="ws.nav.files"]');
@@ -2439,6 +2461,9 @@ try {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.locator("body.sidebar-collapsed").waitFor({ state: "attached" });
   await page.locator("#sidebar-reopen").waitFor({ state: "visible" });
+  // At phone width the sidebar is off-canvas and this is the only way back to
+  // it; an empty drawing makes the whole side navigation undiscoverable.
+  await requireDrawnIcon("#sidebar-reopen");
 
   async function bodyOverflowX() {
     // Compare against innerWidth so a vertical scrollbar shrinking
@@ -2459,6 +2484,15 @@ try {
       `body overflows horizontally at 375x812 (drawer closed): body=${overflowCollapsed.body} root=${overflowCollapsed.root}`,
     );
   }
+  // The tabs shrink (the session title first, then "New session" ellipsizes)
+  // instead of scrolling the tab bar and cutting a label mid-word.
+  const tabbarOverflow = await page.evaluate(() => {
+    const bar = document.getElementById("tabbar");
+    return bar ? bar.scrollWidth - bar.clientWidth : 0;
+  });
+  if (tabbarOverflow > 1) {
+    throw new Error(`the tab bar scrolls horizontally at 375x812 (${tabbarOverflow}px) instead of shrinking its tabs`);
+  }
 
   await page.locator("#sidebar-reopen").click();
   await waitUntil("mobile drawer open", async () => (await page.locator("body.sidebar-collapsed").count()) === 0);
@@ -2472,6 +2506,117 @@ try {
   await page.locator("#mobile-scrim:not(.hidden)").click();
   await page.locator("body.sidebar-collapsed").waitFor({ state: "attached" });
   await page.locator("#sidebar-reopen").waitFor({ state: "visible" });
+
+  // The dashboard header at 375px: its action row did not wrap, so the page
+  // was 521px wide and New project sat off-screen, clipped by overflow-x:hidden
+  // where no swipe could reach it. Measured in both languages (zh labels are a
+  // different width).
+  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.locator("#dash-new-project").waitFor({ state: "visible" });
+  async function dashboardHeaderFits(label) {
+    const overflow = await bodyOverflowX();
+    if (overflow.body > 0 || overflow.root > 0) {
+      throw new Error(`dashboard overflows horizontally at 375x812 (${label}): body=${overflow.body} root=${overflow.root}`);
+    }
+    const view = await page.evaluate(() => window.innerWidth);
+    for (const selector of ["#dash-import-session", "#dash-new-project"]) {
+      const box = await page.locator(selector).boundingBox();
+      if (!box || box.x < 0 || box.x + box.width > view + 0.5) {
+        throw new Error(`${selector} is not fully on screen at 375x812 (${label}): ${JSON.stringify(box)} in ${view}px`);
+      }
+    }
+  }
+  const dashLang = (await htmlAttr("lang")) === "en" ? "en" : "zh";
+  const dashOtherLang = dashLang === "en" ? "zh" : "en";
+  await dashboardHeaderFits(dashLang);
+  await page.locator(`#dashboard .lang-btn[data-lang="${dashOtherLang}"]`).click();
+  await waitUntil(`dashboard html lang=${dashOtherLang}`, async () => (await htmlAttr("lang")) === dashOtherLang);
+  await dashboardHeaderFits(dashOtherLang);
+  await page.locator(`#dashboard .lang-btn[data-lang="${dashLang}"]`).click();
+  await waitUntil(`dashboard html lang=${dashLang}`, async () => (await htmlAttr("lang")) === dashLang);
+  const searchBorder = await page.evaluate(() => getComputedStyle(document.getElementById("dash-project-search")).borderTopStyle);
+  if (searchBorder === "inset") {
+    throw new Error("#dash-project-search still wears the browser's default inset border");
+  }
+
+  // Cold load with the locale chunks held back. The Shell mounts before the
+  // dictionaries arrive; static labels applied then must keep their readable
+  // fallback, and must be repainted once the chunks land -- before this, they
+  // showed "dash.col.projects" / "palette.action.search" until a language
+  // switch. A fresh context (same auth cookie) so nothing is cached.
+  for (const locale of ["en-US", "zh-CN"]) {
+    const coldContext = await browser.newContext({ locale, viewport: { width: 1440, height: 1000 } });
+    try {
+      await coldContext.addCookies(await page.context().cookies());
+      const coldPage = await coldContext.newPage();
+      const coldErrors = [];
+      coldPage.on("pageerror", (error) => coldErrors.push(String(error)));
+      let releaseLocales = () => {};
+      const localesHeld = new Promise((resolve) => {
+        releaseLocales = resolve;
+      });
+      const heldLocaleRequests = [];
+      await coldPage.route(/\/static\/dist\/assets\/(en|zh)-[\w-]+\.js(\?.*)?$/, async (route) => {
+        heldLocaleRequests.push(route.request().url());
+        await localesHeld;
+        await route.continue();
+      });
+      await coldPage.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await coldPage.locator("#dash-new-project").waitFor({ state: "visible" });
+      // paintIcons() and the first applyStaticI18n() run in the same
+      // bindWorkbench() call, so a drawn icon means the early pass has run.
+      await waitUntil(`${locale} cold load bound the workbench`, async () => (await coldPage.locator("#dash-new-project svg > *").count()) > 0);
+      // visibleOnly: before the dictionaries arrive, components that render
+      // through t() (a closed Customize modal, the collapsed Files dock) hold
+      // keys nobody can see yet; what must never show is a key on screen.
+      const rawKeys = (visibleOnly) =>
+        coldPage.evaluate((onlyVisible) => {
+          const raw = [];
+          const seen = (node) =>
+            !onlyVisible ||
+            (typeof node.checkVisibility === "function" ? node.checkVisibility() : node.getClientRects().length > 0);
+          for (const [attr, read] of [
+            ["data-i18n", (node) => node.textContent],
+            ["data-i18n-title", (node) => node.title],
+            ["data-i18n-ph", (node) => node.placeholder],
+            ["data-i18n-val", (node) => node.value],
+          ]) {
+            document.querySelectorAll(`[${attr}]`).forEach((node) => {
+              const key = node.getAttribute(attr);
+              if (key && seen(node) && String(read(node) || "").trim() === key) raw.push(`${attr}=${key}`);
+            });
+          }
+          return raw;
+        }, visibleOnly);
+      const viteShell = (await coldPage.locator('script[src*="/static/dist/"]').count()) > 0;
+      if (viteShell && heldLocaleRequests.length === 0) {
+        throw new Error(`${locale} cold load: no locale chunk request matched the hold pattern, so this check measures nothing`);
+      }
+      const heldRaw = await rawKeys(true);
+      if (heldRaw.length) {
+        throw new Error(`${locale} cold load painted bare i18n keys before the dictionaries arrived: ${heldRaw.join(", ")}`);
+      }
+      releaseLocales();
+      const expected =
+        locale === "en-US"
+          ? { projects: "Projects", jump: "Latest" }
+          : { projects: "项目", jump: "最新" };
+      await waitUntil(`${locale} cold load repainted static labels`, async () => {
+        const projects = ((await coldPage.locator('#dashboard [data-i18n="dash.col.projects"]').textContent()) || "").trim();
+        const jump = ((await coldPage.locator('[data-i18n="conv.jumpLastLabel"]').textContent()) || "").trim();
+        return projects === expected.projects && jump === expected.jump;
+      });
+      const repaintedRaw = await rawKeys(false);
+      if (repaintedRaw.length) {
+        throw new Error(`${locale} cold load left bare i18n keys after the dictionaries arrived: ${repaintedRaw.join(", ")}`);
+      }
+      if (coldErrors.length) {
+        throw new Error(`${locale} cold load page errors: ${coldErrors.join(" | ")}`);
+      }
+    } finally {
+      await coldContext.close();
+    }
+  }
 
   if (pageErrors.length) {
     throw new Error(`browser page errors: ${pageErrors.join(" | ")}`);
