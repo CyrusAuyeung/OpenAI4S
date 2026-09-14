@@ -190,9 +190,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+        # `--slurp` wraps every page in one JSON array. Without it gh writes a
+        # document per page back to back, which is not one JSON value; the
+        # reader accepts both, so a SHA with more than 100 check runs (nightly
+        # schedules, CodeQL, Dependabot) stays releasable either way.
         run: |
           set -euo pipefail
-          gh api --paginate \
+          gh api --paginate --slurp \
             "repos/${GH_REPO}/commits/${SHA}/check-runs?per_page=100" \
             > check-runs.json
       - name: Run every offline gate and record what happened

@@ -318,6 +318,113 @@ def test_attestation_uses_the_latest_attempt_for_a_name():
     assert all(row["conclusion"] == "success" for row in rows)
 
 
+def _paginated(listing: dict, *, pages: int = 2) -> list[dict]:
+    """Split one listing into the page objects `gh api --paginate` fetches."""
+    runs = listing["check_runs"]
+    size = -(-len(runs) // pages)
+    return [
+        {"total_count": len(runs), "check_runs": runs[start : start + size]}
+        for start in range(0, len(runs), size)
+    ]
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        # `gh api --paginate` on an object endpoint: one document per page,
+        # written back to back with nothing between them.
+        pytest.param(
+            lambda pages: "".join(json.dumps(p) for p in pages), id="paginate"
+        ),
+        # the same, as a human-run `gh api` in a terminal pretty-prints it
+        pytest.param(
+            lambda pages: "\n".join(json.dumps(p, indent=2) for p in pages) + "\n",
+            id="paginate-pretty",
+        ),
+        # `gh api --paginate --slurp`: every page wrapped in one array
+        pytest.param(lambda pages: json.dumps(pages), id="slurp"),
+    ],
+)
+def test_the_quality_job_reads_every_page_of_the_check_run_listing(tmp_path, render):
+    """More than 100 check runs at the release SHA must not make it unreleasable.
+
+    The quality job saves `gh api --paginate .../check-runs?per_page=100`, and
+    for an object endpoint gh writes each page as its own JSON document. The
+    reader was one `json.loads`, which raises "Extra data" on the second page --
+    after every local gate had already run -- so any commit that had collected
+    more than 100 check runs (nightly schedules, CodeQL, Dependabot) could not
+    produce a receipt at all.
+    """
+    from scripts import run_quality_gates
+
+    pages = _paginated(_listing())
+    assert len(pages) == 2 and all(page["check_runs"] for page in pages)
+    target = tmp_path / "check-runs.json"
+    target.write_text(render(pages), "utf-8")
+
+    rows = run_quality_gates._attest(target, SHA)
+
+    assert sorted(row["check_name"] for row in rows) == sorted(
+        gate.check_name for gate in release_gates.CHECK_SUITE_GATES
+    )
+
+
+def test_a_later_page_still_decides_the_latest_attempt(tmp_path):
+    """Merging pages must not keep only the first: a newer red attempt counts."""
+    from scripts import run_quality_gates
+
+    listing = _listing()
+    newer_failure = {
+        **listing["check_runs"][0],
+        "id": 9999,
+        "conclusion": "failure",
+        "started_at": "2026-07-30T00:00:00Z",
+    }
+    pages = _paginated(listing) + [{"total_count": 1, "check_runs": [newer_failure]}]
+    target = tmp_path / "check-runs.json"
+    target.write_text("".join(json.dumps(page) for page in pages), "utf-8")
+
+    with pytest.raises(GateManifestError, match="failure"):
+        run_quality_gates._attest(target, SHA)
+
+
+@pytest.mark.parametrize(
+    "text, reason",
+    [
+        ("", "empty"),
+        ("   \n", "empty"),
+        ('{"check_runs": []}{"check_runs": [', "JSON"),
+        ('{"check_runs": []} trailing', "JSON"),
+        ("[]", "empty"),
+        ('[{"check_runs": []}, 7]', "page"),
+        ('{"check_runs": []}{"total_count": 3}', "check_runs"),
+        ('"check_runs"', "page"),
+    ],
+)
+def test_a_malformed_check_run_listing_is_refused_not_guessed(tmp_path, text, reason):
+    from scripts import run_quality_gates
+
+    target = tmp_path / "check-runs.json"
+    target.write_text(text, "utf-8")
+    with pytest.raises(GateManifestError, match=reason):
+        run_quality_gates._attest(target, SHA)
+
+
+def test_the_quality_job_collects_the_listing_in_a_shape_the_reader_accepts():
+    """The workflow and the reader have to agree on what `check-runs.json` is."""
+    quality = _workflow("release.yml")["jobs"]["quality"]
+    collect = next(
+        step
+        for step in quality["steps"]
+        if "check-runs.json" in str(step.get("run", ""))
+        and "gh api" in str(step.get("run", ""))
+    )
+    command = " ".join(str(collect["run"]).split())
+    assert "--paginate" in command, "an unpaginated listing stops at 100 runs"
+    assert "--slurp" in command
+    assert "per_page=100" in command
+
+
 # --- and through the step staging really runs ------------------------------
 
 
