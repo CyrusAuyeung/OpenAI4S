@@ -44,6 +44,63 @@ Unix UID remains inside the operator trust boundary. Use separate OS accounts,
 containers/VMs, or equivalent resource-plane isolation when users must be
 mutually hostile at the host-filesystem level.
 
+The targeted credential-file denies cover the configured `OPENAI4S_DATA_DIR`
+**and** the well-known default `~/.openai4s` instance (resolved and
+de-duplicated). Building the deny set from a single data directory left the
+default instance's `access-token`, worker-bootstrap secret, `shares/` and
+`openai4s.db` readable to an enforced cell whenever `OPENAI4S_DATA_DIR` was
+redirected — a CLI run with a custom data dir, a benchmark, the test suite, or a
+second daemon. Both instances' credential files are denied regardless of which
+one the running daemon uses; non-default secondary instances (a third data dir
+with no relation to either) remain outside this set and rely on the same-UID
+trust boundary above.
+
+**macOS — reading the daemon's exec-time environment.** On macOS a process's
+argument and environment block is reachable through `sysctl(CTL_KERN,
+KERN_PROCARGS2, <pid>)`, and for a daemon whose LLM key is configured by
+environment variable / `.env` that block holds the key in cleartext. This is
+the same threat bubblewrap closes on Linux by masking `/proc/<daemon>/environ`.
+The Seatbelt profile denies the `process-info` introspection class (for other
+processes) **and** the `kern.proc` sysctls. Between processes in different
+sessions the kernel gates the KERN_PROCARGS2 read behind both authorization
+paths, and passing *either* allows it, so **both** denies are required and
+neither alone suffices.
+
+That gate applies only when the reader and its target are in **different
+sessions**; a reader in its target's own session is let through with both
+denies in place (measured on macOS 26.6). The daemon is not reliably detached:
+`start.sh` runs `openai4s serve` in the foreground, and only `serve --detached`
+calls `setsid`. The guarantee comes from the reader's side instead:
+`PipeTransport` starts every kernel worker with `start_new_session=True`, and
+the BYOC provider helper is spawned the same way, so neither a cell nor a
+provider shim is ever in the daemon's session, however the daemon was launched.
+That flag therefore carries security weight on macOS.
+`test_an_enforced_kernel_cannot_read_its_daemons_environ` drives the real
+kernel spawn path and fails if the flag is dropped.
+
+Verified end to end against a live daemon under `enforce`: with the denies
+removed a cell recovers the daemon's real API key via KERN_PROCARGS2
+(fingerprint match); with them in place the cell's `sysctl` returns `EPERM` and
+the key is not recovered, while a normal analysis turn and the science stack
+(numpy/pandas, matplotlib, scikit-learn `n_jobs=2`, multiprocessing,
+subprocess, an R cell, urllib HTTPS) keep working.
+
+What the denies cost: an enforced cell can no longer query other processes'
+details. `psutil.process_iter()` and `psutil.Process().children()` raise
+`PermissionError` (measured on macOS 26.6 with psutil installed). loky's
+`kill_process_tree` calls `Process().children()` when psutil is present, yet
+`executor.shutdown(kill_workers=True)` still completed in the same measurement,
+and joblib `Parallel` is unaffected. The denies cannot be
+narrowed without reopening the read, because KERN_PROCARGS2 is named under
+`kern.proc`. A process's reads of its *own* details are unaffected.
+
+What the denies do **not** cover is a process in the cell's *own* session, for
+example a same-UID sibling the cell started. That read stays open, which is
+consistent with the same-UID trust boundary above. As defence in depth,
+macOS deployments running untrusted cells can also keep the key in the keychain
+SecretBroker (the `auto` default), where it is never placed in the daemon
+environment at all.
+
 [`openai4s.security`](../openai4s/security) adds independent policy layers:
 
 | layer | env (default) | what it does |
@@ -533,6 +590,8 @@ The remote-compute worker (`openai4s_compute_provider`) loads an untrusted-ish p
 
 - `openai4s_compute_provider/__main__.py` calls `scrub_secret_env()` — the provider-agnostic baseline — **before** `exec_module` imports `provider.py`. It removes every env var whose name matches a credential shape (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, …, via `CRED_KEY_RE`) or starts with a known provider/cloud secret prefix (`NGC_`, `NVIDIA_`, `HF_`, `AWS_`, `OPENAI_`, `ANTHROPIC_`, `OPENAI4S_LLM_`, … — `BASELINE_SECRET_PREFIXES`).
 - The resident prologue (`ByocResident._prologue`) re-scrubs with the *loaded* provider's own declared `secret_env_prefixes` before it reads the credential (from stdin for oneshot, fd-3 for repl). The credential itself is passed over that channel and is **never** placed in the process environment.
+- Both stages edit `os.environ`, the in-process copy. The exec-time environment block stays readable to the process itself (`sysctl(KERN_PROCARGS2)` on its own pid on macOS, `/proc/self/environ` on Linux), and no sandbox profile refuses a process its own arguments. So the host applies the same rule **before exec**: `ComputeManager` builds the oneshot helper's environment with `CRED_KEY_RE`, `BASELINE_SECRET_PREFIXES` and the provider's declared `secret_env` names already removed. Before this, only `NGC_`, `NVIDIA_` and `HF_` were stripped, so a daemon LLM key set by environment variable or `.env` sat in the helper's own block.
+- The helper also cannot read the *daemon's* block. On Linux, `--unshare-pid` hides the daemon's `/proc` entry. On macOS the helper profile carries the kernel profile's process-info and `kern.proc` denies, and the helper is started with `start_new_session=True`, because Seatbelt enforces that gate only between different sessions. Measured on macOS 26.6: a confined helper in the daemon's session recovered the daemon's environment with both denies in place. `tests/test_byoc_confinement.py` drives the real `_run_helper` spawn path for both reads.
 
 Because stage 1 cannot know the provider's declared prefixes before importing it, the baseline is what enforces the name-based rule at provider import time; the provider-specific prefixes are folded in at stage 2, before the credential is read. Non-secret operational vars the worker needs (e.g. `OPENAI4S_HOST_NETNS_INO` for the confinement probe, `HTTP_PROXY`/`HTTPS_PROXY`) do not match either rule and survive. This is enforced by synthetic-secret import-time and prologue tests in `tests/test_compute_nvidia.py`.
 
