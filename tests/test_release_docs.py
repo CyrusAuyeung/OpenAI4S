@@ -114,3 +114,60 @@ def test_concrete_version_examples_match_the_tree_or_are_placeholders():
         f"docs/release-validation.md has version examples that are not "
         f"{version} and not a placeholder: {stale}"
     )
+
+
+# -- upgrading from 0.2.x ------------------------------------------------------
+
+UPGRADING = ROOT / "docs" / "upgrading.md"
+UPGRADING_ZH = ROOT / "docs" / "upgrading_zh.md"
+MIGRATIONS = ROOT / "openai4s" / "storage" / "migrations.py"
+
+#: The schema the published 0.2.0 wheel creates. A fact about a release that
+#: already exists, so it is a constant rather than something read from the tree.
+V020_SCHEMA = 27
+
+
+def _migration_deletes_its_backup_on_success() -> bool:
+    source = MIGRATIONS.read_text(encoding="utf-8")
+    tail = source.split("Only now that the upgrade is committed", 1)
+    return len(tail) == 2 and "backup.unlink()" in tail[1]
+
+
+def test_the_future_schema_refusal_is_not_read_as_protecting_a_downgrade():
+    """The refusal paragraph read as if a newer schema were always refused.
+    0.2.0 predates the guard, opens a schema-32 database silently and writes to
+    it, so the paragraph has to say which versions it covers and send a user
+    who may roll back to a backup."""
+    text = _normalised(RELEASE_VALIDATION)
+    start = text.index("schema newer than this program supports")
+    window = text[start : start + 1600]
+    assert "0.2.0 and earlier do not check the schema version" in window
+    assert "back up `<data_dir>/openai4s.db`" in window
+    assert "upgrading.md" in window
+
+
+def test_the_upgrade_guide_states_the_schema_change_the_backup_and_no_downgrade():
+    """Both halves must tell a 0.2.x user the three things that cannot be
+    undone by reinstalling: the schema moves, the migration's own copy is gone
+    after success, and 0.2.x will not refuse the upgraded database."""
+    current = int(
+        re.search(r"^SCHEMA_VERSION = (\d+)$", MIGRATIONS.read_text("utf-8"), re.M)[1]
+    )
+    assert current >= 32, "the upgrade guide names a schema this tree does not reach"
+    english = _normalised(UPGRADING)
+    chinese = _normalised(UPGRADING_ZH)
+    for text in (english, chinese):
+        assert f"schema **{V020_SCHEMA}**" in text
+        assert "schema **32**" in text
+        assert f"openai4s.db.v{V020_SCHEMA}.bak" in text
+        assert "cp -a ~/.openai4s ~/.openai4s-0.2-backup" in text
+        assert "OPENAI4S_REQUIRE_TOKEN=0" in text
+        assert "openai4s url" in text
+    assert "Going back to 0.2.x is not supported" in english
+    assert "不支持退回 0.2.x" in chinese
+    # The claim about the backup is read from the code, not assumed: if a
+    # migration starts keeping its pre-upgrade copy, this fails until both
+    # halves stop telling users it is deleted.
+    deletes = _migration_deletes_its_backup_on_success()
+    assert deletes == ("deletes it once the migration succeeds" in english)
+    assert deletes == ("迁移成功后会删除它" in chinese)
