@@ -327,7 +327,10 @@ async function runDirection(browser, port, token, fixtures, appHost) {
     result.ok = true;
   } catch (error) {
     if (browserErrors.length) result.browser_errors = browserErrors.slice(-10);
-    result.error = error?.stack || String(error);
+    // The alternate-host login above navigates to `?token=` directly rather
+    // than through authenticate(), so a Playwright error from it quotes the
+    // credential; result.error reaches SUMMARY and the CI log.
+    result.error = redactSecrets(error?.stack || String(error), token, encodeURIComponent(token));
   } finally {
     await context.close();
   }
