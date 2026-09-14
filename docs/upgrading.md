@@ -110,7 +110,7 @@ and every daemon requires its access token, including one bound to
   list.
 * **`openai4s run` exit status.** The command exits `0` only when the run
   submitted a result. A run that stops for any other reason, such as the turn
-  limit, no progress or cancellation, exits non-zero. The `--json` output still
+  limit, no progress or cancellation, exits `3`. The `--json` output still
   carries `stop_reason`. A script that treated any finished run as success
   should check the exit status. A refusal before the run starts also exits
   `2`: an empty task, an invalid `--allow-test-command`, or an explicit code
