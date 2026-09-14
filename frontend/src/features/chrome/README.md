@@ -21,7 +21,8 @@ F-20 workbench chrome: team mode, the modal focus trap, the ⌘K palette, upload
 | [`notes.ts`](notes.ts) | Project notes in the Files dock. |
 | [`palette.test.ts`](palette.test.ts) | M-03 Artifact hit, stub-safe `isReady`, out-of-order `PAL.gen`. |
 | [`palette.ts`](palette.ts) | ⌘K palette. Artifact hits open session then exact version. |
-| [`resizer.ts`](resizer.ts) | Sidebar / dock column drag. Keys `os-side-w` / `os-dock-w`. |
+| [`resizer.ts`](resizer.ts) | Sidebar / dock column drag. Keys `os-side-w` / `os-dock-w`. The handle's tooltip is a static `data-i18n-title` label, repainted when the dictionaries load and on a language switch. |
+| [`resizer.i18n.test.ts`](resizer.i18n.test.ts) | The resizer tooltip is never the bare key `resizer.drag`, and follows the dictionary load and a language switch. |
 | [`team.test.ts`](team.test.ts) | Identity chip, admin panel, guest redirect, trap on team modals. |
 | [`team.ts`](team.ts) | Team IIFEs. `/auth/me` probe; admin/files modals use the trap. |
 | [`upload.test.ts`](upload.test.ts) | Selection-time destination, the four-clause batch match, single flight, retry supersession, 64-failure bound. |

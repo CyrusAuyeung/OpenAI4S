@@ -1,6 +1,6 @@
 /** Window exports, F-06 loadSessions hook, and workbench event wiring. */
 
-import { applyStaticI18n, onLanguageChange, setLang, t } from "../../i18n";
+import { applyStaticI18n, i18nReady, onLanguageChange, setLang, t } from "../../i18n";
 import { _titleName, currentId, editingProject } from "../../stores/session";
 import { cycleTheme, refreshThemeToggle } from "../theme/theme";
 import { setLoadSessionsImpl } from "../ws/handlers";
@@ -75,6 +75,26 @@ export function installSessionExports(
 
 let bound = false;
 let initialViewReady: Promise<void> | null = null;
+
+/**
+ * How long the first view waits for the locale chunks. They are a fraction of
+ * the main bundle this page has already loaded, so this is only reached by a
+ * stalled request -- and a workbench that never shows its projects is worse
+ * than one that shows keys in its lists.
+ */
+export const I18N_ROUTE_WAIT_MS = 8000;
+
+/** Resolves when the dictionaries load, fail to load, or the wait runs out. */
+function dictionariesSettled(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, I18N_ROUTE_WAIT_MS);
+    i18nReady().then(done, done);
+  });
+}
 
 export function bindWorkbench(): Promise<void> {
   if (typeof document === "undefined") return Promise.resolve();
@@ -224,8 +244,16 @@ export function bindWorkbench(): Promise<void> {
       (mq as { addListener: (fn: () => void) => void }).addListener(onMq);
     }
   }
-  initialViewReady = routeInitialView().catch(() => {
-    showDashboard();
-  });
+  // The first data-driven view waits for the dictionaries. The dashboard
+  // lists, the session sidebar and an opened session render through t(), and
+  // nothing re-renders them when the locale chunks land: routing first left
+  // "dash.meta.sessions" / "dash.sessions.empty" on screen whenever the chunk
+  // was slower than the API. The handlers above are bound already; only this
+  // render waits.
+  initialViewReady = dictionariesSettled()
+    .then(() => routeInitialView())
+    .catch(() => {
+      showDashboard();
+    });
   return initialViewReady;
 }

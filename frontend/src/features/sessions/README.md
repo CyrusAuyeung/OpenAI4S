@@ -11,7 +11,8 @@ F-13 dashboard / projects / sessions. Pagination and sort are pure functions. Wi
 | [`actions.ts`](actions.ts) | Session menu, share dialog, import/export, title, cancel. app.js:7411-7793. |
 | [`api.ts`](api.ts) | `API`, `ApiError`, `api()`, `apiErrorText`. app.js:84-119. |
 | [`binds.ts`](binds.ts) | Late bindings so dashboard and conversation do not import each other. |
-| [`boot.ts`](boot.ts) | Window exports, `setLoadSessionsImpl`, workbench click wiring. |
+| [`boot.ts`](boot.ts) | Window exports, `setLoadSessionsImpl`, workbench click wiring. Binds the Shell at once, but routes to the first view only once the locale chunks have loaded (or failed, or `I18N_ROUTE_WAIT_MS` ran out): the dashboard lists, sidebar and an opened session render through `t()` and are not repainted when the dictionaries land. |
+| [`boot.i18n-gate.test.ts`](boot.i18n-gate.test.ts) | Handlers are bound before the dictionaries load, the first route waits for them, and a failed or stalled locale chunk still routes. |
 | [`chrome.test.ts`](chrome.test.ts) | Hint error prefix (`错误：` / `Error: `) without a new i18n key. |
 | [`chrome.ts`](chrome.ts) | `hint`, disconnect banner, `openMenu` Esc/`role=menu`, keyboard activate. |
 | [`conversation.ts`](conversation.ts) | `newSession`, `routeInitialView`. Re-exports `openConversation` (F-10) and `resumeWatch` (F-11) rather than keeping this lane's duplicates. |
@@ -19,7 +20,7 @@ F-13 dashboard / projects / sessions. Pagination and sort are pure functions. Wi
 | [`conversation.newsession.test.ts`](conversation.newsession.test.ts) | `newSession` releases the previous conversation (unsubscribe, notebook caches) before publishing the new id, and on the shared path resolves only after the conversation has opened. |
 | [`actions.cancel.test.ts`](actions.cancel.test.ts) | A cancel ack is applied to "Stopping…" only when it names the execution this client is still running. |
 | [`dashboard.ts`](dashboard.ts) | Home list, project search / load-more / retry, example CTA poll bound to view lifecycle, dash poll. |
-| [`dom.ts`](dom.ts) | `$` / `el` / `ago` / `navURL` / composer helpers. |
+| [`dom.ts`](dom.ts) | `$` / `el` / `ago` / `navURL` / composer helpers. `setTitle` takes `#conv-title` over from its static `data-i18n-val` label. |
 | [`icon.ts`](icon.ts) | `icon` / `iconEl` / `paintIcons` for this lane's menus, rows and `[data-icon]` markup. Paths come from the shared `icons/paths.ts` table. |
 | [`index.ts`](index.ts) | Public re-exports; installs window names on import. |
 | [`lane.ts`](lane.ts) | `isReady` wrapper for later-lane window names. |
@@ -30,5 +31,6 @@ F-13 dashboard / projects / sessions. Pagination and sort are pure functions. Wi
 | [`messages.ts`](messages.ts) | `fetchRecentMessages` / `fetchOlderMessages` / `fetchAllMessages` / earlier bar. |
 | [`paging.test.ts`](paging.test.ts) | Pagination constants, session sort, walk/dedupe, dashboard filters. |
 | [`paging.ts`](paging.ts) | `MESSAGE_PAGE_SIZE=300`, `SESSION_MAX_PAGES=50`, sort/walk/filter. |
-| [`projects.ts`](projects.ts) | Project menu/modal/research view, `sanitizeProjectLineage`. |
+| [`projects.ts`](projects.ts) | Project menu/modal/research view, `sanitizeProjectLineage`. `renderProjMenu` takes `#proj-current` over from its static `data-i18n` label. |
+| [`static-i18n-ownership.test.ts`](static-i18n-ownership.test.ts) | Once code has written the session title or the current project's name, neither the late locale-chunk repaint nor a language switch puts "Session" / "Project" back; the title input commits on blur, so that repaint renamed the session on the server. |
 | [`transcript.ts`](transcript.ts) | `renderStored`, ref chips, empty-session starters, message actions. |

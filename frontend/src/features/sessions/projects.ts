@@ -237,7 +237,12 @@ binds.renderProjMenu = () => renderProjMenu();
 
 export function renderProjMenu(): void {
   const current = $("#proj-current");
-  if (current) current.textContent = project.value ? projName(project.value) : t("proj.current.allSessions");
+  if (current) {
+    // Code owns this label now (see setTitle): a static repaint must not put
+    // the markup's "Project" back over the current project's name.
+    current.removeAttribute("data-i18n");
+    current.textContent = project.value ? projName(project.value) : t("proj.current.allSessions");
+  }
   const m = $("#proj-menu");
   if (!m) return;
   m.innerHTML = "";

@@ -190,23 +190,27 @@ Sorted.
 | `#cancel-btn` | browser_p1_controls.mjs | 2 |
 | `#composer` | browser_admission_fault.mjs, browser_matrix.mjs, browser_p1_controls.mjs | 9 |
 | `#composer-refs` | browser_p1_controls.mjs | 1 |
+| `#conv-title` | browser_smoke.mjs | 4 |
 | `#cross-frame` | browser_sandbox_preview.mjs | 2 |
 | `#cust .cust-row` | browser_p1_controls.mjs | 2 |
 | `#cust .prof-row` | browser_p1_controls.mjs | 2 |
+| `#cust .seg-btn` | browser_smoke.mjs | 1 |
 | `#cust .toggle` | browser_p1_controls.mjs, browser_smoke.mjs | 2 |
-| `#cust-close` | browser_p1_controls.mjs, browser_smoke.mjs | 5 |
+| `#cust-close` | browser_p1_controls.mjs, browser_smoke.mjs | 6 |
 | `#cust-content` | browser_p1_controls.mjs | 2 |
 | `#cust-content .cust-h` | browser_p1_controls.mjs | 2 |
 | `#cust-content .prof-row` | browser_p1_controls.mjs | 2 |
 | `#cust-content[aria-busy="false"]` | browser_p1_controls.mjs | 1 |
 | `#cust:not(.hidden)` | browser_p1_controls.mjs | 2 |
-| `#customize-btn` | browser_p1_controls.mjs | 1 |
+| `#customize-btn` | browser_p1_controls.mjs, browser_smoke.mjs | 2 |
 | `#dash-import-session` | browser_smoke.mjs | 1 |
 | `#dash-new-project` | browser_smoke.mjs | 3 |
 | `#dash-new-project svg > *` | browser_smoke.mjs | 1 |
 | `#dash-project-search` | browser_smoke.mjs | 1 |
 | `#dash-projects` | browser_smoke.mjs | 1 |
+| `#dash-projects .d-row:not(.skeleton-row)` | browser_smoke.mjs | 1 |
 | `#dash-sessions` | browser_smoke.mjs | 1 |
+| `#dash-sessions .d-row:not(.skeleton-row), #dash-sessions .dash-empty` | browser_smoke.mjs | 1 |
 | `#dashboard` | browser_smoke.mjs | 1 |
 | `#dashboard .lang-btn[data-lang="*"]` | browser_smoke.mjs | 2 |
 | `#dashboard [data-i18n="dash.col.projects"]` | browser_smoke.mjs | 1 |
@@ -250,8 +254,10 @@ Sorted.
 | `#revision` | browser_sandbox_preview.mjs | 1 |
 | `#rightdock.collapsed` | browser_smoke.mjs | 3 |
 | `#rightdock:not(.collapsed)` | browser_smoke.mjs | 1 |
+| `#session-list .session` | browser_smoke.mjs | 1 |
 | `#settings-gear` | browser_smoke.mjs | 1 |
 | `#sidebar-collapse` | browser_smoke.mjs | 1 |
+| `#sidebar-collapse svg > *` | browser_smoke.mjs | 1 |
 | `#sidebar-reopen` | browser_smoke.mjs | 3 |
 | `#stage0-completion-link-probe a` | browser_stage0_acceptance.mjs | 2 |
 | `#tabbar` | browser_smoke.mjs | 1 |
@@ -389,6 +395,7 @@ Sorted.
 | `[data-f16-provenance="back"]` | browser_smoke.mjs | 1 |
 | `[data-i18n="conv.jumpLastLabel"]` | browser_smoke.mjs | 1 |
 | `[data-variable-inspector="python"]` | browser_smoke.mjs | 1 |
+| `[title], [placeholder], [aria-label], input, textarea` | browser_smoke.mjs | 1 |
 | `a[download="*"]` | browser_smoke.mjs | 1 |
 | `body.sidebar-collapsed` | browser_smoke.mjs | 3 |
 | `button.outline-btn` | browser_auth.mjs | 1 |
@@ -397,7 +404,7 @@ Sorted.
 | `script[src*="/static/dist/"]` | browser_smoke.mjs | 1 |
 | `table.nbc-table` | browser_smoke.mjs | 1 |
 
-Total selectors: 210
+Total selectors: 217
 
 ```json
 {
@@ -491,9 +498,11 @@ Total selectors: 210
     "#cancel-btn",
     "#composer",
     "#composer-refs",
+    "#conv-title",
     "#cross-frame",
     "#cust .cust-row",
     "#cust .prof-row",
+    "#cust .seg-btn",
     "#cust .toggle",
     "#cust-close",
     "#cust-content",
@@ -507,7 +516,9 @@ Total selectors: 210
     "#dash-new-project svg > *",
     "#dash-project-search",
     "#dash-projects",
+    "#dash-projects .d-row:not(.skeleton-row)",
     "#dash-sessions",
+    "#dash-sessions .d-row:not(.skeleton-row), #dash-sessions .dash-empty",
     "#dashboard",
     "#dashboard .lang-btn[data-lang=\"*\"]",
     "#dashboard [data-i18n=\"dash.col.projects\"]",
@@ -551,8 +562,10 @@ Total selectors: 210
     "#revision",
     "#rightdock.collapsed",
     "#rightdock:not(.collapsed)",
+    "#session-list .session",
     "#settings-gear",
     "#sidebar-collapse",
+    "#sidebar-collapse svg > *",
     "#sidebar-reopen",
     "#stage0-completion-link-probe a",
     "#tabbar",
@@ -690,6 +703,7 @@ Total selectors: 210
     "[data-f16-provenance=\"back\"]",
     "[data-i18n=\"conv.jumpLastLabel\"]",
     "[data-variable-inspector=\"python\"]",
+    "[title], [placeholder], [aria-label], input, textarea",
     "a[download=\"*\"]",
     "body.sidebar-collapsed",
     "button.outline-btn",
