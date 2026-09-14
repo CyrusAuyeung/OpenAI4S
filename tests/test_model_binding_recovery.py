@@ -1172,3 +1172,75 @@ def test_a_rotated_key_on_the_same_endpoint_still_reaches_the_pinned_session(
     assert seen[-1].model == "gpt-x", "the pinned revision's model"
     assert seen[-1].api_key == "sk-ROTATED"
     assert (runner.store.get_frame(frame) or {}).get("model_profile_revision") == 1
+
+
+# --------------------------------------------------------------------------
+# a rebind with nothing active must not report a success the send refuses
+# --------------------------------------------------------------------------
+
+
+def test_a_rebind_with_no_active_profile_is_not_a_success_the_next_send_refuses(api):
+    """Delete the active profile while two live profiles name the session's
+    model: the rebind answered 200 `{bound: false}`, the client said
+    "re-bound", and the next send was `model_revision_ambiguous` again --
+    offering the same rebind, forever."""
+    runner, call = api
+    _profile(call, "east", "openai_responses", "gpt-4o", "sk-east")
+    _profile(call, "west", "chatgpt", "gpt-4o", "sk-west")
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    assert call("DELETE", f"/model-profiles/{deleted}")["code"] in (200, 204)
+    assert not runner.store.get_setting("active_model_profile")
+    assert _refused_send(call, frame) == "model_revision_unavailable"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 409, rebound
+    assert rebound["body"].get("code") == "model_profile_needs_active", rebound
+    assert "activate" in rebound["body"]["error"], rebound
+    # Refused before the old pin was dropped.
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == deleted
+
+    # Activating one is the way out, and the rebind then binds it.
+    west = next(
+        item["id"]
+        for item in call("GET", "/model-profiles")["body"]["profiles"]
+        if item["name"] == "west"
+    )
+    call("POST", f"/model-profiles/{west}/activate")
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == west
+    assert runner.bind_model_revision(frame)["model_profile_id"] == west
+
+
+def test_a_rebind_with_no_active_profile_reports_the_binding_the_send_will_use(api):
+    """When the unpinned session can proceed, the answer names what it proceeds
+    under: unbound on the global configuration, or its unique live match."""
+    runner, call = api
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    call("DELETE", f"/model-profiles/{deleted}")
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["bound"] is False, rebound
+    assert runner.bind_model_revision(frame)["bound"] is False
+
+    frame = _workbench_session(runner, call, "gpt-4.1")
+    runner.store.update_frame(frame, model_profile_id=deleted, model_profile_revision=1)
+    match = _profile(call, "B", "openai_responses", "gpt-4.1", "sk-b")
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["bound"] is True, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == match, rebound
+    assert rebound["body"]["binding"].get("backfilled") is True, rebound
+
+    frame = _workbench_session(runner, call, "claude-sonnet-4-5")
+    runner.store.update_frame(frame, model_profile_id=deleted, model_profile_revision=1)
+    _profile(call, "keyless", "claude", "claude-sonnet-4-5")
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 409, rebound
+    assert rebound["body"].get("code") == "model_profile_needs_active", rebound
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == deleted

@@ -431,8 +431,14 @@ profile says today.
   profile — what the client's confirmation prompt says — and never through the
   legacy backfill. The active profile's credential is checked before the old pin
   is dropped, so a refused rebind (`409 model_profile_needs_key`) leaves the
-  session's record untouched. With no active profile the session is left
-  unbound and runs on the global configuration.
+  session's record untouched. With no active profile the rebind takes the
+  decision the next send would: the session is left unbound on the global
+  configuration, or backfilled to the one live profile its recorded model names,
+  and `binding` says which (`bound`, `backfilled`). When that send would be
+  refused again — several live profiles match, or the unique match has no
+  usable credential — it answers `409 model_profile_needs_active` ("activate a
+  profile in Customize → Models") before dropping the old pin, rather than a
+  `200` the next send contradicts.
 - An install with no profiles at all (driven by `.env`) binds nothing and runs.
   An absent profile is an absent binding, not an error.
 

@@ -9372,18 +9372,9 @@ class SessionRunner:
         # some configuration, and D2 says to recover that rather than to adopt
         # whatever happens to be active now. The only thing a pre-upgrade frame
         # recorded is a model string, so that is what there is to match on.
-        recorded = str(frame.get("model") or "").strip()
-        if recorded and self.store.message_count(root_frame_id) > 0:
-            # Live profiles only. A tombstone keeps its model string for history,
-            # and counting it made a deleted profile "the" match -- refused for a
-            # key it can never be given -- or made its same-model replacement
-            # "ambiguous" with it, for good.
-            matches = [
-                item
-                for item in profiles
-                if not item.get("deleted_at")
-                and str(item.get("model") or "").strip() == recorded
-            ]
+        legacy = self._legacy_model_matches(root_frame_id, frame, profiles)
+        if legacy is not None:
+            recorded, matches = legacy
             if len(matches) == 1:
                 target = matches[0]
                 self._require_profile_credential(target, follows_active=False)
@@ -9428,6 +9419,28 @@ class SessionRunner:
 
         return self._bind_active_profile(root_frame_id, profiles)
 
+    def _legacy_model_matches(
+        self, root_frame_id: str, frame: dict, profiles: list[dict]
+    ) -> tuple[str, list[dict]] | None:
+        """The legacy backfill's candidates, or None when it does not apply.
+
+        One copy for the send path and for the no-active rebind, which has to
+        know what that send is about to decide before it drops a pin.
+        """
+        recorded = str(frame.get("model") or "").strip()
+        if not recorded or self.store.message_count(root_frame_id) <= 0:
+            return None
+        # Live profiles only. A tombstone keeps its model string for history,
+        # and counting it made a deleted profile "the" match -- refused for a
+        # key it can never be given -- or made its same-model replacement
+        # "ambiguous" with it, for good.
+        return recorded, [
+            item
+            for item in profiles
+            if not item.get("deleted_at")
+            and str(item.get("model") or "").strip() == recorded
+        ]
+
     def rebind_model_revision(self, root_frame_id: str) -> dict:
         """`POST /frames/{id}/model-binding`: re-pin to the active configuration.
 
@@ -9443,13 +9456,48 @@ class SessionRunner:
 
         The target is checked before the old pin is dropped, so a refused
         rebind leaves the session's record of what it ran under untouched.
+
+        With no active profile there is nothing to re-pin to, and an unpinned
+        session is bound by its next send exactly as `bind_model_revision`
+        decides. So this is that decision, taken now: unbound on the global
+        configuration, or backfilled to the one live profile its recorded model
+        names -- and the answer says which. When that send would be refused
+        again (several live matches, or a unique one no credential resolves
+        for) it answers 409 `model_profile_needs_active` before the pin is
+        dropped. It used to answer 200 `{bound: false}`, the client said
+        "re-bound", and the next send was `model_revision_ambiguous` again --
+        offering the same rebind, with no way out that it named.
         """
         profiles = self.store.list_model_profiles()
         active = self._active_profile(profiles)
         if active is not None:
             self._require_profile_credential(active)
+            self.store.unpin_model(root_frame_id)
+            return self._bind_active_profile(root_frame_id, profiles)
+        frame = self.store.get_frame(root_frame_id) or {}
+        legacy = self._legacy_model_matches(root_frame_id, frame, profiles)
+        if legacy is not None:
+            recorded, matches = legacy
+            if len(matches) > 1:
+                raise GatewayError(
+                    409,
+                    f"no model profile is active and more than one matches "
+                    f"{recorded!r}; activate the one this session continues under "
+                    "in Customize -> Models, then send again",
+                    "model_profile_needs_active",
+                )
+            if len(matches) == 1 and not self._profile_credential(matches[0]).usable:
+                name = str(matches[0].get("name") or matches[0].get("id") or "")
+                raise GatewayError(
+                    409,
+                    f"no model profile is active and {name!r}, which this "
+                    "session's recorded model matches, has no usable API key; "
+                    "activate a profile in Customize -> Models (or add that "
+                    "profile's key), then send again",
+                    "model_profile_needs_active",
+                )
         self.store.unpin_model(root_frame_id)
-        return self._bind_active_profile(root_frame_id, profiles)
+        return self.bind_model_revision(root_frame_id)
 
     def _active_profile(self, profiles: list[dict]) -> dict | None:
         active_id = str(self.store.get_setting("active_model_profile") or "")
