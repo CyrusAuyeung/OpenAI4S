@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -621,6 +623,116 @@ def test_the_daemon_smoke_never_inherits_the_legacy_shell_switch(monkeypatch, tm
         )
     assert started and "OPENAI4S_WEBUI" not in started[0]
     assert started[0]["OPENAI4S_DATA_DIR"] == str(tmp_path)
+
+
+#: A stand-in for the installed interpreter. `serve` behaves like the daemon
+#: (a foreground process that exits promptly on SIGTERM); `stop` behaves like
+#: any stop that decides "gone" by pid existence alone, so a zombie reads as
+#: alive. That makes the pipeline's own reaping the only thing under test —
+#: the real CLI now reads zombies as exited, which would hide its absence.
+_FAKE_INSTALLED_CLI = r"""
+import json, os, signal, sys, time
+from pathlib import Path
+
+command = sys.argv[4]
+data = Path(os.environ["OPENAI4S_DATA_DIR"])
+pidfile = data / "fake-daemon.pid"
+if command == "serve":
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    staged = data / "fake-daemon.pid.tmp"
+    staged.write_text(str(os.getpid()))
+    os.replace(staged, pidfile)
+    time.sleep(120)
+    sys.exit(0)
+if command == "stop":
+    pid = int(pidfile.read_text())
+    rc = 2
+    if os.environ["FAKE_STOP"] == "pid-existence":
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + float(os.environ["FAKE_STOP_PATIENCE"])
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                rc = 0
+                break
+            time.sleep(0.05)
+    (data / "fake-stop.json").write_text(json.dumps({"rc": rc}))
+    print("daemon stopped" if rc == 0 else "error: daemon is still shutting down")
+    sys.exit(rc)
+sys.exit(64)
+"""
+
+
+def _fake_installed_python(tmp_path, monkeypatch, stop_mode, patience=20.0):
+    """Wire `_smoke_daemon` to real local processes, with no network probe."""
+    script = tmp_path / "fake_installed_cli.py"
+    script.write_text(_FAKE_INSTALLED_CLI, encoding="utf-8")
+    python = tmp_path / "python"
+    python.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
+    )
+    python.chmod(0o755)
+    data = tmp_path / "data"
+    data.mkdir()
+
+    def served_once_the_daemon_is_up(python, root, env, base_url):
+        deadline = time.monotonic() + 30
+        while not (data / "fake-daemon.pid").exists():
+            if time.monotonic() > deadline:  # pragma: no cover - diagnostic
+                raise ReleaseError("the fake daemon never wrote its pidfile")
+            time.sleep(0.02)
+
+    monkeypatch.setattr(
+        Pipeline,
+        "_probe_installed_daemon",
+        staticmethod(served_once_the_daemon_is_up),
+    )
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "OPENAI4S_DATA_DIR": str(data),
+        "FAKE_STOP": stop_mode,
+        "FAKE_STOP_PATIENCE": str(patience),
+    }
+    return python, data, env
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_the_daemon_smoke_reaps_its_daemon_while_the_cli_stops_it(
+    monkeypatch, tmp_path
+):
+    """The daemon is the pipeline's own child; only the pipeline can reap it.
+
+    The smoke used to block in `subprocess.run(stop)`, so the exited daemon sat
+    as a zombie for as long as `stop` polled. A stop that judges exit by pid
+    existence then waited out its whole timeout and returned 2 — about 30s of
+    every release smoke, CI's included — and the exit status was discarded.
+    """
+    python, data, env = _fake_installed_python(tmp_path, monkeypatch, "pid-existence")
+
+    started = time.monotonic()
+    outcome = Pipeline("0.2.0", assets_dir=tmp_path)._smoke_daemon(
+        python, tmp_path, env
+    )
+    elapsed = time.monotonic() - started
+
+    assert outcome.startswith("served authenticated Web UI")
+    assert json.loads((data / "fake-stop.json").read_text()) == {"rc": 0}
+    assert elapsed < 12, f"the smoke's stop took {elapsed:.1f}s"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_the_daemon_smoke_fails_when_the_cli_stop_fails(monkeypatch, tmp_path):
+    """Stopping through the CLI's own pidfile is a claim the smoke must check.
+
+    A stop that exits non-zero and leaves the daemon running is a broken
+    installed CLI, not a detail for the fallback `terminate()` to paper over.
+    """
+    python, data, env = _fake_installed_python(tmp_path, monkeypatch, "refuse")
+
+    with pytest.raises(ReleaseError, match=r"openai4s stop.*exited 2"):
+        Pipeline("0.2.0", assets_dir=tmp_path)._smoke_daemon(python, tmp_path, env)
+    assert json.loads((data / "fake-stop.json").read_text()) == {"rc": 2}
 
 
 # --------------------------------------------------------------------------
