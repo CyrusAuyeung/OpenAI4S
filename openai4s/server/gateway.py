@@ -9473,6 +9473,11 @@ class SessionRunner:
         turn.
         """
 
+        # The live stream concatenates text chunks into one markdown block, and
+        # model prose often ends without a newline -- so the completion text
+        # rendered as "...gradient.Printed ...". Stored rows are separate and
+        # unaffected; only the wire chunk gets the paragraph break.
+        separator = _completion_separator(assistant_visible)
         if self.stage1_trusted_delivery and produced_artifacts:
             try:
                 delivery_service = self.completion_delivery
@@ -9564,7 +9569,7 @@ class SessionRunner:
                         "type": "text_chunk",
                         "frame_id": root_frame_id,
                         "block_type": "text",
-                        "chunk": final_text + "\n",
+                        "chunk": separator + final_text + "\n",
                         "delivery_id": delivery_id,
                         "message_id": message_id,
                     }
@@ -9595,7 +9600,7 @@ class SessionRunner:
                     "type": "text_chunk",
                     "frame_id": root_frame_id,
                     "block_type": "text",
-                    "chunk": final_text + "\n",
+                    "chunk": separator + final_text + "\n",
                 }
             )
         return {
@@ -10237,7 +10242,11 @@ class SessionRunner:
                                     "type": "text_chunk",
                                     "frame_id": root_frame_id,
                                     "block_type": "text",
-                                    "chunk": str(candidate_final["text"]) + "\n",
+                                    "chunk": (
+                                        _completion_separator(assistant_visible)
+                                        + str(candidate_final["text"])
+                                        + "\n"
+                                    ),
                                     "provisional": True,
                                     "review_status": "candidate",
                                     "turn_id": str(action_ledger.turn_id),
@@ -19192,6 +19201,19 @@ def _project_json(p: dict) -> dict:
         "updated_at": _iso(p.get("updated_at")),
         "is_example": bool(p.get("is_example")),
     }
+
+
+def _completion_separator(assistant_visible: list) -> str:
+    """The paragraph break a completion chunk needs on the live stream.
+
+    Clients append consecutive text chunks to one markdown block until a tool
+    header or step card starts a new one, so a completion text streamed right
+    after visible prose must open its own paragraph. An extra blank line after
+    a block boundary renders as nothing.
+    """
+    if any(str(block.get("text") or "").strip() for block in assistant_visible):
+        return "\n\n"
+    return ""
 
 
 def _message_failure(message: dict) -> dict | None:

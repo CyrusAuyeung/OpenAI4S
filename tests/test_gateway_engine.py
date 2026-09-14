@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -2563,3 +2564,201 @@ def test_a_team_owned_session_is_metered_and_drains_its_abandoned_streams(
         assert runner._session_is_metered(frame_id) is False
     finally:
         runner.close()
+
+
+# --- UI-LIVE-07: the completion text starts its own paragraph live -----------
+
+_GRADIENT_PROSE = (
+    "The means rise from setosa to virginica, reflecting the classic iris "
+    "species-size gradient."
+)
+
+
+def _live_text(hub) -> str:
+    return "".join(
+        event.get("chunk", "")
+        for event in hub.events
+        if event.get("type") == "text_chunk" and event.get("block_type") == "text"
+    )
+
+
+def test_native_finalize_after_streamed_prose_starts_a_new_paragraph(
+    monkeypatch, tmp_path
+):
+    """The model's closing prose had no trailing newline, and the completion
+    text arrived as the next chunk of the same live markdown block, so the UI
+    rendered "...gradient.Printed mean petal length...". The stored rows were
+    always separate; only the stream joined them."""
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+    call = _native_call(
+        "finalize-1",
+        "finalize_response",
+        {
+            "summary": "Printed mean petal length per species.",
+            "completion_bullets": ["Printed means"],
+        },
+    )
+    reply, _assistant = _native_reply(_GRADIENT_PROSE, [call])
+
+    def fake_chat(messages, cfg, on_delta=None, **kwargs):
+        del messages, cfg, kwargs
+        for offset in range(0, len(_GRADIENT_PROSE), 7):
+            on_delta(_GRADIENT_PROSE[offset : offset + 7])
+        return reply
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+
+    result = runner.run_message(frame_id, "default", "answer in one sentence")
+
+    assert result["status"] == "completed"
+    live = _live_text(hub)
+    assert "gradient.Printed" not in live
+    assert "gradient.\n\nPrinted mean petal length" in live
+    contents = [m["content"] for m in runner.store.list_messages(frame_id)]
+    assert contents[-2] == _GRADIENT_PROSE
+    assert contents[-1].startswith("Printed mean petal length")
+
+
+def test_submit_output_cell_after_single_newline_prose_starts_a_new_paragraph(
+    monkeypatch, tmp_path
+):
+    """A single newline still renders as one paragraph ("gradient. Printed")."""
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+    content = (
+        _GRADIENT_PROSE
+        + "\n```python\nhost.submit_output({'summary': "
+        + "'Printed mean petal length per species.'}, ['Printed means'])\n```"
+    )
+
+    def fake_chat(messages, cfg, on_delta=None, **kwargs):
+        del messages, cfg, kwargs
+        for offset in range(0, len(content), 7):
+            on_delta(content[offset : offset + 7])
+        return {"content": content, "usage": {}}
+
+    def fake_execute(state, code, origin, emit, stream=True, language="python"):
+        del code, origin, emit, stream, language
+        state.dispatcher.last_output = {
+            "output": {"summary": "Printed mean petal length per species."},
+            "completion_bullets": ["Printed means"],
+        }
+        return {"result": {"stdout": "", "stderr": "", "error": None}}
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+    monkeypatch.setattr(runner, "_execute_and_log", fake_execute)
+
+    result = runner.run_message(frame_id, "default", "answer in one sentence")
+
+    assert result["status"] == "completed"
+    live = _live_text(hub)
+    # A blank line (or more -- the renderer skips extras) before the completion.
+    assert re.search(r"gradient\.\n[ \t]*\n\s*Printed mean petal length", live), repr(
+        live
+    )
+
+
+def test_completion_without_prior_prose_gets_no_leading_blank_line(
+    monkeypatch, tmp_path
+):
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+
+    def finish_silently(state, emit, visible):
+        del emit, visible
+        state.last_engine_completion = {
+            "output": {"summary": "Printed mean petal length per species."}
+        }
+        state.last_model_prose = ""
+        return "submitted"
+
+    monkeypatch.setattr(runner, "_loop", finish_silently)
+
+    result = runner.run_message(frame_id, "default", "answer in one sentence")
+
+    assert result["status"] == "completed"
+    assert _live_text(hub).startswith("Printed mean petal length")
+
+
+@pytest.mark.parametrize("stage", ["stage1", "stage4"])
+def test_trusted_and_gated_completion_chunks_also_start_a_new_paragraph(
+    monkeypatch, tmp_path, stage
+):
+    """The same join at the other two emit sites: the Stage 1 trusted
+    delivery branch and the Stage 4 provisional candidate."""
+    for flags in (
+        (
+            RoadmapFeatureFlags(stage1_trusted_delivery=True)
+            if stage == "stage1"
+            else RoadmapFeatureFlags(stage4_review_completion_gate=True)
+        ),
+    ):
+        home = tmp_path / stage
+        home.mkdir()
+        cfg = Config(
+            data_dir=home,
+            llm=LLMConfig(provider="deepseek", api_key="test-key"),
+            max_turns=3,
+            roadmap_features=flags,
+        )
+        hub = _Hub()
+        runner = gateway_mod.SessionRunner(cfg, hub, start_idle_sweeper=False)
+        frame_id = runner.store.new_frame(
+            kind="turn", project_id="default", status="ready"
+        )
+        runner.store.update_frame(frame_id, name="Existing test session")
+
+        def ensure_runtime(state):
+            state.dispatcher = SimpleNamespace(last_output=None)
+            state.messages = [{"role": "system", "content": "sys"}]
+            return state.dispatcher
+
+        def finish_after_prose(state, emit, visible, runner=runner):
+            visible.append({"at": 100, "text": _GRADIENT_PROSE})
+            emit(
+                {
+                    "type": "text_chunk",
+                    "frame_id": state.root_frame_id,
+                    "block_type": "text",
+                    "chunk": _GRADIENT_PROSE,
+                }
+            )
+            target = state.workspace / "means.csv"
+
+            def write():
+                target.write_text("species,mean\nsetosa,1.46\n", encoding="utf-8")
+                return "ok", True
+
+            runner._invoke_control_with_artifacts(
+                state, SimpleNamespace(name="write_file"), emit, write
+            )
+            state.last_engine_completion = {
+                "output": {"summary": "Printed mean petal length per species."}
+            }
+            state.last_model_prose = _GRADIENT_PROSE
+            return "submitted"
+
+        class _Gate:
+            @staticmethod
+            def active_mode(_root_frame_id):
+                return "review_only"
+
+            def gate_after_turn(self, **fields):
+                return None
+
+            def finalize_after_delivery(self, **fields):
+                return None
+
+        monkeypatch.setattr(runner, "_ensure_runtime", ensure_runtime)
+        monkeypatch.setattr(runner, "_loop", finish_after_prose)
+        monkeypatch.setattr(runner, "_spawn_title_summary", lambda *a, **k: None)
+        if flags.stage4_review_completion_gate:
+            runner.completion_gate = _Gate()
+        try:
+            runner.run_message(frame_id, "default", "answer in one sentence")
+            live = _live_text(hub)
+            assert "gradient.Printed" not in live, (flags, repr(live))
+            assert "gradient.\n\nPrinted mean petal length" in live, (flags, live)
+        finally:
+            runner.close()
