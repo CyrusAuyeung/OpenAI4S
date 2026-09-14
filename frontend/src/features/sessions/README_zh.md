@@ -33,4 +33,4 @@ F-13 仪表盘 / 项目 / 会话。分页与排序是纯函数。窗口契约名
 | [`paging.ts`](paging.ts) | `MESSAGE_PAGE_SIZE=300`、`SESSION_MAX_PAGES=50`、排序/走页/过滤。 |
 | [`projects.ts`](projects.ts) | 项目菜单/模态/研究视图、`sanitizeProjectLineage`。`renderProjMenu` 从静态 `data-i18n` 标签手中接管 `#proj-current`。 |
 | [`static-i18n-ownership.test.ts`](static-i18n-ownership.test.ts) | 代码写入会话标题或当前项目名之后，迟到的语言分块重绘和切换语言都不会把它改回“会话”/“项目”；标题输入框失焦即提交，那次重绘曾把服务端的会话名改掉。 |
-| [`transcript.ts`](transcript.ts) | `renderStored`、引用芯片、空会话 starter、消息动作。 |
+| [`transcript.ts`](transcript.ts) | `renderStored`、引用芯片、空会话 starter、消息动作。计划模式行与 `messages/list.ts` 渲染方式一致（`messages/planPrompt.ts`）。 |

@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { currentId } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { stream } from "../../stores/stream";
+import { installNotebook } from "../notebook/install";
+import { setNotebookRenderImpl } from "../notebook/scroll";
 import { turnDone } from "../send/turn";
+import { onEvent, resetWsHandlers } from "../ws/registry";
 import { renderStored as renderOlderPage } from "../sessions/transcript";
 import { renderStored } from "./list";
 import { finishStoppedStream } from "./stopped";
@@ -212,7 +216,8 @@ describe("stopped turn marker", () => {
     feed("tool", "↳ iteration 0\n", { type: "text_chunk", block_type: "tool" });
     const card = live().toolCard as unknown as FakeEl;
     const glyph = card.querySelector(".a-head")!.querySelector(".ic")!;
-    expect(glyph.dataset["attr:data-icon"]).toBe("check");
+    // A running cell has not succeeded yet.
+    expect(glyph.dataset["attr:data-icon"]).not.toBe("check");
 
     feed("text", marker.chunk, marker);
 
@@ -335,4 +340,199 @@ describe("stopped turn marker", () => {
       expect(node.querySelectorAll(".md")).toHaveLength(1);
     }
   });
+});
+
+/**
+ * The same card for a cell that did NOT stop. Only the Stop path repainted it
+ * (UI3-F6), so a cell that raised kept the success check, the green bar and
+ * "Running analysis · cell N" above "This cell failed: ZeroDivisionError" for
+ * as long as the page stayed open. The outcome arrives as
+ * `notebook_cell_finished`, dispatched here through the real WS registry.
+ */
+describe("live activity card outcome", () => {
+  beforeEach(() => {
+    resetWsHandlers();
+    currentId.value = "frame-1";
+    setNotebookRenderImpl(() => {});
+    // loadExecutionLog after a finished cell: never answered, never needed.
+    vi.stubGlobal("fetch", () => new Promise(() => {}));
+    installNotebook({});
+  });
+
+  afterEach(() => {
+    setNotebookRenderImpl(null);
+    resetWsHandlers();
+  });
+
+  function startCell(index: number, cellId: string, title = `Running analysis · cell ${index}`): FakeEl {
+    feed("tool", `⚙${title}\n`, {
+      type: "text_chunk",
+      frame_id: "frame-1",
+      block_type: "tool",
+      cell_index: index,
+      producing_cell_id: cellId,
+    });
+    return live().toolCard as unknown as FakeEl;
+  }
+
+  function finished(cellId: string, index: number, status: string): void {
+    onEvent({
+      type: "notebook_cell_finished",
+      frame_id: "frame-1",
+      root_frame_id: "frame-1",
+      producing_cell_id: cellId,
+      cell_index: index,
+      status,
+      error: status === "error" ? "ZeroDivisionError: division by zero" : "",
+    });
+  }
+
+  function icon(card: FakeEl): string | undefined {
+    return card.querySelector(".ic")!.dataset["attr:data-icon"];
+  }
+
+  function label(card: FakeEl): string {
+    return card.querySelector(".lbl")!.textContent;
+  }
+
+  it("a cell that raised ends failed, not with the success check or a running title", () => {
+    startStream();
+    const card = startCell(1, "c1");
+    expect(icon(card)).not.toBe("check");
+
+    finished("c1", 1, "error");
+    feed("text", "This cell failed: ZeroDivisionError: division by zero\n", {
+      type: "text_chunk",
+      block_type: "text",
+    });
+    turnDone("completed", { type: "frame_update", status: "completed" });
+
+    expect(card.dataset.state).toBe("failed");
+    expect(card.classList.contains("failed")).toBe(true);
+    expect(icon(card)).not.toBe("check");
+    expect(label(card)).not.toMatch(/^Running/);
+    expect(label(card)).toBe("Analysis · cell 1");
+    expect(card.querySelector(".meta")!.textContent).toContain("Failed");
+  });
+
+  it("a cell that succeeded keeps the check and drops the running title", () => {
+    startStream();
+    const card = startCell(2, "c2");
+    finished("c2", 2, "ok");
+
+    expect(card.dataset.state).toBe("ok");
+    expect(icon(card)).toBe("check");
+    expect(label(card)).toBe("Analysis · cell 2");
+  });
+
+  it("keeps the cell's own title on a failed card", () => {
+    startStream();
+    const card = startCell(3, "c3", "Fit the growth model");
+    finished("c3", 3, "error");
+
+    expect(card.dataset.state).toBe("failed");
+    expect(label(card)).toBe("Fit the growth model");
+  });
+
+  it("an interrupted cell is stopped once, even when the stop marker follows", () => {
+    startStream();
+    const card = startCell(4, "c4");
+    feed("tool", "↳ iteration 0\n", { type: "text_chunk", block_type: "tool", producing_cell_id: "c4" });
+    finished("c4", 4, "interrupted");
+    feed("text", marker.chunk, marker);
+
+    expect(card.dataset.state).toBe("stopped");
+    expect(icon(card)).toBe("stop");
+    const meta = card.querySelector(".meta")!.textContent;
+    expect(meta.match(/Stopped/g)).toHaveLength(1);
+  });
+
+  it("a finished event repaints only the card of the cell it names", () => {
+    startStream();
+    const first = startCell(5, "c5");
+    feed("text", "Now the next cell.\n", { type: "text_chunk", block_type: "text" });
+    const second = startCell(6, "c6");
+    finished("c5", 5, "error");
+
+    expect(first.dataset.state).toBe("failed");
+    expect(second.dataset.state).toBe("running");
+    expect(label(second)).toBe("Running analysis · cell 6");
+  });
+
+  it("a card whose outcome never arrived does not stay running after the turn", () => {
+    for (const status of ["completed", "failed"]) {
+      startStream();
+      const card = startCell(7, "c7-" + status);
+      turnDone(status, { type: "frame_update", status });
+
+      expect(card.dataset.state).not.toBe("running");
+      expect(icon(card)).not.toBe("check");
+      expect(label(card)).not.toMatch(/^Running/);
+    }
+  });
+});
+
+/**
+ * UI5-F2. The workbench sends a plan-mode request as its plan prompt followed
+ * by the task, and the approval/resume turns are server seeds; every one is a
+ * stored user row. Live, the bubble showed only the typed task, but a reload
+ * showed the whole "[Plan Mode] Do not execute or call any tools yet. …"
+ * prompt, then "Plan "…" is approved; start executing it automatically now. …"
+ * -- both as the user's own messages.
+ */
+describe("stored plan-mode rows reopen as what the user wrote", () => {
+  const TASK = "Compute the mean and standard deviation of integers 1-20";
+  const EN_PROMPT =
+    "[Plan Mode] Do not execute or call any tools yet. Devise a structured execution plan for the task below, and output only two parts:\n" +
+    "1) A brief description of the approach;\n2) Immediately followed by a ```json code block, strictly using the following structure:\n" +
+    '{"title":"Plan title","steps":[]}\nWait for user approval before executing.\n\nTask: ';
+  const ZH_PROMPT = "[计划模式] 请先不要执行、不要调用任何工具。为下面的任务制定一个结构化执行计划，并只输出两部分：\n等待用户批准后再执行。\n\n任务：";
+  const APPROVED =
+    'Plan "Mean and SD of 1-20" is approved; start executing it automatically now.\n\n' +
+    "Follow these steps strictly in order:\n- [s1] Compute: mean and SD  → deliverables: stats.csv\n\nExecution rules:\n1. …";
+
+  const renderers = [
+    ["the conversation page", renderStored],
+    ["an older page", renderOlderPage],
+  ] as const;
+
+  for (const [where, render] of renderers) {
+    it(`${where}: the plan prompt's bubble is the task, in either language`, () => {
+      for (const [prompt, task] of [[EN_PROMPT, TASK], [ZH_PROMPT, "计算 1 到 20 的平均值"]] as const) {
+        const node = render({ role: "user", content: prompt + task, created_at: "2026-09-14T00:00:00Z" }) as unknown as FakeEl;
+        expect(node.classList.contains("user")).toBe(true);
+        const bubble = node.querySelector(".bubble")!.textContent;
+        expect(bubble).toBe(task);
+        expect(bubble).not.toContain("[Plan Mode]");
+        expect(bubble).not.toContain("[计划模式]");
+      }
+    });
+
+    it(`${where}: a plan revision's bubble is the change request`, () => {
+      const node = render({
+        role: "user",
+        content: "[Plan Mode] Revise the execution plan above according to the change requests below. Do not execute anything.\n\nChange requests: drop step 2",
+      }) as unknown as FakeEl;
+      expect(node.querySelector(".bubble")!.textContent).toBe("drop step 2");
+    });
+
+    it(`${where}: the approval seed is a plan marker, not a user message`, () => {
+      for (const content of [APPROVED, "已批准计划「1-20 的均值」，现在开始自动执行。\n\n请严格按下面的步骤顺序推进：\n- [s1] …"]) {
+        const node = render({ role: "user", content }) as unknown as FakeEl;
+        expect(node.classList.contains("user")).toBe(false);
+        expect(node.querySelectorAll(".bubble")).toHaveLength(0);
+        expect(node.textContent).not.toContain("start executing it automatically");
+        expect(node.textContent).not.toContain("现在开始自动执行");
+        expect(node.textContent).toMatch(/Mean and SD of 1-20|1-20 的均值/);
+      }
+    });
+
+    it(`${where}: ordinary user text is left alone`, () => {
+      for (const content of ["[Plan Mode] notes without a task", "Notes\n\nTask: keep me", 'Plan "X" is approved, says my note']) {
+        const node = render({ role: "user", content }) as unknown as FakeEl;
+        expect(node.classList.contains("user")).toBe(true);
+        expect(node.querySelector(".bubble")!.textContent).toBe(content);
+      }
+    });
+  }
 });

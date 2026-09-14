@@ -24,6 +24,7 @@ import {
   historyContent,
   historyMutation,
   historyUnconfirmed,
+  openedFrameId,
   resetHistorySubmissions,
   type HistoryLoadResult,
   _msgEarlierLoading,
@@ -448,8 +449,15 @@ export async function openConversation(
   if (_branchConversationTimer.value != null) clearTimeout(_branchConversationTimer.value as ReturnType<typeof setTimeout>);
   const previousFid = currentId.value;
   const switching = previousFid !== fid;
+  // What is on screen can belong to another session even when `currentId`
+  // already names this one: a new session is published before it is opened
+  // (adoptCreatedFrame), so it looked like its own predecessor and kept the
+  // previous session's Notebook cells, merged with its own. Home clears
+  // `currentId` without clearing that state either.
+  const shownFid = openedFrameId.value;
+  const rescoping = switching || shownFid !== fid;
   if (previousFid && switching) unsub(previousFid);
-  if (switching) resetNotebookCellCaches(previousFid, fid);
+  if (rescoping) resetNotebookCellCaches(switching ? previousFid : shownFid, fid);
   if (pid && pid !== project.value) { project.value = pid; _projArtFor.value = null; }
   const found = (sessions.value as Array<{ id?: string; project_id?: string }>).find((x) => x?.id === fid);
   navURL(framePath(fid, pid || project.value || found?.project_id));
@@ -465,8 +473,8 @@ export async function openConversation(
   _msgEarlierLoading.value = false;
   removeEmptyHistoryDecoration();
   historyLoad.value = { ...incomplete(), fid, generation: gen, status: "loading", errors: {},
-    deferred: !switching && !options?.resetHistory && !!historyLoad.value?.deferred };
-  if (options?.resetHistory && !switching) {
+    deferred: !rescoping && !options?.resetHistory && !!historyLoad.value?.deferred };
+  if (options?.resetHistory && !rescoping) {
     // Branch activation/revert changes which records are visible within the
     // same frame: messages, but also cells, artifacts, plan and dock state.
     // Its previous transcript cannot seed the replacement page, and the
@@ -478,7 +486,7 @@ export async function openConversation(
     historyContent.value = null;
     historyMutation.value += 1;
   }
-  if (switching) {
+  if (rescoping) {
     const host = messagesHost();
     if (host) host.innerHTML = "";
     closeTurnTicket(); resetSessionScoped();
@@ -495,6 +503,7 @@ export async function openConversation(
     callLane("closeAnnotDraft"); callLane("closeAnnotPop"); callLane("updateAnnotBadge");
     callLane("edacTeardown"); callLane("_molTeardown"); renderDockTabs();
   }
+  openedFrameId.value = fid;
   callLane("refreshComputeStatus", fid);
   if (!sessions.value.length) {
     try { await loadSessions(); } catch { /* history has its own independently reported reads */ }
@@ -509,7 +518,7 @@ export async function openConversation(
     feedback.value = fb?.feedback || Object.create(null);
   } catch {
     if (!current(fid, gen)) return obsolete();
-    if (switching) feedback.value = Object.create(null);
+    if (rescoping) feedback.value = Object.create(null);
   }
   const result = await recoverConversation(fid, gen);
   if (!current(fid, gen)) return obsolete();

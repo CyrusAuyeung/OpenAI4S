@@ -74,6 +74,41 @@ def carries_plan_mode_prompt(text: str) -> bool:
     return str(text or "").lstrip().startswith(PLAN_MODE_PROMPT_MARKERS)
 
 
+#: Where a plan-mode prompt ends and the user's own words begin: the
+#: workbench's `plan.prompt.part3` and the legacy app.js literal ("Task: " /
+#: "任务："), and `PlanService.run_revision`'s seed ("Change requests: " /
+#: "修改意见：").
+PLAN_MODE_REQUEST_DELIMITERS = (
+    "\n\nTask: ",
+    "\n\n任务：",
+    "\n\nChange requests: ",
+    "\n\n修改意见：",
+)
+
+
+def plan_mode_request_text(text: str) -> str:
+    """The user's own words inside a plan-mode prompt; ``text`` otherwise.
+
+    For what a person reads -- the session title and the text a title is
+    summarised from -- never for model input: the prompt is the instruction the
+    turn was drafted under. Cut at the first delimiter, which is the prompt's
+    own; the user's text keeps any later one. Text with no marker, or with no
+    delimiter to separate, is returned unchanged.
+    """
+    value = str(text or "")
+    if not carries_plan_mode_prompt(value):
+        return value
+    found = [
+        (index, len(delimiter))
+        for delimiter in PLAN_MODE_REQUEST_DELIMITERS
+        if (index := value.find(delimiter)) >= 0
+    ]
+    if not found:
+        return value
+    index, length = min(found)
+    return value[index + length :].strip() or value
+
+
 def plan_draft_instruction(user_text: str) -> str | None:
     """The instruction a `plan:true` turn appends, or None when the request
     already carries one. Localised by the request, as the turn's own

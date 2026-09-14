@@ -14,7 +14,7 @@
  */
 
 import { LANG } from "../../i18n/runtime";
-import { paintIcon } from "../icons/paths";
+import { markCardStopped } from "./cardState";
 import { el } from "./dom";
 import type { LiveStream } from "./stream";
 
@@ -27,14 +27,10 @@ const COPY: Record<"en" | "zh", Record<string, string>> = {
   en: {
     "turn.stopped.user": "Stopped by user",
     "turn.stopped.autoBudget": "Stopped: the Auto Mode budget was reached",
-    "turn.stopped.card": "Stopped",
-    "turn.stopped.cardTitle": "Analysis · cell {0}",
   },
   zh: {
     "turn.stopped.user": "已由用户停止",
     "turn.stopped.autoBudget": "已停止：已达到自动模式预算",
-    "turn.stopped.card": "已停止",
-    "turn.stopped.cardTitle": "分析 · 单元 {0}",
   },
 };
 
@@ -84,37 +80,12 @@ export function stoppedMarker(identity: StoppedIdentity): HTMLElement {
 
 type StoppableStream = LiveStream & { stopped?: boolean };
 
-/** `cell_run.activity_title` for a cell with no leading comment of its own. */
-const DEFAULT_CELL_TITLE = /^Running analysis \u00b7 cell (\d+)$/;
-
-/**
- * The card as it stood still said what it said while running: the success
- * check, the green bar (messages.css) and "Running analysis · cell N" beside a
- * "Stopped" count. A title the cell's leading comment supplied is the
- * author's and stays; only the generated "Running …" one is replaced.
- */
-function markCardStopped(card: HTMLElement): void {
-  card.classList.add("stopped");
-  card.dataset.state = "stopped";
-  const glyph = card.querySelector(".ic") as HTMLElement | null;
-  if (glyph) paintIcon(glyph, "stop", 16);
-  const label = card.querySelector(".lbl") as HTMLElement | null;
-  const generated = label ? DEFAULT_CELL_TITLE.exec(String(label.textContent || "").trim()) : null;
-  if (label && generated) {
-    label.textContent = stoppedT("turn.stopped.cardTitle").replace("{0}", generated[1] || "");
-  }
-  const meta = card.querySelector(".meta") as HTMLElement | null;
-  if (meta) {
-    const lines = String(meta.textContent || "").trim();
-    meta.textContent = stoppedT("turn.stopped.card") + (lines ? " \u00b7 " + lines : "");
-  }
-}
-
 /**
  * Close a live stream as stopped: the activity card that was still the last
  * thing on screen is marked stopped, then the marker is appended. A card with
  * narration after it finished before the Stop (the outcome narration is only
- * published for a cell that was not cancelled), so it keeps its state.
+ * published for a cell that was not cancelled), so it keeps its state, and so
+ * does a card whose own outcome already arrived (cardState.ts).
  */
 export function appendLiveStoppedMarker(st: LiveStream, identity: StoppedIdentity): void {
   const live = st as StoppableStream;

@@ -419,6 +419,41 @@ async function correctnessScenes(projectId) {
 
 }
 
+// UI5-F1: New session publishes the created id before it opens the frame, and
+// the open treated the new frame as its own predecessor -- the dock kept the
+// previous session's cells and merged the new session's in beside them.
+async function newSessionNotebookScene(projectId) {
+  const made = await api("/frames", { method: "POST", data: { project_id: projectId } });
+  const fromId = made.id || made.frame_id;
+  for (const code of ["print('new-session scene A1')", "print('new-session scene A2')"]) {
+    const result = await api(`/frames/${fromId}/kernel/execute`, { method: "POST", data: { language: "python", code, wait: true } });
+    assert.ok(!result.error, JSON.stringify(result));
+  }
+  await page.evaluate(async ({ fid, projectId }) => window.openConversation(fid, projectId), { fid: fromId, projectId });
+  await ensureDockOpen();
+  await page.evaluate(() => window.setActiveTab("notebook"));
+  const dockCells = page.locator("#dock-notebook .notebook-cell");
+  await waitUntil("the previous session's two cells", async () => (await dockCells.count()) === 2);
+  await page.locator("#new-session").click();
+  let newId = "";
+  await waitUntil("New session opened", async () => {
+    newId = (new URL(page.url()).pathname.match(/\/frames\/([^/]+)/) || [])[1] || "";
+    return !!newId && newId !== fromId;
+  });
+  await waitWorkbenchIdle();
+  await page.waitForTimeout(1500);
+  assert.equal((await api(`/frames/${newId}/execution-log`)).entries.length, 0);
+  assert.equal(await dockCells.count(), 0, "a new session's Notebook shows no cells of the previous one");
+  const own = await api(`/frames/${newId}/kernel/execute`, { method: "POST", data: { language: "python", code: "print('new-session scene B1')", wait: true } });
+  assert.ok(!own.error, JSON.stringify(own));
+  await waitUntil("the new session's own cell", async () => (await dockCells.count()) >= 1);
+  await page.waitForTimeout(1000);
+  const texts = await dockCells.allInnerTexts();
+  assert.equal(texts.length, 1, `exactly the new session's cell, got ${JSON.stringify(texts)}`);
+  assert.match(texts[0], /new-session scene B1/);
+  console.log("UI5-F1 browser: New session starts with an empty Notebook and shows only its own cell");
+}
+
 function queueTickets(snapshot) {
   return [snapshot?.owner, ...(snapshot?.queue || [])].filter(Boolean);
 }
@@ -692,6 +727,7 @@ try {
   const projectId = project.project_id || project.id;
   if (!projectId) throw new Error("project creation did not return an id");
   await correctnessScenes(projectId);
+  await newSessionNotebookScene(projectId);
   const frame = await api("/frames", {
     method: "POST",
     data: { project_id: projectId },

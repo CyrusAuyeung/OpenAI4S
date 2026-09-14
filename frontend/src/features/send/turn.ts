@@ -19,6 +19,7 @@ import {
   stream as liveStream,
 } from "../../stores/stream";
 import { loadArtifacts } from "../artifacts/load";
+import { settleRunningCards } from "../messages/cardState";
 import { $, el } from "../messages/dom";
 import { finishStoppedStream } from "../messages/stopped";
 import { flushRender, type LiveStream } from "../messages/stream";
@@ -99,6 +100,7 @@ export function turnDone(status: string, detail?: unknown): void {
   _resumeTok.value = (_resumeTok.value || 0) + 1;
   const st = liveStream.value as LiveStream | null;
   if (st && status === "cancelled") finishStoppedStream(st, detail);
+  settleRunningCards();
   if (st) {
     flushRender(st, true);
     st.md.classList.remove("cursor");

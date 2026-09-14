@@ -20,10 +20,12 @@ import { currentId, project } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { running } from "../../stores/stream";
 import { UPLOAD_STATE } from "../chrome/upload";
-import { rebindDoneText, send } from "./send";
+import { rebindConfirmText, rebindDoneText, send } from "./send";
 
 type FakeEl = Record<string, unknown> & {
   classList: { add: (name: string) => void; remove: () => void; toggle: () => void; contains: () => boolean };
+  /** Every class name `classList.add` was called with (contains() stays inert). */
+  added: string[];
   value: string;
   children: unknown[];
   textContent: string;
@@ -31,8 +33,15 @@ type FakeEl = Record<string, unknown> & {
 };
 
 function fakeEl(): FakeEl {
+  const added: string[] = [];
   const node: FakeEl = {
-    classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
+    classList: {
+      add: (name: string) => void added.push(name),
+      remove: () => {},
+      toggle: () => {},
+      contains: () => false,
+    },
+    added,
     value: "",
     children: [],
     dataset: {},
@@ -148,6 +157,28 @@ describe("send(): a message the server refuses before admission", () => {
     expect(openCust).not.toHaveBeenCalled();
   });
 
+  it("asks about a moved profile without claiming the pinned configuration no longer exists", async () => {
+    // gateway._unusable_pin_error for a credential scope mismatch (SEC-2): the
+    // profile still exists, it now names a different provider or endpoint.
+    routes["/frames/frame_1/message"] = refusal(
+      "model_revision_unavailable",
+      "this session is pinned to an earlier configuration of its model profile, and the profile now names a " +
+        "different provider or endpoint; its credential is not sent to the old one. Rebind the session to continue",
+    );
+    const asked: string[] = [];
+    vi.stubGlobal("confirm", (text: string) => {
+      asked.push(text);
+      return false;
+    });
+    await send("hello");
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).not.toBe(t("model.rebind.confirm"));
+    expect(asked[0]).not.toMatch(/no longer exists/);
+    expect(asked[0]).toMatch(/provider or endpoint/);
+    expect(nodes.composer!.value).toBe("hello");
+  });
+
   it("keeps the text after a confirmed rebind, and says what the rebind actually did", async () => {
     routes["/frames/frame_1/message"] = refusal("model_revision_ambiguous", "more than one model profile matches");
     routes["/frames/frame_1/model-binding"] = {
@@ -196,6 +227,106 @@ describe("send(): a message the server refuses before admission", () => {
     });
     await done;
     expect(nodes.composer!.value).toBe("a new draft");
+    // The refused text could not go back into the composer, so the bubble is
+    // the only place left that holds it: it stays, marked as not sent.
+    expect(userBubble()?.removed).toBe(false);
+    expect(userBubble()?.added).toContain("cancelled");
+    expect((userBubble()?.children[0] as FakeEl | undefined)?.textContent).toBe("hello");
+  });
+
+  it("keeps the refused bubble when text typed during the pre-dispatch wait stayed in the composer", async () => {
+    // A /skill token makes send() await the skills catalogue before dispatch.
+    // Text typed in that window is not the captured draft, so the composer is
+    // not cleared, and the refusal cannot put "hello /plot" back over it.
+    let catalogue: (value: unknown) => void = () => {};
+    vi.stubGlobal("fetch", (url: string) => {
+      const path = String(url).replace("/api/v1", "");
+      if (path.startsWith("/skills")) {
+        return new Promise((resolve) => {
+          catalogue = resolve;
+        });
+      }
+      return Promise.resolve({
+        ok: false,
+        status: 409,
+        text: () => Promise.resolve(JSON.stringify(refusal("model_profile_needs_key", NEEDS_KEY).body)),
+      });
+    });
+    nodes.composer!.value = "hello /plot";
+    const done = send("hello /plot");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    nodes.composer!.value = "hello /plot and more";
+    catalogue({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ skills: [] })) });
+    await done;
+    expect(nodes.composer!.value).toBe("hello /plot and more");
+    expect(userBubble()?.removed).toBe(false);
+    expect(userBubble()?.added).toContain("cancelled");
+  });
+
+  it("keeps the bubble for an environment-readiness refusal the composer cannot take back", async () => {
+    let answer: (value: unknown) => void = () => {};
+    vi.stubGlobal("fetch", (url: string) => {
+      const path = String(url).replace("/api/v1", "");
+      if (path === "/frames/frame_1/message") {
+        return new Promise((resolve) => {
+          answer = resolve;
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("{}") });
+    });
+    const done = send("hello");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    nodes.composer!.value = "a new draft";
+    answer({
+      ok: false,
+      status: 409,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ error: "environment not ready", code: "environment_not_ready", status: 409 }),
+        ),
+    });
+    await done;
+    expect(nodes.composer!.value).toBe("a new draft");
+    expect(userBubble()?.removed).toBe(false);
+    expect(userBubble()?.added).toContain("cancelled");
+  });
+
+  it("still takes the bubble away when the environment refusal's text went back", async () => {
+    routes["/frames/frame_1/message"] = {
+      status: 409,
+      body: { error: "environment not ready", code: "environment_not_ready", status: 409 },
+    };
+    await send("hello");
+    expect(nodes.composer!.value).toBe("hello");
+    expect(userBubble()?.removed).toBe(true);
+  });
+});
+
+describe("rebindConfirmText", () => {
+  const unavailable = (error: string) => ({ code: "model_revision_unavailable", message: error });
+
+  it("says 'no longer exists' only when the server said it", () => {
+    expect(
+      rebindConfirmText(unavailable("this session is pinned to a model configuration that no longer exists; choose one to continue")),
+    ).toMatch(/no longer exists/);
+    for (const message of [
+      "this session is pinned to a model configuration that is no longer usable; rebind it to continue",
+      "this session's pinned model configuration could not be read; rebind it to continue",
+      "this session is pinned to a model profile whose credential is not available; add its API key in Customize -> Models or rebind the session to continue",
+      "this session is pinned to an earlier configuration of its model profile, and the profile now names a different provider or endpoint; its credential is not sent to the old one. Rebind the session to continue",
+      "",
+    ]) {
+      expect(rebindConfirmText(unavailable(message))).not.toMatch(/no longer exists/);
+    }
+  });
+
+  it("names the actual reason for a moved profile, a missing key and an ambiguous match", () => {
+    const moved = rebindConfirmText(unavailable("... the profile now names a different provider or endpoint; ..."));
+    const keyless = rebindConfirmText(unavailable("... whose credential is not available; add its API key ..."));
+    const ambiguous = rebindConfirmText({ code: "model_revision_ambiguous", message: "more than one model profile matches 'gpt-4o'" });
+    expect(new Set([moved, keyless, ambiguous, rebindConfirmText(unavailable(""))]).size).toBe(4);
+    expect(keyless).toMatch(/API key/);
+    expect(ambiguous).toMatch(/more than one/i);
   });
 });
 
