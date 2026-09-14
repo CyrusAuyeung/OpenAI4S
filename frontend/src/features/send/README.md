@@ -27,4 +27,4 @@ F-11 send chain and live cards. Composer `send()`, turn tickets, step / plan / p
 | [`send.ts`](send.ts) | Composer send chain. Plan-mode payload via F-07 `planModePayload`. `bindComposer` (called from `main.tsx` after `render`). |
 | [`step.ts`](step.ts) | Semantic activity steps, `buildStepCard`, `searchResultHttpUrl`. |
 | [`ticket.ts`](ticket.ts) | Turn ticket generation, `acceptTurnTicket` / `activateTurnTicket`, `resumeWatch`. |
-| [`turn.ts`](turn.ts) | `turnDone` teardown; calls F-14 `notebookOnTurnDone()`. |
+| [`turn.ts`](turn.ts) | `turnDone` teardown; calls F-14 `notebookOnTurnDone()`; settles any activity card still running (`messages/cardState.ts`). |

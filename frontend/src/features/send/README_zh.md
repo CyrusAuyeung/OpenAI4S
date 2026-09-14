@@ -27,4 +27,4 @@ F-11 发送全链与现场卡片。作曲框 `send()`、turn ticket、步骤 / �
 | [`send.ts`](send.ts) | 作曲框发送全链。计划模式 payload 走 F-07 `planModePayload`。`bindComposer`（由 `main.tsx` 在 `render` 之后调用）。 |
 | [`step.ts`](step.ts) | 语义活动步骤、`buildStepCard`、`searchResultHttpUrl`。 |
 | [`ticket.ts`](ticket.ts) | Turn ticket 世代、`acceptTurnTicket` / `activateTurnTicket`、`resumeWatch`。 |
-| [`turn.ts`](turn.ts) | `turnDone` 收尾；调用 F-14 的 `notebookOnTurnDone()`。 |
+| [`turn.ts`](turn.ts) | `turnDone` 收尾；调用 F-14 的 `notebookOnTurnDone()`；收尾仍显示运行中的活动卡片（`messages/cardState.ts`）。 |

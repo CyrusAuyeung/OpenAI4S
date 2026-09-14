@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { currentId } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { stream } from "../../stores/stream";
+import { installNotebook } from "../notebook/install";
+import { setNotebookRenderImpl } from "../notebook/scroll";
 import { turnDone } from "../send/turn";
+import { onEvent, resetWsHandlers } from "../ws/registry";
 import { renderStored as renderOlderPage } from "../sessions/transcript";
 import { renderStored } from "./list";
 import { finishStoppedStream } from "./stopped";
@@ -212,7 +216,8 @@ describe("stopped turn marker", () => {
     feed("tool", "↳ iteration 0\n", { type: "text_chunk", block_type: "tool" });
     const card = live().toolCard as unknown as FakeEl;
     const glyph = card.querySelector(".a-head")!.querySelector(".ic")!;
-    expect(glyph.dataset["attr:data-icon"]).toBe("check");
+    // A running cell has not succeeded yet.
+    expect(glyph.dataset["attr:data-icon"]).not.toBe("check");
 
     feed("text", marker.chunk, marker);
 
@@ -333,6 +338,136 @@ describe("stopped turn marker", () => {
       }) as unknown as FakeEl;
       expect(node.querySelectorAll(".msg-stopped")).toHaveLength(0);
       expect(node.querySelectorAll(".md")).toHaveLength(1);
+    }
+  });
+});
+
+/**
+ * The same card for a cell that did NOT stop. Only the Stop path repainted it
+ * (UI3-F6), so a cell that raised kept the success check, the green bar and
+ * "Running analysis · cell N" above "This cell failed: ZeroDivisionError" for
+ * as long as the page stayed open. The outcome arrives as
+ * `notebook_cell_finished`, dispatched here through the real WS registry.
+ */
+describe("live activity card outcome", () => {
+  beforeEach(() => {
+    resetWsHandlers();
+    currentId.value = "frame-1";
+    setNotebookRenderImpl(() => {});
+    // loadExecutionLog after a finished cell: never answered, never needed.
+    vi.stubGlobal("fetch", () => new Promise(() => {}));
+    installNotebook({});
+  });
+
+  afterEach(() => {
+    setNotebookRenderImpl(null);
+    resetWsHandlers();
+  });
+
+  function startCell(index: number, cellId: string, title = `Running analysis · cell ${index}`): FakeEl {
+    feed("tool", `⚙${title}\n`, {
+      type: "text_chunk",
+      frame_id: "frame-1",
+      block_type: "tool",
+      cell_index: index,
+      producing_cell_id: cellId,
+    });
+    return live().toolCard as unknown as FakeEl;
+  }
+
+  function finished(cellId: string, index: number, status: string): void {
+    onEvent({
+      type: "notebook_cell_finished",
+      frame_id: "frame-1",
+      root_frame_id: "frame-1",
+      producing_cell_id: cellId,
+      cell_index: index,
+      status,
+      error: status === "error" ? "ZeroDivisionError: division by zero" : "",
+    });
+  }
+
+  function icon(card: FakeEl): string | undefined {
+    return card.querySelector(".ic")!.dataset["attr:data-icon"];
+  }
+
+  function label(card: FakeEl): string {
+    return card.querySelector(".lbl")!.textContent;
+  }
+
+  it("a cell that raised ends failed, not with the success check or a running title", () => {
+    startStream();
+    const card = startCell(1, "c1");
+    expect(icon(card)).not.toBe("check");
+
+    finished("c1", 1, "error");
+    feed("text", "This cell failed: ZeroDivisionError: division by zero\n", {
+      type: "text_chunk",
+      block_type: "text",
+    });
+    turnDone("completed", { type: "frame_update", status: "completed" });
+
+    expect(card.dataset.state).toBe("failed");
+    expect(card.classList.contains("failed")).toBe(true);
+    expect(icon(card)).not.toBe("check");
+    expect(label(card)).not.toMatch(/^Running/);
+    expect(label(card)).toBe("Analysis · cell 1");
+    expect(card.querySelector(".meta")!.textContent).toContain("Failed");
+  });
+
+  it("a cell that succeeded keeps the check and drops the running title", () => {
+    startStream();
+    const card = startCell(2, "c2");
+    finished("c2", 2, "ok");
+
+    expect(card.dataset.state).toBe("ok");
+    expect(icon(card)).toBe("check");
+    expect(label(card)).toBe("Analysis · cell 2");
+  });
+
+  it("keeps the cell's own title on a failed card", () => {
+    startStream();
+    const card = startCell(3, "c3", "Fit the growth model");
+    finished("c3", 3, "error");
+
+    expect(card.dataset.state).toBe("failed");
+    expect(label(card)).toBe("Fit the growth model");
+  });
+
+  it("an interrupted cell is stopped once, even when the stop marker follows", () => {
+    startStream();
+    const card = startCell(4, "c4");
+    feed("tool", "↳ iteration 0\n", { type: "text_chunk", block_type: "tool", producing_cell_id: "c4" });
+    finished("c4", 4, "interrupted");
+    feed("text", marker.chunk, marker);
+
+    expect(card.dataset.state).toBe("stopped");
+    expect(icon(card)).toBe("stop");
+    const meta = card.querySelector(".meta")!.textContent;
+    expect(meta.match(/Stopped/g)).toHaveLength(1);
+  });
+
+  it("a finished event repaints only the card of the cell it names", () => {
+    startStream();
+    const first = startCell(5, "c5");
+    feed("text", "Now the next cell.\n", { type: "text_chunk", block_type: "text" });
+    const second = startCell(6, "c6");
+    finished("c5", 5, "error");
+
+    expect(first.dataset.state).toBe("failed");
+    expect(second.dataset.state).toBe("running");
+    expect(label(second)).toBe("Running analysis · cell 6");
+  });
+
+  it("a card whose outcome never arrived does not stay running after the turn", () => {
+    for (const status of ["completed", "failed"]) {
+      startStream();
+      const card = startCell(7, "c7-" + status);
+      turnDone(status, { type: "frame_update", status });
+
+      expect(card.dataset.state).not.toBe("running");
+      expect(icon(card)).not.toBe("check");
+      expect(label(card)).not.toMatch(/^Running/);
     }
   });
 });

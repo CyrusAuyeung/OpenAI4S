@@ -29,6 +29,7 @@ import {
   rememberCandidateIdentity,
   setLiveReviewBadge,
 } from "./identity";
+import { markCardRunning } from "./cardState";
 import { cancelFrame, scheduleFrame } from "./raf";
 import { down } from "./scroll";
 import { appendLiveStoppedMarker, cancelledIdentity } from "./stopped";
@@ -273,6 +274,8 @@ export function feed(
       card.appendChild(h);
       card.appendChild(pre);
       h.onclick = () => card.classList.toggle("open");
+      // Not a success check until the cell says so (cardState.ts).
+      if (!suba) markCardRunning(card, event);
       sealText(st);
       st.wrap.appendChild(card);
       st.toolPre = pre;
