@@ -109,7 +109,7 @@ gateway.py
 | [`response_schema.py`](response_schema.py) | 一套小而明确的形状代数（类型、必填键、元素形状），零依赖，因为 core 只用标准库。它回答的是「这个响应的形状变了吗」；它不是 JSON Schema draft-2020-12，也不假装是。 |
 | [`reviews.py`](reviews.py) | 先攒出一次科学审阅所依据的有界证据包，再把这次审阅推到结果。整个过程可取消，结果会落到持久化、用量记账和公开的审阅事件上。 |
 | [`sandbox_grants.py`](sandbox_grants.py) | 可执行 Artifact 预览的签名读取凭证。grant 绑定非空 frame、过期时间、签发时的应用 origin，以及唯一可使用它的另一个 loopback origin；把 Host 改回应用会被拒绝。凭证放在路径段，相对资源解析会保留它，无需设置 cookie。daemon access token 用于签名；脚本可读取的 grant 本身仍是临时 bearer 凭证，自身导航泄露风险见 `docs/security.md`。 |
-| [`security_headers.py`](security_headers.py) | 作用于每个响应的静态 CSP 与加固响应头。所有可执行 UI 代码都放在同源文件中，因此 `script-src` 不需要 `'unsafe-inline'`，也不需要通过重新解析 HTML 动态生成 hash/nonce。 |
+| [`security_headers.py`](security_headers.py) | 作用于每个响应的静态 CSP 与加固响应头。所有可执行 UI 代码都放在同源文件中，因此 `script-src` 不需要 `'unsafe-inline'`，也不需要通过重新解析 HTML 动态生成 hash/nonce。`artifact_content_disposition` 以 `inline` 加清洗后的 Artifact 自身文件名（ASCII `filename` + RFC 5987 `filename*`）标注所服务的 Artifact 字节。 |
 | [`session_branching.py`](session_branching.py) | 让一个会话长出分支所需的全部动作：打 checkpoint、隔离 fork、预览 revert、激活分支，以及把 revert/undo 历史只追加地记下来。revert 从不改写旧的 checkpoint：它先把当前状态记成撤销目标；如果当前 head 之后有外部文件被改动，这次操作会记为 `conflict`，一个字节都不会动。 |
 | [`session_deletion.py`](session_deletion.py) | 会话被持久删除后的清理。会话聚合、工作区、按 root 隔离的 kernel Artifact 输入缓存、快照/CAS 引用和进程内状态都会清掉，而这个会话自己 scope 之外的东西一概不碰。 |
 | [`session_domain.py`](session_domain.py) | 高层的会话领域组合，路由 handler 调它，而不是自己去拼装仓储。它对外承接 checkpoint 与 cursor checkpoint、分支、Timeline、导出、renderer、会话包操作与恢复。 |

@@ -201,3 +201,97 @@ describe("static labels painted before the locale chunks arrive", () => {
     expect(runtime.t("this.key.does.not.exist")).toBe("this.key.does.not.exist");
   });
 });
+
+type Held = {
+  requested: boolean;
+  release: () => void;
+  fail: (error: unknown) => void;
+};
+
+function held(): Held & { gate: Promise<void> } {
+  const state = {
+    requested: false,
+    release: () => undefined,
+    fail: (_error: unknown) => undefined,
+  } as Held & { gate: Promise<void> };
+  state.gate = new Promise<void>((resolve, reject) => {
+    state.release = () => resolve();
+    state.fail = (error) => reject(error);
+  });
+  // A failed chunk nobody awaited yet must not surface as an unhandled rejection.
+  state.gate.catch(() => undefined);
+  return state;
+}
+
+/** Each locale chunk behind its own gate, recording when it was requested. */
+async function importRuntimeWithSeparateGates(): Promise<{ runtime: Runtime; en: Held; zh: Held }> {
+  vi.resetModules();
+  const en = held();
+  const zh = held();
+  const realEn = (await vi.importActual<{ default: Record<string, string> }>("./en")).default;
+  const realZh = (await vi.importActual<{ default: Record<string, string> }>("./zh")).default;
+  vi.doMock("./en", async () => {
+    en.requested = true;
+    await en.gate;
+    return { default: realEn };
+  });
+  vi.doMock("./zh", async () => {
+    zh.requested = true;
+    await zh.gate;
+    return { default: realZh };
+  });
+  release = () => {
+    en.release();
+    zh.release();
+  };
+  const runtime = await import("./runtime");
+  return { runtime, en, zh };
+}
+
+const ticks = async (): Promise<void> => {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+};
+
+describe("the active locale and its zh fallback", () => {
+  it("are requested together, not one round trip after the other", async () => {
+    // A deep link routes only once both have landed, so a serial load showed
+    // an English reader the wrong screen for two chunk round trips.
+    installShell();
+    const { runtime, en, zh } = await importRuntimeWithSeparateGates();
+    expect(runtime.LANG).toBe("en");
+
+    await ticks();
+    expect(en.requested).toBe(true);
+    expect(zh.requested).toBe(true);
+
+    en.release();
+    zh.release();
+    await runtime.i18nReady();
+    expect(runtime.t("theme.toggle")).toBe("Toggle theme");
+  });
+
+  it("still repaints in the active language when only the zh fallback fails", async () => {
+    const shell = installShell();
+    const { runtime, en, zh } = await importRuntimeWithSeparateGates();
+    const hook = vi.fn();
+    runtime.onLanguageChange(hook);
+
+    zh.fail(new Error("Failed to fetch dynamically imported module: zh"));
+    en.release();
+    await expect(runtime.i18nReady()).resolves.toBeUndefined();
+
+    expect(shell.theme.title).toBe("Toggle theme");
+    expect(shell.jump.textContent).toBe("Latest");
+    expect(shell.langEn.classList.has("active")).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+  });
+
+  it("still rejects when the active language itself fails", async () => {
+    const shell = installShell();
+    const { runtime, en, zh } = await importRuntimeWithSeparateGates();
+    zh.release();
+    en.fail(new Error("Failed to fetch dynamically imported module: en"));
+    await expect(runtime.i18nReady()).rejects.toBeInstanceOf(Error);
+    expect(shell.theme.title).toBe("主题");
+  });
+});

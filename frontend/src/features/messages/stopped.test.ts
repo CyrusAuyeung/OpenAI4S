@@ -201,6 +201,39 @@ describe("stopped turn marker", () => {
     expect(live().full).not.toContain("_Stopped by user._");
   });
 
+  it("a stopped card no longer claims it is running or succeeded", () => {
+    startStream();
+    // What cell_run.py streams for a cell with no leading comment.
+    feed("tool", "⚙Running analysis · cell 3\n", {
+      type: "text_chunk",
+      block_type: "tool",
+      cell_index: 3,
+    });
+    feed("tool", "↳ iteration 0\n", { type: "text_chunk", block_type: "tool" });
+    const card = live().toolCard as unknown as FakeEl;
+    const glyph = card.querySelector(".a-head")!.querySelector(".ic")!;
+    expect(glyph.dataset["attr:data-icon"]).toBe("check");
+
+    feed("text", marker.chunk, marker);
+
+    expect(card.classList.contains("stopped")).toBe(true);
+    expect(glyph.dataset["attr:data-icon"]).toBe("stop");
+    const label = card.querySelector(".lbl")!.textContent;
+    expect(label).not.toContain("Running");
+    expect(label).toBe("Analysis · cell 3");
+  });
+
+  it("keeps the cell's own title on a stopped card", () => {
+    startStream();
+    feed("tool", "⚙Fit the growth model\n", { type: "text_chunk", block_type: "tool", cell_index: 2 });
+    const card = live().toolCard as unknown as FakeEl;
+
+    feed("text", marker.chunk, marker);
+
+    expect(card.querySelector(".lbl")!.textContent).toBe("Fit the growth model");
+    expect(card.querySelector(".ic")!.dataset["attr:data-icon"]).toBe("stop");
+  });
+
   it("leaves a card that finished before the stop alone", () => {
     startStream();
     cellHeader();

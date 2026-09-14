@@ -2247,6 +2247,137 @@ def test_stop_after_review_wins_the_gateway_terminal_proposal(monkeypatch, tmp_p
         runner.close()
 
 
+def _content_disposition_names(value: str) -> tuple[str, str, str]:
+    """(disposition type, ASCII ``filename``, decoded RFC 5987 ``filename*``)."""
+    from urllib.parse import unquote as _unquote
+
+    kind = value.split(";", 1)[0].strip()
+    plain = re.search(r'(?:^|;)\s*filename="([^"]*)"', value)
+    extended = re.search(r"(?:^|;)\s*filename\*=UTF-8''([^;\s]+)", value)
+    return (
+        kind,
+        plain.group(1) if plain else "",
+        _unquote(extended.group(1), errors="strict") if extended else "",
+    )
+
+
+def test_artifact_bytes_carry_an_inline_disposition_with_the_artifact_filename(
+    tmp_path,
+):
+    """A browser that downloads rather than renders names the file from this.
+
+    Completion links point at ``/api/v1/artifacts/<artifact_id>`` (and, with
+    Stage 1 trusted delivery, ``versions/<version_id>``). Neither response
+    named the file, so Chromium saved ``group_summary.csv`` as
+    ``a-7b61bc5806b9.csv`` -- the URL's last segment. The name is agent- or
+    user-authored, so it is also the one header value on this route an
+    Artifact controls: quotes, CR/LF, path separators and non-ASCII must not
+    split the response or escape the quoted-string. Driven through the real
+    handler on a real socket, because the header is what reaches a browser.
+    """
+    import http.client
+
+    from openai4s.server import local_auth
+    from tests._ports import bound_gateway_server
+
+    httpd, port = bound_gateway_server()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+        max_turns=3,
+        host="127.0.0.1",
+        port=port,
+        roadmap_features=RoadmapFeatureFlags(stage1_trusted_delivery=True),
+    )
+    cfg.ensure_dirs()
+    runner = gateway_mod.SessionRunner(cfg, _Hub(), start_idle_sweeper=False)
+    httpd.RequestHandlerClass = gateway_mod.make_handler(cfg, _Hub(), runner)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    token = local_auth.load_or_mint(cfg.data_dir)
+
+    def fetch(path):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request("GET", path, headers={local_auth.TOKEN_HEADER: token})
+            response = conn.getresponse()
+            return response.status, response.msg, response.read()
+        finally:
+            conn.close()
+
+    try:
+        assert runner.stage1_trusted_delivery is True
+        fid = runner.store.new_frame(kind="turn", project_id="default", status="ready")
+        st = gateway_mod.SessionState(fid, "default", runner.workspace_for(fid))
+        table = st.workspace / "group_summary.csv"
+        table.write_bytes(b"group,n\na,3\nb,4\n")
+        plain = runner._register_file(st, table, "cell-1", lambda e: None)
+        nested = st.workspace / "out" / 'r\u00e9sum\u00e9 "x".csv'
+        nested.parent.mkdir()
+        nested.write_bytes(b"k,v\n1,2\n")
+        hostile = runner._register_file(st, nested, "cell-2", lambda e: None)
+        # The worst a stored name can hold, including what no filesystem path
+        # carries: a CR/LF header injection, a backslash path, a stray quote.
+        hostile_name = '..\\evil/r\u00e9sum\u00e9 "x";\r\nX-Injected: 1.csv'
+        runner.store._conn.execute(  # noqa: SLF001 - adversarial stored row
+            "UPDATE artifacts SET filename=? WHERE artifact_id=?",
+            (hostile_name, hostile["artifact_id"]),
+        )
+        runner.store._conn.execute(  # noqa: SLF001 - adversarial stored row
+            "UPDATE artifact_versions SET filename=? WHERE version_id=?",
+            (hostile_name, hostile["version_id"]),
+        )
+        runner.store._conn.commit()  # noqa: SLF001
+
+        paths = [
+            # mutable head (the flag-off completion link) and the compat
+            # version-id form of the same route
+            f"{API_ROOT}/artifacts/{quote(plain['artifact_id'], safe='')}",
+            f"{API_ROOT}/artifacts/{quote(plain['version_id'], safe='')}",
+            # Stage 1 exact-version link
+            f"{API_ROOT}/artifacts/versions/{quote(plain['version_id'], safe='')}",
+        ]
+        for path in paths:
+            status, headers, body = fetch(path)
+            assert status == 200, (path, status, body[:200])
+            assert body == b"group,n\na,3\nb,4\n"
+            values = headers.get_all("Content-Disposition") or []
+            assert len(values) == 1, (path, values)
+            kind, ascii_name, utf8_name = _content_disposition_names(values[0])
+            # inline, so a PNG or HTML preview still renders in place
+            assert kind == "inline", (path, values[0])
+            assert ascii_name == "group_summary.csv", (path, values[0])
+            assert utf8_name == "group_summary.csv", (path, values[0])
+
+        expected = "r\u00e9sum\u00e9 x;X-Injected: 1.csv"
+        for path in (
+            f"{API_ROOT}/artifacts/{quote(hostile['artifact_id'], safe='')}",
+            f"{API_ROOT}/artifacts/versions/{quote(hostile['version_id'], safe='')}",
+        ):
+            status, headers, body = fetch(path)
+            assert status == 200, (path, status, body[:200])
+            assert body == b"k,v\n1,2\n"
+            assert headers.get_all("X-Injected") is None, path
+            values = headers.get_all("Content-Disposition") or []
+            assert len(values) == 1, (path, values)
+            raw = values[0]
+            assert "\r" not in raw and "\n" not in raw, raw
+            kind, ascii_name, utf8_name = _content_disposition_names(raw)
+            assert kind == "inline", raw
+            # One quoted-string: no quote, backslash, separator or non-ASCII
+            # left in the legacy parameter.
+            assert raw.count('"') == 2, raw
+            assert ascii_name and ascii_name.isascii(), raw
+            assert not set(ascii_name) & set('"\\/;:%'), raw
+            assert ascii_name.endswith(".csv"), raw
+            assert utf8_name == expected, raw
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+        runner.close()
+
+
 def _install_artifact_submission(
     monkeypatch,
     runner,

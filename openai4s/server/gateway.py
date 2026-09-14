@@ -208,6 +208,7 @@ from openai4s.server.recovery_runtime import (
 from openai4s.server.reviews import ReviewPorts, ReviewService
 from openai4s.server.scientific_review import ScientificReviewService
 from openai4s.server.security_headers import (
+    artifact_content_disposition,
     artifact_security_headers,
     embeddable_security_headers,
     ketcher_editor_security_headers,
@@ -15074,6 +15075,11 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     200,
                     body,
                     ctype,
+                    {
+                        "Content-Disposition": artifact_content_disposition(
+                            meta.get("filename") or decoded_ident
+                        )
+                    },
                     security=artifact_security_headers(),
                 )
                 return
@@ -15131,9 +15137,16 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             ctype = (meta or {}).get("content_type") or _guess_ctype(Path(path).name)
             if force_html:
                 ctype = "text/html; charset=utf-8"
+            # Named after the Artifact, not the URL's last segment: the path
+            # here may be a content-addressed snapshot.
             self._serve_file(
                 Path(path),
                 ctype,
+                extra={
+                    "Content-Disposition": artifact_content_disposition(
+                        (meta or {}).get("filename") or Path(path).name
+                    )
+                },
                 security=artifact_security_headers(),
             )
 

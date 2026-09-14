@@ -37,3 +37,8 @@
 .activity.stopped .a-head .ic {
   color: var(--text-400);
 }
+
+/* The running/success green bar (style.css .activity) is not a stopped cell's. */
+.activity.stopped {
+  border-left-color: color-mix(in srgb, var(--text-400) 30%, var(--line));
+}

@@ -23,11 +23,11 @@ F-10 消息流。分帧历史绘制（每 rAF 40 条 + 一次 fragment）、流�
 | [`install.test.ts`](install.test.ts) | 契约名字是真实现（`isReady`），不是 F-05 占位。 |
 | [`list.ts`](list.ts) | `renderStored`、`insertMessageByTime`、分帧批量绘制。 |
 | [`list.test.ts`](list.test.ts) | 640 条 → 16 帧 × 40；按时间插入跳过 `#msgs-earlier`。 |
-| [`messages.css`](messages.css) | `.md-sealed` / `.md-tail { display: contents }`；已停止回合标记与已停止卡片。 |
+| [`messages.css`](messages.css) | `.md-sealed` / `.md-tail { display: contents }`；已停止回合标记与已停止卡片（弱化图标、中性色边条）。 |
 | [`open.ts`](open.ts) | `openConversation` / `recoverConversation`：按代次读取、只读重试、保留已确认历史与原子分帧投影。 |
 | [`open.test.ts`](open.test.ts) | 按打开代次保护历史失败、只读重试、REST/WS 交错与已展开旧页保留。 |
 | [`raf.ts`](raf.ts) | 共用 `requestAnimationFrame` / setTimeout 回退。 |
 | [`scroll.ts`](scroll.ts) | `down` / `updateJumpPill` 合并进一个 rAF；节流 scroll 监听。 |
-| [`stopped.ts`](stopped.ts) | 已停止回合标记：带 `cancelled` 的 `text_chunk` 或存储行渲染为同一个标记（功能内文案），仍在运行的活动卡片标为已停止，漏收标记块的 `cancelled` 终态也补上同一标记。 |
-| [`stopped.test.ts`](stopped.test.ts) | 实时渲染为标记而非正文；已停止卡片与先完成的卡片区分；终态兜底不重复；两个存储渲染器重开一致；畸形元数据仍按正文渲染。 |
+| [`stopped.ts`](stopped.ts) | 已停止回合标记：带 `cancelled` 的 `text_chunk` 或存储行渲染为同一个标记（功能内文案），仍在运行的活动卡片标为已停止（以停止图标替换成功对勾，生成的 "Running analysis · cell N" 标题改为"分析 · 单元 N"），漏收标记块的 `cancelled` 终态也补上同一标记。 |
+| [`stopped.test.ts`](stopped.test.ts) | 实时渲染为标记而非正文；已停止卡片（图标、替换生成标题、保留单元自带标题）与先完成的卡片区分；终态兜底不重复；两个存储渲染器重开一致；畸形元数据仍按正文渲染。 |
 | [`stream.ts`](stream.ts) | `feed` / `flushRender` / `scheduleRender` / `startStream` / `sealText`。 |

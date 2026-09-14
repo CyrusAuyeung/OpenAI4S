@@ -6,7 +6,7 @@ import { apiErrorText } from "./api";
 import { binds } from "./binds";
 import { hint } from "./chrome";
 import { showDashboard, showWorkspace } from "./dashboard";
-import { $ } from "./dom";
+import { $, FRAME_ROUTE, PROJECT_ROUTE } from "./dom";
 import { loadProjects, loadSessions } from "./load";
 import { adoptCreatedFrame, createUploadSession } from "../chrome/upload";
 import { openConversation } from "../messages/open";
@@ -78,7 +78,7 @@ export { openConversation };
 
 export async function routeInitialView(): Promise<void> {
   const path = (typeof location !== "undefined" && location.pathname) || "/";
-  const fm = path.match(/^\/projects\/([^/]+)\/frames\/([^/]+)/);
+  const fm = path.match(FRAME_ROUTE);
   if (fm) {
     const pid = decodeURIComponent(fm[1] || "");
     const fid = decodeURIComponent(fm[2] || "");
@@ -90,7 +90,7 @@ export async function routeInitialView(): Promise<void> {
     await openConversation(fid, pid);
     return;
   }
-  const pm = path.match(/^\/projects\/([^/]+)\/?$/);
+  const pm = path.match(PROJECT_ROUTE);
   if (pm) {
     const pid = decodeURIComponent(pm[1] || "");
     const { openProject } = await import("./projects");

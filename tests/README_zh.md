@@ -413,7 +413,7 @@ OpenAI4S 的离线正确性门禁。`uv run pytest` 用确定性 fake 跑完这�
 | [`test_schema_migrations.py`](test_schema_migrations.py) | 数据库要么完全在版本 N，要么完全在 N-1。任一步失败整组回滚，且 DDL 确实是事务性的。 |
 | [`test_data_dir_permissions.py`](test_data_dir_permissions.py) | 凭据库不可被同机其他账户读取，含 WAL 伴生文件。 |
 | [`test_sandbox_grants.py`](test_sandbox_grants.py) | 预览签名凭证绑定非空会话、主文档版本、精确使用源、唯一签发祖先与期限；拒绝篡改、过期、异机密钥、畸形 Host、同源授权和空范围。 |
-| [`test_security_headers.py`](test_security_headers.py) | 应用外壳和普通 Artifact 路由保持严格策略；可执行 grant 响应仅允许签发源为祖先，JavaScript 字符串编译只在固定的 Ketcher 编辑器文档中放行。 |
+| [`test_security_headers.py`](test_security_headers.py) | 应用外壳和普通 Artifact 路由保持严格策略；可执行 grant 响应仅允许签发源为祖先，JavaScript 字符串编译只在固定的 Ketcher 编辑器文档中放行。Artifact 字节以 `inline` 标注其路径最后一段作为文件名，并去除控制字符、格式字符与引号。 |
 | [`test_local_jobs.py`](test_local_jobs.py) | 取消本地后台任务是真的停下来：死掉的是整个进程组而不只是外层 shell；停不掉的时候如实报错，而不是报告成功。 |
 | [`test_compute_job_races.py`](test_compute_job_races.py) | 终态由账本说了算，并且如实告诉调用方：cancel/close 输掉 compare-and-swap 时返回真正落盘的状态，持久化失败绝不被吞，双线程竞态后内存、SQLite 与返回值三者一致。同时用真实 `sh` 执行 harvest 脚本，证明 `residency: remote` 的产物根本不会被打包。 |
 | [`test_byoc_confinement_scope.py`](test_byoc_confinement_scope.py) | 边界**放行**了什么。允许名单曾经写的是 helper 包的父目录——源码安装下就是仓库根——所以这里真的构造一份 Seatbelt profile，再让一个真实进程隔着它去读 `pyproject.toml`、列目录、列 `.git`。此外：`available()` 必须真的建立一次边界而不是问 `which`，结论可以缓存但不能跨越后端变化，doctor 必须和 runtime 描述同一份 posture。 |

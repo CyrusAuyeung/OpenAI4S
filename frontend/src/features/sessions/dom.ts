@@ -36,6 +36,14 @@ export function framePath(fid: string, pid?: string | null): string {
   return `/projects/${encodeURIComponent(pid || "default")}/frames/${encodeURIComponent(fid)}`;
 }
 
+/** The two paths `routeInitialView` opens in the workspace rather than on the dashboard. */
+export const FRAME_ROUTE = /^\/projects\/([^/]+)\/frames\/([^/]+)/;
+export const PROJECT_ROUTE = /^\/projects\/([^/]+)\/?$/;
+
+export function routesToWorkspace(pathname: string): boolean {
+  return FRAME_ROUTE.test(pathname) || PROJECT_ROUTE.test(pathname);
+}
+
 export function navURL(path: string, replace?: boolean): void {
   try {
     if (typeof location !== "undefined" && path === location.pathname) return;

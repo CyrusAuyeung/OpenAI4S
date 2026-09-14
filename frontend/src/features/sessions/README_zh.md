@@ -11,8 +11,8 @@ F-13 仪表盘 / 项目 / 会话。分页与排序是纯函数。窗口契约名
 | [`actions.ts`](actions.ts) | 会话菜单、分享对话框、导入导出、标题、取消。app.js:7411-7793。 |
 | [`api.ts`](api.ts) | `API`、`ApiError`、`api()`、`apiErrorText`。app.js:84-119。 |
 | [`binds.ts`](binds.ts) | 迟绑定，避免 dashboard 与 conversation 互相 import。 |
-| [`boot.ts`](boot.ts) | window 导出、`setLoadSessionsImpl`、工作台点击接线。Shell 的事件立即绑定，但首个视图要等语言分块加载完成（或加载失败、或超过 `I18N_ROUTE_WAIT_MS`）才路由：仪表盘列表、侧栏和打开的会话经 `t()` 渲染，字典到达后不会重绘。 |
-| [`boot.i18n-gate.test.ts`](boot.i18n-gate.test.ts) | 字典加载前事件已绑定，首次路由等待字典；语言分块加载失败或卡住时仍会路由。 |
+| [`boot.ts`](boot.ts) | window 导出、`setLoadSessionsImpl`、工作台点击接线。Shell 的事件立即绑定，但首个视图要等语言分块加载完成（或加载失败、或超过 `I18N_ROUTE_WAIT_MS`）才路由：仪表盘列表、侧栏和打开的会话经 `t()` 渲染，字典到达后不会重绘。若等待超时，这些列表（仪表盘、侧栏、空会话）会在字典真正到达时重绘一次。 |
+| [`boot.i18n-gate.test.ts`](boot.i18n-gate.test.ts) | 字典加载前事件已绑定，首次路由等待字典；语言分块加载失败或卡住时仍会路由；等待超时后才到达的字典会重绘列表（仅此情形）。 |
 | [`chrome.test.ts`](chrome.test.ts) | hint 错误前缀（`错误：` / `Error: `），不新增 i18n 键。 |
 | [`chrome.ts`](chrome.ts) | `hint`、断连横幅、`openMenu` 的 Esc/`role=menu`、键盘激活。 |
 | [`conversation.ts`](conversation.ts) | `newSession`、`routeInitialView`。`openConversation`（F-10）与 `resumeWatch`（F-11）改为 re-export，不再保留本车道的副本。 |
@@ -20,7 +20,7 @@ F-13 仪表盘 / 项目 / 会话。分页与排序是纯函数。窗口契约名
 | [`conversation.newsession.test.ts`](conversation.newsession.test.ts) | `newSession` 在发布新 id 之前先释放上一个对话（取消订阅、Notebook 缓存）；共享路径只在对话真正打开后才 resolve。 |
 | [`actions.cancel.test.ts`](actions.cancel.test.ts) | 取消回执只有在它命名的执行仍是本客户端正在运行的那个时，才切换到「正在停止…」。 |
 | [`dashboard.ts`](dashboard.ts) | 首页列表、项目搜索 / 加载更多 / 重试、示例 CTA 轮询绑视图生命周期、仪表盘轮询。 |
-| [`dom.ts`](dom.ts) | `$` / `el` / `ago` / `navURL` / composer 辅助。`setTitle` 从静态 `data-i18n-val` 标签手中接管 `#conv-title`。 |
+| [`dom.ts`](dom.ts) | `$` / `el` / `ago` / `navURL` / composer 辅助；`FRAME_ROUTE` / `PROJECT_ROUTE` / `routesToWorkspace` 由 `routeInitialView` 与 Shell 首帧共用。`setTitle` 从静态 `data-i18n-val` 标签手中接管 `#conv-title`。 |
 | [`icon.ts`](icon.ts) | 本车道菜单、行和 `[data-icon]` 标记用的 `icon` / `iconEl` / `paintIcons`。图形路径取自共享的 `icons/paths.ts` 表。 |
 | [`index.ts`](index.ts) | 对外 re-export；import 时挂 window 名字。 |
 | [`lane.ts`](lane.ts) | 用 `isReady` 包一层，调用后续车道的 window 名字。 |
