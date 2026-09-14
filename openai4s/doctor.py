@@ -82,8 +82,8 @@ class Check:
         }
 
 
-def _unopened_database(cfg: Any) -> dict[str, Any] | None:
-    """Why doctor must leave the database closed, or None when it may open it.
+def unopened_database(cfg: Any) -> dict[str, Any] | None:
+    """Why a diagnosis must leave the database closed, or None when it may open it.
 
     Opening the Store is not a read. On a database older than this release it
     *is* the upgrade: a backup, the migrations, and the deletion of that backup
@@ -94,12 +94,15 @@ def _unopened_database(cfg: Any) -> dict[str, Any] | None:
     rolled back and reported as `[ok] data` with the error left in connector
     facts. doctor diagnoses; `serve` and `run` upgrade.
 
-    So every probe that would open the Store asks this first. The version is
-    read the read-only way ``serve`` and ``run`` preflight it; only a database
+    So every probe that would open the Store asks this first -- doctor's
+    model and connectors checks, and the schema and secret-store probes of the
+    ``openai4s diagnostics`` bundle, which did the same. The version is read
+    the read-only way ``serve`` and ``run`` preflight it; only a database
     already at this release's schema -- or none yet, which opening creates
     rather than upgrades -- is opened. A version that cannot be read without a
     read-write open (a hot journal) is left closed too: the open that recovers
-    it would also upgrade it if it is older.
+    it would also upgrade it if it is older. A newer schema's refusal is
+    returned under ``error`` for the caller to report.
     """
     db_path = getattr(cfg, "db_path", None)
     if db_path is None:
@@ -119,6 +122,7 @@ def _unopened_database(cfg: Any) -> dict[str, Any] | None:
             "reason": "future_schema",
             "schema_version": e.actual_version,
             "supported_schema_version": e.supported_version,
+            "error": e,
         }
     except Exception:  # noqa: BLE001 - unreadable is the data check's finding
         # A file SQLite cannot read cannot be upgraded by opening it either.
@@ -139,9 +143,9 @@ def _store_for(cfg: Any) -> Any:
 
     Several checks need to see what the UI configured, and none of them may
     fail because the database is missing — a fresh install is exactly when this
-    command gets run. A database `_unopened_database` names is never opened.
+    command gets run. A database `unopened_database` names is never opened.
     """
-    if _unopened_database(cfg) is not None:
+    if unopened_database(cfg) is not None:
         return None
     try:
         from openai4s.store import get_store
@@ -162,7 +166,7 @@ def _model(cfg: Any) -> Check:
     """
     from openai4s.llm.resolve import is_loopback_endpoint, resolve_llm_config
 
-    unopened = _unopened_database(cfg)
+    unopened = unopened_database(cfg)
     llm = resolve_llm_config(cfg.llm, None if unopened else _store_for(cfg))
     try:
         from openai4s.llm.registry import provider_spec
@@ -542,7 +546,7 @@ def _data_dir(cfg: Any) -> Check:
                 remedy,
                 facts,
             )
-    unopened = _unopened_database(cfg)
+    unopened = unopened_database(cfg)
     if unopened is not None and unopened["reason"] == "upgrade_pending":
         version = unopened["schema_version"]
         supported = unopened["supported_schema_version"]
@@ -630,7 +634,7 @@ def _connectors(cfg: Any) -> Check:
     except Exception as e:  # noqa: BLE001
         return Check("connectors", WARN, f"science connectors unavailable: {e}")
 
-    unopened = _unopened_database(cfg)
+    unopened = unopened_database(cfg)
     store_error: str | None = None
     if unopened is not None:
         # The data check reports why; opening it here would be the upgrade.
@@ -811,7 +815,7 @@ _CHECKS: tuple[tuple[str, Callable[[Any], Check]], ...] = (
 
 #: Probes `report()` still runs for the CLI, and that a page-load GET must not.
 #: `model` and `connectors` open the Store too, but only a database already at
-#: this release's schema (`_unopened_database`): no probe upgrades one.
+#: this release's schema (`unopened_database`): no probe upgrades one.
 #: `data` calls `ensure_dirs()` (a write). `isolation` builds a temp sandbox
 #: and runs the kernel self-test (a subprocess). `remote` runs the BYOC
 #: confinement self-test (another subprocess). `runtime` walks environment
@@ -897,4 +901,5 @@ __all__ = [
     "render",
     "report",
     "run_checks",
+    "unopened_database",
 ]

@@ -13,7 +13,8 @@ The first 0.3.0 command that opens the database migrates
 daemon or running `openai4s run` both do this. `openai4s doctor` does not: it
 reads the schema version without opening the database for writing, reports
 the pending upgrade as a warning (so it does not exit 0) and leaves the
-database unchanged.
+database unchanged. `openai4s diagnostics` does not either: its bundle records
+the pending upgrade in `report.json` and leaves the database unchanged.
 The data directory is `~/.openai4s` unless `OPENAI4S_DATA_DIR` names another
 one. A `pip` install, the Linux tarball and the v0.2.0 macOS app all use that
 default.

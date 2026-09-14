@@ -6,7 +6,7 @@
 
 ## 1. 先备份数据库
 
-0.3.0 中第一个打开数据库的命令会把 `<data_dir>/openai4s.db` 从 schema **27** 迁移到 schema **32**。启动守护进程和运行 `openai4s run` 都会触发迁移。`openai4s doctor` 不会：它不以写方式打开数据库，只读取 schema 版本，把待进行的升级报告为警告（因此退出码不为 0），数据库保持不变。数据目录默认是 `~/.openai4s`，除非用 `OPENAI4S_DATA_DIR` 指定了别的位置。`pip` 安装、Linux tarball 和 v0.2.0 macOS 应用都使用这个默认位置。
+0.3.0 中第一个打开数据库的命令会把 `<data_dir>/openai4s.db` 从 schema **27** 迁移到 schema **32**。启动守护进程和运行 `openai4s run` 都会触发迁移。`openai4s doctor` 不会：它不以写方式打开数据库，只读取 schema 版本，把待进行的升级报告为警告（因此退出码不为 0），数据库保持不变。`openai4s diagnostics` 也不会：它生成的诊断包在 `report.json` 里记录待进行的升级，数据库同样保持不变。数据目录默认是 `~/.openai4s`，除非用 `OPENAI4S_DATA_DIR` 指定了别的位置。`pip` 安装、Linux tarball 和 v0.2.0 macOS 应用都使用这个默认位置。
 
 迁移开始前会先把数据库复制为 `openai4s.db.v27.bak`。迁移失败时保留这份副本，**迁移成功后会删除它**。所以一次正常的升级之后，不会留下任何 0.2.x 数据库的副本。
 

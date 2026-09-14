@@ -437,6 +437,10 @@ def test_the_upgrade_guide_says_doctor_does_not_migrate_and_fails_after_a_failed
     assert "`openai4s doctor` fails its data check (exit 2)" in english
     assert "`openai4s doctor` 不会" in chinese
     assert "`openai4s doctor` 的 data 检查会失败（退出码 2）" in chinese
+    # The support bundle is the other diagnosis command, and it does not
+    # migrate either.
+    assert "`openai4s diagnostics` does not either" in english
+    assert "`openai4s diagnostics` 也不会" in chinese
 
 
 def test_an_unwritable_data_directory_is_reported_as_fail(cfg, tmp_path):
