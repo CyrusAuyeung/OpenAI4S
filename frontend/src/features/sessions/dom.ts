@@ -48,6 +48,11 @@ export function navURL(path: string, replace?: boolean): void {
 export function setTitle(name: string | null | undefined): void {
   const ct = $("#conv-title") as HTMLInputElement | null;
   if (!ct) return;
+  // From here on the value is the session's name, not a static label. Left in
+  // place, data-i18n-val let every static repaint (the locale chunks landing,
+  // a language switch) put "Session" back -- and the input commits on blur,
+  // so clicking in and out renamed the session on the server.
+  ct.removeAttribute("data-i18n-val");
   const value = name || t("conv.title.default");
   ct.value = value;
   ct.size = Math.max(6, Math.min(40, value.length + 1));
