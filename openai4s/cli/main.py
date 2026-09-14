@@ -1078,6 +1078,14 @@ def cmd_run(args) -> int:
     from openai4s.host.code_evidence import EVIDENCE_REQUIRED_MODES
     from openai4s.kernel.readiness import EnvironmentReadinessError
 
+    if not str(getattr(args, "task", "") or "").strip():
+        # A blank task is a usage error, refused before any config, store or
+        # provider call: otherwise the model is paid to answer nothing, and
+        # the run can even finalize with exit 0.
+        return _run_refusal(
+            args,
+            {"error": "the task must not be empty or whitespace", "code": "empty_task"},
+        )
     mode = getattr(args, "mode", None)
     allowed_tests = [
         str(item) for item in getattr(args, "allow_test_command", None) or []

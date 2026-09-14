@@ -639,6 +639,43 @@ def test_real_cli_run_that_submits_exits_0_and_closes_its_frame_done(
     assert _only_frame_row(cfg) == ("done", 11, 3)
 
 
+@pytest.mark.parametrize("task", ["", "   ", "\n\t "])
+@pytest.mark.parametrize("as_json", [True, False])
+def test_a_blank_task_is_refused_before_any_config_store_or_model_call(
+    tmp_path, monkeypatch, capsys, task, as_json
+):
+    """`openai4s run ""` used to spend provider calls on nothing: the model
+    answered a capabilities blurb, was nudged, and finalized with exit 0."""
+
+    import openai4s.agent.loop as loop_mod
+    from openai4s.config import Config, LLMConfig
+
+    module = _cli_module()
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+    calls = []
+    monkeypatch.setattr(module, "get_config", lambda: calls.append("config") or cfg)
+    monkeypatch.setattr(
+        loop_mod, "chat", lambda *a, **k: calls.append("chat") or {"content": "hi"}
+    )
+
+    argv = ["run", task] + (["--json"] if as_json else [])
+    status = module.main(argv)
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert calls == []
+    assert not cfg.db_path.exists()
+    if as_json:
+        payload = json.loads(captured.out)
+        assert payload["code"] == "empty_task"
+        assert "task" in payload["error"]
+    else:
+        assert captured.err.startswith("error: ")
+
+
 def test_run_help_documents_the_exit_status_table(capsys):
     with pytest.raises(SystemExit) as stopped:
         _cli_module().main(["run", "--help"])
