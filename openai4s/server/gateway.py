@@ -15845,7 +15845,18 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     return
                 if method == "POST":
                     b = self._body()
-                    pid = b.get("project_id") or "default"
+                    # Required, not defaulted. The old fallback named a
+                    # `default` project nothing ever creates, so a client that
+                    # omitted the field was told "project not found" about a
+                    # project it never named.
+                    pid = b.get("project_id")
+                    if not isinstance(pid, str) or not pid.strip():
+                        raise GatewayError(
+                            400,
+                            "POST /frames requires project_id; create one with "
+                            "POST /projects or list them with GET /projects",
+                            "project_id_required",
+                        )
                     fid = runner.create_session(
                         pid,
                         model=b.get("model"),
