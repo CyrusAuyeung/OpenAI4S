@@ -2,6 +2,7 @@ import { useEffect } from "preact/hooks";
 import { HistoryLoadStatus } from "../../features/messages/components";
 import { finishArtifactsBoot } from "../../features/artifacts/boot";
 import { bindWorkbench } from "../../features/sessions/boot";
+import { ModelSelect } from "./ModelSelect";
 import "./dashboard.css";
 
 export function Shell() {
@@ -324,7 +325,7 @@ export function Shell() {
                         type="button"
                       />
                       <div class="nb-model">
-                        <select id="model-select" data-i18n-title="composer.model" title="模型" />
+                        <ModelSelect />
                         <span class="ic" data-icon="chevron-down" data-icon-size="14" />
                       </div>
                     </div>

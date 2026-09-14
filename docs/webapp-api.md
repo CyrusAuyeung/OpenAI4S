@@ -348,7 +348,7 @@ success response body. Serializer shapes are in §4.
 
 | Method & path | Behavior |
 | --- | --- |
-| `GET /onboarding` | Redacted first-run state: which of the four decisions — model path, the explicit Test, environment/network readiness, first Project — are already satisfied. Derived entirely from stored state, so opening the wizard contacts no provider and cannot be used to probe whether a key works. No credential value appears in the payload. |
+| `GET /onboarding` | Redacted first-run state: the active `provider`/`model`/`base_url`, `has_api_key`, saved `profiles`, the local-model catalogue and environment/network posture, plus one `complete` flag the wizard opens on. Derived entirely from stored state, so opening the wizard contacts no provider and cannot be used to probe whether a key works. No credential value appears in the payload. `complete` is true once `POST /onboarding/complete` (or `openai4s init`) wrote the flag, **or** when the install is evidently past its first run: a stored model configuration (`llm_*` settings, an active or saved non-deleted profile) or any session that has held a message. 0.2.0 had no Web wizard and never wrote the flag from the Web UI, so without that rule an upgraded install reopened behind a first-run modal over its own history. An environment key alone does not count — with no history and no stored configuration that is what a fresh `.env` install looks like. The GET never writes the flag. One consequence is accepted: the wizard saves and activates a profile as soon as a new model is chosen, so a page reload after that choice, part-way through a fresh install's wizard, hydrates as complete and does not reopen the remaining steps. |
 | `POST /onboarding/complete` | Marks first-run finished. In team mode this is admin-only (`403 admin_only`): the state is installation-wide, so a member dismissing it would be deciding for everyone. |
 
 ### Diagnostics
@@ -401,12 +401,34 @@ profile says today.
 - Binding happens on **send only**. Reading a session never binds it, so an
   unbound legacy session stays fully readable — history, artifacts, Notebook.
 - `409 model_revision_unavailable` — the session is pinned to a revision that
-  no longer exists. Resolving to the nearest one would be the silent
-  follow-latest behaviour this replaces, wearing a number.
+  no longer exists, or whose credential no longer resolves. Resolving to the
+  nearest one would be the silent follow-latest behaviour this replaces,
+  wearing a number.
+- `409 model_profile_needs_key` — the profile a send would pin (the active one,
+  or a legacy session's unique match) has no usable credential, so it is not
+  pinned at all. Rebinding would land on the same profile; the answer is a key.
+- **One credential rule** serves readiness, every binding branch and the pinned
+  dispatch: the profile's own key; else keyless for a local endpoint (loopback,
+  private, link-local, `.local` or `host.docker.internal`) — checked before any
+  inherited key, so a cloud credential such as `OPENAI_API_KEY` is never sent
+  over plain http to a local server; a local server that needs a key gets the
+  one saved on its profile; else a key the daemon's environment holds for the
+  *same* provider (`OPENAI4S_<PROVIDER>_API_KEY`, the provider's native
+  variable, or — for the daemon's own provider only — its resolved key and an
+  operator-injected `llm` credential), never another provider's. A brokered key
+  that no longer resolves is refused rather than replaced by an environment key.
 - `409 model_revision_ambiguous` — a legacy session whose recorded model
-  matches more than one profile. Backfill happens only on a **unique** match;
+  matches more than one live profile. Backfill happens only on a **unique** match;
   an ambiguous one stays unbound and asks, because picking either would be a
-  guess presented as a fact.
+  guess presented as a fact. A deleted (tombstoned) profile is never a
+  candidate: it is history, not a configuration to continue under.
+- `POST /frames/{id}/model-binding` answers both `model_revision_unavailable`
+  and `model_revision_ambiguous` by re-pinning the session to the **active**
+  profile — what the client's confirmation prompt says — and never through the
+  legacy backfill. The active profile's credential is checked before the old pin
+  is dropped, so a refused rebind (`409 model_profile_needs_key`) leaves the
+  session's record untouched. With no active profile the session is left
+  unbound and runs on the global configuration.
 - An install with no profiles at all (driven by `.env`) binds nothing and runs.
   An absent profile is an absent binding, not an error.
 
@@ -416,7 +438,7 @@ profile says today.
 | `GET /models/default` | `{"default_model_id"}`. |
 | `POST /models/default` (any non-GET) | Body `{model_id}` → persists as `llm_model` setting → `{"default_model_id"}`. |
 | `GET /model-endpoints/discover?force=1` | Explicitly probes the fixed loopback catalogue for Ollama, LM Studio, vLLM, and llama.cpp, with environment proxies disabled. Returns sanitized profile suggestions plus `mutated_settings:false`; it never accepts a caller-supplied URL and never creates or activates a profile. `force=1` bypasses the short in-process cache. A discovered endpoint is keyless, but vendor capabilities are not inferred: until an explicit override exists it uses conservative Code-as-Action (no inherited vision/tool/schema claim). |
-| `GET /model-profiles` | Returns only user-saved profiles as `{"profiles":[masked…],"active_id","protocols":["chatgpt","claude","ark"]}`; no default endpoints are seeded. A one-time migration removes entries matching the preset identities generated by older releases. Profiles are **masked**: `{id,name,provider,base_url,model,has_api_key}` — the API key is never echoed. |
+| `GET /model-profiles` | Returns only user-saved profiles as `{"profiles":[masked…],"active_id","protocols":["chatgpt","claude","ark"]}`; no default endpoints are seeded. A one-time migration removes entries matching the preset identities generated by older releases. Profiles are **masked**: `{id,name,provider,base_url,model,has_api_key,credential_source,readiness,…}` — the API key is never echoed. `has_api_key` says whether the profile holds a key of its own; `credential_source` says where the credential it is dispatched under comes from (`profile` / `environment` / `local` / `revoked` / `missing`). |
 | `POST /model-profiles` | Body `{name,provider,base_url?,model?,api_key?}` where `provider` selects the `chatgpt` (OpenAI-compatible), `claude` (Anthropic-compatible), or `ark` protocol; missing `name` or an unsupported protocol → `400 {"error":…}`; success → `201` masked profile. |
 | `POST /model-profiles/{id}/activate` | Copies the profile's fields into the live `llm_*` settings, moves it to the front of the list → `{"ok":true,"active_id","has_api_key"}`; unknown id → 404. |
 | `PUT|PATCH /model-profiles/{id}` | Partial edit; `api_key` only overwrites when non-empty; `clear_api_key:true` clears. Editing the active profile also syncs the live settings → masked profile; unknown id → 404. |

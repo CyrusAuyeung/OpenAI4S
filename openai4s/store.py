@@ -3059,6 +3059,9 @@ class Store:
     def message_count(self, root_frame_id: str) -> int:
         return self._frames.message_count(root_frame_id)
 
+    def has_message_history(self) -> bool:
+        return self._frames.has_message_history()
+
     def cell_count(self, root_frame_id: str) -> int:
         return self._frames.cell_count(root_frame_id)
 
