@@ -256,9 +256,12 @@ def _preauthorized_test_commands_note(commands: Sequence[str]) -> str:
     listed = "\n".join(f"- host.bash({command!r})" for command in commands)
     return (
         "Pre-authorized test commands for this run. host.bash is approved for "
-        "exactly these command strings and nothing else, so run each test with "
-        "the string verbatim and cite that same string as the test_evidence "
-        f"command:\n{listed}"
+        "exactly these command strings, so run each test with the string "
+        "verbatim and cite that same string as the test_evidence command:\n"
+        f"{listed}\n"
+        "Any other host.bash command needs an approval this run may not have: "
+        "run everything else (an entry-point smoke, an import check) as Python "
+        "inside the cell, for example by importing it or with subprocess."
     )
 
 

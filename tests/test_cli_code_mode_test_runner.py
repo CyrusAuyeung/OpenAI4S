@@ -455,3 +455,37 @@ def test_a_missing_cell_refusal_says_where_the_id_comes_from():
     )
     assert problems and "never executed" in problems[0]
     assert "[cell id:" in problems[0]
+
+
+def test_the_run_tells_the_model_which_exact_commands_are_preauthorized(
+    monkeypatch, tmp_path
+):
+    from openai4s.agent import loop as loop_mod
+
+    chat = _ScriptedChat(["Stopping."])
+    monkeypatch.setattr(loop_mod, "chat", chat)
+    agent = loop_mod.Agent(
+        cfg=_cfg(tmp_path),
+        max_turns=1,
+        use_skills=False,
+        allow_delegate=False,
+        workspace=str(tmp_path),
+        task_mode="reusable_pipeline",
+        allowed_test_commands=("python -m pytest -q",),
+    )
+    agent.run("Build a reusable pipeline with tests.")
+    request = str(chat.calls[0][1]["content"])
+    assert "host.bash('python -m pytest -q')" in request
+    assert "Any other host.bash command" in request
+
+    plain = _ScriptedChat(["Stopping."])
+    monkeypatch.setattr(loop_mod, "chat", plain)
+    loop_mod.Agent(
+        cfg=_cfg(tmp_path),
+        max_turns=1,
+        use_skills=False,
+        allow_delegate=False,
+        workspace=str(tmp_path),
+        task_mode="reusable_pipeline",
+    ).run("Build a reusable pipeline with tests.")
+    assert "Pre-authorized test commands" not in str(plain.calls[0][1]["content"])
