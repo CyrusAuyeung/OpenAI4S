@@ -474,3 +474,5 @@ Put a focused regression assertion here. Put reusable scripted scenarios, fake p
 - [`browser_editor.mjs`](browser_editor.mjs): Real conditional-editor actions, delayed reads, conflicts, lost saves, and refresh protection; shared by the browser matrix.
 
 - [`browser_files.mjs`](browser_files.mjs): Real Files controls, 125-artifact pagination, combined filters, live refresh, delayed session reads, and optional reuse of a real Ark artifact; shared by the three-engine matrix.
+
+- [`browser_navigation.mjs`](browser_navigation.mjs): Real project navigation, session/folder response reordering, page ownership, and retry after failed or malformed reads; shared by all three engines.

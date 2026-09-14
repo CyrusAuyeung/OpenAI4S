@@ -7,7 +7,8 @@ import { binds } from "./binds";
 import { hint } from "./chrome";
 import { showDashboard, showWorkspace } from "./dashboard";
 import { $ } from "./dom";
-import { loadProjects, loadSessions } from "./load";
+import { loadProjects, loadSessions, loadSessionsForNavigation } from "./load";
+import { beginProjectNavigation, navigation, ownsNavigation } from "./navigation";
 import { adoptCreatedFrame, createUploadSession } from "../chrome/upload";
 import { openConversation } from "../messages/open";
 import { renderProjMenu } from "./projects";
@@ -30,6 +31,7 @@ export async function newSession(projectId?: string): Promise<void> {
   const requestedProject = typeof projectId === "string" ? projectId : undefined;
   const targetProject =
     requestedProject === undefined ? project.value || null : requestedProject || null;
+  const owner = navigation();
   try {
     // Empty-project auto creation, Attach, and the first Send all share this
     // promise. They cannot create sibling frames and split bytes from text.
@@ -38,14 +40,14 @@ export async function newSession(projectId?: string): Promise<void> {
     // collapse two deliberate New-session clicks into one frame.
     const creation = createUploadSession(targetProject, { fresh: !!currentId.value });
     const frameId = await creation;
-    if ((project.value || null) !== targetProject) return;
-    if (currentId.value === frameId) {
+    if (currentId.value === frameId && (project.value || null) === targetProject) {
       // The shared creation adopted its own frame and is still opening it.
       // Callers such as openProject await this function for the conversation,
       // not for the id: resolving here left them racing an open that had not
       // happened yet.
       await creation.opened;
     } else {
+      if (!ownsNavigation(owner) || (project.value || null) !== targetProject) return;
       // Release the previous conversation the way openConversation would,
       // BEFORE the new id is published: openConversation derives "previous"
       // from currentId, and publishing first made it see the new frame as its
@@ -60,7 +62,7 @@ export async function newSession(projectId?: string): Promise<void> {
     }
     if (currentId.value === frameId) $("#composer")?.focus();
   } catch (e) {
-    hint(t("folder.create.failed", apiErrorText(e)), true);
+    if (ownsNavigation(owner)) hint(t("folder.create.failed", apiErrorText(e)), true);
   }
 }
 
@@ -82,10 +84,12 @@ export async function routeInitialView(): Promise<void> {
   if (fm) {
     const pid = decodeURIComponent(fm[1] || "");
     const fid = decodeURIComponent(fm[2] || "");
-    await loadProjects();
-    project.value = pid;
+    const owner = beginProjectNavigation(pid);
     showWorkspace();
-    await loadSessions();
+    await loadProjects();
+    if (!ownsNavigation(owner)) return;
+    await loadSessionsForNavigation(owner);
+    if (!ownsNavigation(owner)) return;
     renderProjMenu();
     await openConversation(fid, pid);
     return;
@@ -93,8 +97,9 @@ export async function routeInitialView(): Promise<void> {
   const pm = path.match(/^\/projects\/([^/]+)\/?$/);
   if (pm) {
     const pid = decodeURIComponent(pm[1] || "");
+    const owner = navigation();
     const { openProject } = await import("./projects");
-    await openProject(pid);
+    if (ownsNavigation(owner)) await openProject(pid);
     return;
   }
   showDashboard();

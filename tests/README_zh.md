@@ -474,3 +474,5 @@ OpenAI4S 的离线正确性门禁。`uv run pytest` 用确定性 fake 跑完这�
 - [`browser_editor.mjs`](browser_editor.mjs): 真实条件编辑动作、延迟读取、冲突、保存响应丢失和刷新保护；由浏览器矩阵复用。
 
 - [`browser_files.mjs`](browser_files.mjs): 真实 Files 控件、125 项分页、组合筛选、实时刷新、延迟会话读取和可选复用真实 Ark 产物；三个引擎矩阵共用。
+
+- [`browser_navigation.mjs`](browser_navigation.mjs): 真实项目导航、会话/文件夹响应乱序、分页归属及失败或畸形读取后的重试，三个引擎共用。

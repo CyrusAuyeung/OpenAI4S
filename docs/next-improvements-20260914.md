@@ -15,8 +15,8 @@ before pushing `next`; the following item waits for that commit's CI.
 | T1 P0-01 Retry and compatibility / 重试与降级 | Completed / 完成 | Shared three-send state, one compatibility POST, structured stream refusal only, cancellation before sends, semantic replay veto. Initial regression run reproduced 11 failures. Independent review passed after five findings were fixed; 144 targeted tests passed. |
 | T2 P0-03 Editing / 编辑保护 | Completed / 完成 | Conditional writes, immutable editor baseline, bounded recoverable drafts and read-only reconciliation; backend, frontend and dist together. |
 | T3 P0-02 Resource bounds / 资源边界 | Completed / 完成 | Shared total deadline, bounded input, backpressure and original usage evidence; independent review passed. |
-| T4 P1-01 Files | Local validation passed; CI pending / 本地验收通过，待 CI | Shared owned filtering, pagination and refresh; 705 frontend tests passed. |
-| T5 P1-03 Navigation / 导航 | Not started / 未开始 | Navigation identity and request generations. |
+| T4 P1-01 Files | Completed / 完成 | Shared owned filtering, pagination and refresh; 705 frontend tests passed. |
+| T5 P1-03 Navigation / 导航 | Awaiting commit/CI / 等待提交及 CI | Local full suite, browser and package gates passed; independent review passed. |
 | T6 P1-02 Provenance and export / 溯源与导出 | Not started / 未开始 | Honest read states, validated responses and fixed version identity. |
 | T7 P2-01 Snapshot design / 快照准备 | Not started / 未开始 | Design and acceptance only; no migration changes. |
 | T8 P2-02 Slow connection design / 慢连接准备 | Not started / 未开始 | Design and acceptance only; no new runtime quotas. |
@@ -324,3 +324,133 @@ T4 首次提交的 Chromium CI 在既有 Stage 1 脚本中失败：脚本假定�
 溯源和旧版本字节，未调用模型或外部网络，临时资源清理完成。
 本次跟进只调整验收脚本与记录，生产代码和 dist 未变；补跑完整受影响浏览器
 验收及 24 项 crosswalk/Stage 测试，保留此前 8,958 项完整套件证据。
+
+
+Final T4 candidate `0f49f82520ff1cc87362d500974f658042bdad02` passed all
+25 applicable jobs (four not applicable jobs skipped) in [CI 34856536266](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34856536266).
+The Chromium job's actual Stage 1 summary confirms 300 successful link/checksum
+checks, delegated producer identity, immutable old bytes, complete cleanup and
+zero live model calls. Its Files matrix also passed. A one-time read-only browser
+inspection during the long tail observed Python 3.12 at 99% and shape capture at
+92%, without visible failures; neither was called complete until the final success.
+The earlier run's remaining jobs were cancelled by the repository's concurrency
+rule when the tested follow-up was pushed; its Chromium failure remains recorded.
+The follow-up wheel's entry bytes are identical to the independently installed
+smoke-tested wheel. Its sdist also excludes both original user document edits.
+
+T4 最终候选的 25 项适用 CI 门禁全部通过，四项不适用作业跳过。Chromium 的
+实际 Stage 1 记录确认 300 次链接与校验和检查、子任务来源、旧版本字节和
+完整清理均通过，未调用真实模型；Files 矩阵也通过。原失败运行及随后因仓库
+并发规则取消的剩余作业如实保留。最终 wheel 内容与独立安装验证的 wheel
+一致，sdist 继续排除原有两份文档修改。T5 在上述最终 CI 成功后开始。
+
+
+## T5 — navigation ownership / 导航归属
+
+The original implementation failed all nine new controlled-order regressions.
+Navigation still uses the existing `_openGen`; session and folder reads now have
+independent request identities and captured project scopes. Success, failure,
+paging, follow-up reads and finally only publish for their current owner. A newer
+same-visit refresh inherits any pending load-more budget and immediately takes
+over a navigation wait, without waiting for the obsolete socket or sending a
+replacement request itself. Failed reads preserve confirmed rows and report a
+GET-only retry; malformed success bodies cannot imply an empty project.
+
+Project opens, switches, deep links and accepted creation continuations check
+navigation identity. Upload destinations remain bound to their accepted frame;
+a new visit cannot borrow an old creation flight or delete its successor's cache.
+The project switcher retains the open frame as before and refreshes that frame's
+Files snapshot for the new navigation generation. Background execution is not
+cancelled. No API, database schema, migration, quota or runtime dependency changes.
+
+原代码在九项新增乱序回归中全部失败。现沿用 `_openGen` 作为导航身份，会话与
+文件夹请求各自记录独立代次及固定项目范围；成功、失败、分页、后续读取和
+finally 均验证归属。同次导航的后台刷新继承正在加载的目标页数，并立即接管
+导航等待，不等待旧连接结束，也不为接管重复发请求。读取失败保留已确认行并
+提供只读重试，畸形 200 不会被当作空项目。项目打开、切换、深链和会话创建
+续执行均核对身份；已接受上传保持原 frame 归属。项目菜单仍保留已打开会话，
+并为新导航代次重新读取 Files 快照；不取消后台任务，不改 API、schema、迁移、
+配额或核心依赖。
+
+Independent read-only review found and closed four additional edges: opening a
+conversation erased folder errors; refresh swallowed in-flight load-more;
+navigation waited for an obsolete request; generic read-error text falsely denied
+an already accepted creation. A subsequent joint review found and closed the
+retained-frame Files snapshot gap. Browser fault assertions were strengthened to
+capture real response bytes before an ABA rename, then wait for client text
+consumption and rendering before checking late-response effects.
+
+独立只读复核发现并关闭了打开会话抹掉文件夹错误、后台刷新吞掉加载更多、
+导航等待旧请求、通用错误提示否认已接受创建四个边界；联合复核还修复了保留
+会话的 Files 快照缺口。浏览器先固定旧响应字节，再改名验证往返导航，并等
+页面实际消费迟到响应和完成渲染后，才断言列表及 loading 未被覆盖。
+
+Current local evidence: 728 frontend tests passed, typecheck/build and i18n
+extraction passed, clean-candidate all-files pre-commit passed. Chromium, Firefox
+and WebKit navigation scenes passed real 100/101 session pages, folder/ABA races,
+Files retention, failed/malformed read retry, zero auto-created frames and zero
+cancel/interrupt requests. Full offline capture and the complete Chromium CI
+browser sequence (including Stage 1), followed by all-engine matrices, are pending.
+
+当前本地证据：728 项前端测试、类型检查、构建、双语提取及干净候选全量
+pre-commit 通过。三引擎导航场景通过真实 100/101 会话分页、文件夹及往返乱序、
+Files 保留、失败/畸形读取重试；零自动创建、零取消/中断请求。
+完整离线捕获及完整 Chromium CI 串（含 Stage 1）与三引擎矩阵仍在进行。
+
+Real Ark navigation evidence belongs to frame `f-ab8ec20a985a` in project
+`proj_c3d91520494d`. The accepted job reported `running=true` before A→B→A;
+one message was submitted, no frame was created and no cancel/interrupt was sent.
+Navigation finished about 31 ms before the first recorded model invocation, so
+this proves navigation during an accepted running job, not navigation during
+visible SSE output. The same job then completed two actual Ark requests:
+
+| Request ID | Seconds | Actual prompt / completion / total tokens |
+| --- | ---: | --- |
+| `021789399282909c175de5f11b223efcc3ac4becea38bcfd240a0` | 9.341 | 15188 / 132 / 15320 |
+| `02178939929226233d44b650730fd07bb29a2150d8432a03a6709` | 8.812 | 15299 / 200 / 15499 |
+
+Both returned HTTP 200 on the configured Ark plan/v3 endpoint; requested model
+`doubao-seed-2.0-pro`, returned `doubao-seed-2-1-turbo-260628`. Raw reasoning counts
+were 71/138 and cache counts 0/15160. Each response was capped at 1024 output tokens.
+The initial harness incorrectly waited for `completed`; the actual status API
+returns `done`. Its failure remains recorded. A GET-only browser reopen verified
+`done`, `running=false` and the stored `NAVIGATION_READY` completion, with zero
+additional model or POST requests. Receipts retain this correction and exact
+per-call usage; no credential is stored in delivery content.
+
+真实 Ark 验证在任务已接受且 `running=true` 时执行 A→B→A：仅一次消息提交，
+零会话创建、零取消/中断。导航返回比首次模型调用早约 31 毫秒，因此只证明
+已接受任务运行阶段的切换，不将其描述为可见流式输出阶段切换。同一任务随后
+完成上表两次真实 Ark 请求，总实际用量 30,819 tokens。原脚本误等 `completed`
+而真实终态为 `done`；保留原失败，并通过零新增模型/POST 的只读重开确认
+任务结束及 `NAVIGATION_READY` 内容。请求、耗时、原始 usage 与修正边界均留存，
+凭据不进入交付内容。
+
+
+Final independent review found no remaining substantive blockers and confirmed
+all 47 closed Crosswalk evidence digests unchanged. The complete local Chromium
+CI sequence passed smoke, admission fault, P1 controls, Stage 1 trusted delivery
+(300 immutable link/checksum checks), and sandbox preview. All three full browser
+matrices passed 39/39. The wheel/sdist passed release verification and an isolated
+`--no-deps`, `-I` install smoke (13 modules, 604 Skills); the sdist contains the
+committed versions of the two original user documents, not their working edits.
+Other gates passed: 38 PR harness scenarios, 212/212 route contracts, 165-directory
+bilingual coverage (1,541 direct assets), secret scan (3,861 sources), and Skills
+installer/package checks (16 tests, 2,283 files / 604 Skills). Full offline capture
+is the remaining local gate before committing this stage.
+
+最终独立复核无剩余实质阻断，47 条已关闭 Crosswalk 的证据摘要未变化。
+完整 Chromium CI 串及三引擎矩阵 39/39 通过；Stage 1 核对 300 个不可变链接
+及校验和。wheel/sdist、独立无依赖安装 smoke、harness、路由契约、双语目录、
+secret scan、Skills 安装及打包门禁均通过；两份原有文档工作区修改未进入包中。
+完整离线捕获仍是本项提交前最后一道本地门禁。
+
+
+Final T5 offline capture passed **8,958 tests, 26 skipped**,
+with zero failures/errors in 825.789 seconds. The complete worker evidence
+assembled 1,167 route/status shapes over all 212 routes with no breaking drift.
+Local acceptance is complete; commit/push and the matching CI are pending.
+
+T5 最终完整离线捕获通过 **8,958 项、跳过 26 项**，
+零失败/错误，耗时 825.789 秒；1,167 种响应形状覆盖全部 212 条路由，
+无破坏性漂移。本地验收已完成，等待提交、推送及对应提交的 CI。

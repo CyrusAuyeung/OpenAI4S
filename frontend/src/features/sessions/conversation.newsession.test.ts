@@ -29,10 +29,10 @@ vi.mock("./dashboard", () => ({ showDashboard: vi.fn(), showWorkspace: vi.fn() }
 vi.mock("./projects", () => ({ renderProjMenu: vi.fn() }));
 vi.mock("./chrome", () => ({ hint: vi.fn() }));
 
-import { currentId, project } from "../../stores/session";
+import { _openGen, currentId, project } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { UPLOAD_STATE } from "../chrome/upload";
-import { newSession } from "./conversation";
+import { newSession, routeInitialView } from "./conversation";
 
 function stubDom(): void {
   const workspace = { classList: { contains: () => false } };
@@ -62,6 +62,8 @@ describe("newSession", () => {
     wsMock.sub.mockClear();
     wsMock.unsub.mockClear();
     notebookMock.resetNotebookCellCaches.mockClear();
+    loadMock.loadProjects.mockReset().mockResolvedValue(undefined);
+    loadMock.loadSessions.mockReset().mockResolvedValue(undefined);
     openMock.openConversation.mockClear();
     openMock.opened.length = 0;
     stubDom();
@@ -93,5 +95,58 @@ describe("newSession", () => {
     expect(openMock.opened).toEqual(["frame_B"]);
     expect(currentId.value).toBe("frame_B");
     expect(wsMock.unsub).not.toHaveBeenCalled();
+  });
+
+  it("a late accepted creation cannot adopt after A→B→A", async () => {
+    currentId.value = "previous"; project.value = "A";
+    let answer!: (value: unknown) => void;
+    vi.stubGlobal("fetch", () => new Promise((resolve) => { answer = resolve; }));
+    const creation = newSession();
+    project.value = "B"; _openGen.value++;
+    project.value = "A"; _openGen.value++;
+    answer({ ok: true, status: 200, text: async () => JSON.stringify({ id: "accepted" }) });
+    await creation;
+    expect(currentId.value).toBe("previous");
+    expect(openMock.openConversation).not.toHaveBeenCalled();
+    expect(wsMock.unsub).not.toHaveBeenCalled();
+  });
+
+  it("adoption parked on directory read cannot reopen after another visit", async () => {
+    currentId.value = "previous"; project.value = "A";
+    let finish!: () => void;
+    loadMock.loadSessions.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const creation = newSession();
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    expect(currentId.value).toBe("frame_B");
+    _openGen.value += 2; // Same project and published frame, different visit.
+    finish(); await creation;
+    expect(openMock.openConversation).not.toHaveBeenCalled();
+  });
+
+  it("shared adoption still awaits opened when the opener advances navigation", async () => {
+    project.value = "A";
+    let finish!: () => void;
+    openMock.openConversation.mockImplementationOnce(async () => {
+      _openGen.value++;
+      await new Promise<void>((resolve) => { finish = resolve; });
+    });
+    let settled = false;
+    const creation = newSession("A").then(() => { settled = true; });
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    expect(openMock.openConversation).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+    finish(); await creation;
+    expect(currentId.value).toBe("frame_B");
+  });
+
+  it("a deep link parked on metadata cannot reopen after Home", async () => {
+    vi.stubGlobal("location", { pathname: "/projects/A/frames/old" });
+    let finish!: () => void;
+    loadMock.loadProjects.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const routing = routeInitialView();
+    _openGen.value++; currentId.value = null;
+    finish(); await routing;
+    expect(openMock.openConversation).not.toHaveBeenCalled();
+    expect(loadMock.loadSessions).not.toHaveBeenCalled();
   });
 });
