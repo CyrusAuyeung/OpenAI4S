@@ -16,7 +16,7 @@
 
 const REQUESTED = (process.argv.find((a) => a.startsWith("--browser=")) || "").split("=")[1];
 const ENGINES = REQUESTED ? [REQUESTED] : ["chromium", "firefox", "webkit"];
-import { authenticate } from "./browser_auth.mjs";
+import { authenticate, redactSecrets } from "./browser_auth.mjs";
 
 const baseUrl = process.env.OPENAI4S_BROWSER_URL || "http://127.0.0.1:8760/";
 
@@ -31,7 +31,10 @@ try {
 
 const results = [];
 
-function record(engine, name, ok, detail = "") {
+function record(engine, name, ok, rawDetail = "") {
+  // Every detail is printed twice (here and in the FAILED summary) to CI
+  // output, and an error message is free text: redact at the one sink.
+  const detail = redactSecrets(rawDetail);
   results.push({ engine, name, ok, detail });
   const mark = ok ? "ok  " : "FAIL";
   console.log(`  [${mark}] ${engine.padEnd(9)} ${name}${detail ? ` — ${detail}` : ""}`);

@@ -663,12 +663,46 @@ async function redactionAndSchemaSelfTest() {
       new URL(onboardingPosts[0]).pathname === "/api/v1/onboarding/complete",
     "authenticate did not attempt the documented first-run skip",
   );
+  // A daemon that rejects the token (another data dir, or another process on
+  // the port) leaves the page on the bootstrap URL, `?token=` and all. The
+  // failure message used to quote that URL, writing a live credential into
+  // CI output from browser_matrix, admission_fault, p1_controls and smoke.
+  const rejectedToken = "captured-rejected-token-0123456789";
+  let rejectedUrl = "";
+  let rejection = null;
+  try {
+    await authenticate(
+      {
+        goto: async (url) => {
+          rejectedUrl = url;
+          return { status: () => 401 };
+        },
+        url: () => rejectedUrl,
+      },
+      "http://127.0.0.1:18999/",
+      rejectedToken,
+    );
+  } catch (error) {
+    rejection = error;
+  }
+  assertion(rejection !== null, "authenticate accepted a bootstrap the daemon rejected");
+  assertion(
+    !String(rejection.message).includes(rejectedToken) &&
+      !String(rejection.stack || "").includes(rejectedToken),
+    "authenticate printed the rejected access token",
+  );
+  assertion(
+    String(rejection.message).includes("did not accept the access token") &&
+      String(rejection.message).includes("401"),
+    "authenticate did not name the rejected bootstrap",
+  );
   const selfTestSummary = makeSummary("self_test");
   selfTestSummary.self_test_checks = {
     redaction: true,
     schema: true,
     disposable_binding: true,
     captured_token_authentication: true,
+    rejected_token_redaction: true,
     production_completion: true,
     pid_liveness_portability: true,
   };

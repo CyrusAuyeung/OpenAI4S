@@ -52,11 +52,22 @@ export async function authenticate(page, baseUrl, explicitToken = undefined) {
   if (!token) return null;
   const url = new URL(baseUrl);
   url.searchParams.set("token", token);
-  await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
+  const response = await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
   const landed = new URL(page.url());
   if (landed.searchParams.has("token")) {
+    // No 303 stripped the credential, so this daemon rejected the token: a
+    // token file from another data dir, or another process on this port. The
+    // landed URL still carries the credential and this message reaches CI
+    // output, so it is never quoted as-is.
+    landed.searchParams.delete("token");
+    const status = typeof response?.status === "function" ? response.status() : "unknown";
     throw new Error(
-      `the token bootstrap did not strip the credential from the URL: ${page.url()}`
+      redactSecrets(
+        `the daemon did not accept the access token (HTTP ${status} at ${landed}); ` +
+          "check that OPENAI4S_DATA_DIR or OPENAI4S_TOKEN belongs to this daemon " +
+          "and that no other process holds its port",
+        token,
+      )
     );
   }
   await skipFirstRunWizard(page, baseUrl);
