@@ -253,8 +253,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_artifacts_project_created
-    ON artifacts(project_id, created_at DESC, artifact_id DESC);
+-- ix_artifacts_project_created is created by migration 32 only. This script is
+-- committed before the migration's backup is taken, so an object added here
+-- lands in an older database ahead of its pre-upgrade copy and survives a
+-- rolled-back upgrade. A new database gets the index from the same step.
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
     version_id    TEXT PRIMARY KEY,
