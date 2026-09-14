@@ -114,6 +114,31 @@ describe("ModelsTab active configuration", () => {
     expect(content(row)).toMatch(/environment/i);
   });
 
+  it("shows a model id shaped like a credential prefix as itself, not [redacted]", async () => {
+    // `ark-code-latest` is the Ark router's default id; the generic credential
+    // regex (`ark-` + 8 chars) turned the row's title into "[redacted]".
+    const tree = await open({
+      "/model-profiles": () => response({ profiles: [], active_id: "", protocols: ["ark"] }),
+      "/config/llm": () => response({ ...LIVE, model: "ark-code-latest" }),
+    });
+    const row = content(tagged(tree, "data-live-model")[0]);
+    expect(row).toContain("ark-code-latest");
+    expect(row).not.toContain("[redacted]");
+  });
+
+  it("still redacts a real key that ended up in the live row", async () => {
+    const pasted = "sk-proj-Q3vT9wXk2LmN8pRz4YbC7dFh1JsA6uEo";
+    const tree = await open({
+      "/model-profiles": () => response({ profiles: [], active_id: "", protocols: ["ark"] }),
+      "/config/llm": () =>
+        response({ ...LIVE, model: pasted, base_url: "https://proxy.example/v1?key=s3cr3tv4lu3" }),
+    });
+    const row = content(tagged(tree, "data-live-model")[0]);
+    expect(row).not.toContain("Q3vT9wXk2LmN8pRz4YbC7dFh1JsA6uEo");
+    expect(row).not.toContain("s3cr3tv4lu3");
+    expect(row).toContain("[redacted]");
+  });
+
   it("keeps the empty state when nothing is configured anywhere", async () => {
     const tree = await open({
       "/model-profiles": () => response({ profiles: [], active_id: "", protocols: ["ark"] }),
