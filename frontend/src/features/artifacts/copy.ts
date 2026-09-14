@@ -7,6 +7,7 @@ import { LANG, tOptional } from "../../i18n/runtime";
  */
 const COPY: Record<"zh" | "en", Record<string, string>> = {
   zh: {
+    "artifact.invalidMetadata": "响应未包含有效的产物元数据，导出已停止。",
     "editor.drafts": "保留的草稿（{0}）",
     "editor.draftIdentity": "会话 {0} · 基线 {1}",
     "editor.discard": "放弃这份草稿",
@@ -59,6 +60,7 @@ const COPY: Record<"zh" | "en", Record<string, string>> = {
     "prov.env.noSnapshot": "此版本未记录生产时环境（上传文件，或早于环境捕获功能生成）；不会用守护进程的实时环境替代。",
   },
   en: {
+    "artifact.invalidMetadata": "The response does not contain valid artifact metadata. Export stopped.",
     "editor.drafts": "Retained drafts ({0})",
     "editor.draftIdentity": "Session {0} · baseline {1}",
     "editor.discard": "Discard this draft",

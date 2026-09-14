@@ -35,3 +35,5 @@ F-13 仪表盘 / 项目 / 会话。分页与排序是纯函数。窗口契约名
 | [`navigation.ts`](navigation.ts) | 导航身份及同步目录清理，与读取请求代次分离。 |
 | [`copy.ts`](copy.ts) | 目录读取失败与重试的双语文案。 |
 | [`load.navigation.test.ts`](load.navigation.test.ts) | 会话/文件夹/分页乱序、往返导航、读取失败及自动打开归属。 |
+
+- [`actions.export.test.ts`](actions.export.test.ts): Markdown 导出要求读取成功及结构有效，并固定会话标题。

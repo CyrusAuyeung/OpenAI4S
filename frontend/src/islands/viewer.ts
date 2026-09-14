@@ -11,6 +11,8 @@ import { _modalMode, provMode } from "../stores/ui";
 import { isReady } from "../compat/stub";
 import { api, apiErrorText, bytes } from "../features/artifacts/api";
 import { artifactMetadataTarget, artifactMetadataUrl, artifactTabKey, artUrl, syncArtifactVersion } from "../features/artifacts/cache";
+import { validateArtifactVersions } from "../features/artifacts/validation";
+import { validateLineage } from "../features/execution/validation";
 import { filesT } from "../features/artifacts/copy";
 import { artifactDeepLinkHref, versionResolveMessage } from "../features/artifacts/deeplink";
 import { loadArtifacts } from "../features/artifacts/load";
@@ -160,26 +162,26 @@ async function setArtPriority(a: ArtifactRow, p: number, closeAfter?: boolean): 
 
 async function exportMetadata(a: ArtifactRow): Promise<void> {
   try {
+    const target = artifactMetadataTarget({ ...a });
     const [versions, lineage] = await Promise.all([
-      api(`/artifacts/${a.id}/versions`).catch(() => ({ versions: [] })),
-      api(artifactMetadataUrl(a, "lineage")).catch((error: unknown) => { if (artifactMetadataTarget(a)._exactVersion) throw error; return {}; }),
+      api(`/artifacts/${encodeURIComponent(target.id)}/versions`).then((value) => validateArtifactVersions(value, target.id)),
+      api(artifactMetadataUrl(target, "lineage")).then((value) => validateLineage(value, target)),
     ]);
-    const verRec = versions && typeof versions === "object" ? (versions as { versions?: unknown }) : {};
     const meta = {
-      id: a.id,
-      version_id: a._exactVersion ? a.version_id : null,
-      filename: a.filename,
-      content_type: a.content_type,
-      size_bytes: a.size_bytes,
-      priority: a.priority || 0,
-      versions: verRec.versions || [],
+      id: target.id,
+      version_id: target._exactVersion ? target.version_id : null,
+      filename: target.filename,
+      content_type: target.content_type,
+      size_bytes: target.size_bytes,
+      priority: target.priority || 0,
+      versions,
       lineage,
     };
     const blob = new Blob([JSON.stringify(meta, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = (a.filename || "artifact") + ".metadata.json";
+    link.download = (target.filename || "artifact") + ".metadata.json";
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
     hint(translate("artifact.metadataExported"));

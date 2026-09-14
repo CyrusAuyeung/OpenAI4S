@@ -39,3 +39,5 @@ F-17 artifacts + Files (M-03). Version cache, Files search/filter/pagination/dee
 | [`editor.ts`](editor.ts) | Version-bound drafts, bounded UTF-8 storage, checksum reads and conditional saves. |
 | [`editor-view.ts`](editor-view.ts) | Editor controls and read-only conflict/unknown-result recovery. |
 | [`editor.test.ts`](editor.test.ts) | Load, version, save, reconciliation and draft capacity contracts. |
+
+- [`validation.ts`](validation.ts): Validate every required metadata-export version and artifact row without dropping malformed records.

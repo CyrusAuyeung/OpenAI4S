@@ -583,3 +583,112 @@ failure summary; a fresh complete run will establish the final capture.
 声明，只重录该条证据摘要，其余 46 条已关闭记录不变。完整 Chromium 串及
 三引擎矩阵 39/39 通过；交付包资源与独立无依赖安装 smoke 通过。先前离线
 运行早于摘要重录启动，仍等待最终失败详情；将重新完整运行以建立最终捕获。
+
+
+### T5 final acceptance / 最终验收
+
+Final commit `2f53bf9c7a2d69bc54f2cdd85c8b06b4a911bb61` is synchronized
+with `origin/next`. CI [34869797915](https://github.com/PKU-YuanGroup/OpenAI4S/actions/runs/34869797915)
+passed all 25 applicable jobs; four unrelated jobs were skipped. The fresh
+complete offline run passed 8958 tests with 26 skips; capture checked 1167
+shapes across 212/212 routes. The earlier pre-crosswalk-update run had exactly
+one failure (stale evidence digest), 8957 passes and 26 skips. Original user
+document hashes remain unchanged. Independent review checked the final SHA's
+Chromium, Linux interrupt/full sandbox, container and installed-wheel job logs.
+
+最终提交与远端 next 同步；CI 25 个适用作业通过，4 个不适用作业跳过。
+重新完整离线运行 8958 通过、26 跳过，捕获核对 1167 形状及 212/212 路由。
+摘要重录前的运行仅一项旧摘要失败，其余 8957 通过、26 跳过。原有两份用户
+文档字节保持不变。独立复核核对了同一 SHA 的 Chromium、Linux 两类沙箱、
+容器和 wheel 安装作业证据。
+
+### T6 — provenance and lightweight exports / 溯源与轻量导出
+
+Local acceptance complete; delivery CI pending. Reproductions exposed malformed/failed lineage reads normalized
+to empty, a false reproduction-generation label, swallowed required export
+reads and mixed version/name/size metadata when the head changed during export.
+Network validators now preserve legal historical nullable values and extension
+fields while rejecting malformed core records. Explicit read errors have a
+read-only retry; missing recorded evidence has separate copy. Export targets
+and session titles are frozen before reads, and every required read must pass
+before a Blob/download/success message is created. Full session package export
+is unchanged. Source identity uses the artifact's owning session and actual
+producing Cell ID; delegated records retain their own identity.
+
+本地验收完成，等待交付 CI。已复现失败／畸形读取被伪装成空记录、虚假的复现代码生成提示、
+导出吞掉必需读取失败，以及导出期间版本、文件名和大小混用。网络校验保留
+合法历史空值和扩展字段，拒绝畸形核心记录；错误提供只读重试，无记录单独
+说明。导出前固定目标和标题，全部必需读取成功后才创建 Blob、下载和成功
+提示。完整会话包导出不变。来源结合产物所属会话与实际生产 Cell ID；子任务
+保留自身身份。本地浏览器、全量门禁和只读复核已完成，等待提交与 CI。
+
+
+Independent read-only review found and closed duplicate reads in the real
+synchronous Viewer composition, delegated-code misstatement, invalidation by a
+sidebar-only project switch, missing/invalid environment source, lost stable
+ownership in exact-version resolution and existing tabs, and historical null
+metadata incorrectly filled from the latest head. Exact history now retains its
+unknown fields; bare deep links do not invent session ownership. Recorded Cell
+links require the actual owning session and producing ID in the Notebook, then
+locate that DOM identity, including folded revisions. Missing source in this
+response does not imply a recorded child Cell never existed. Same-byte capture
+observations remain intact.
+
+独立只读复核关闭了真实同步 Viewer 组合的重复读取、子任务代码误述、仅侧栏
+切换使可见读取失效、环境来源缺失／畸形、固定版本解析和旧标签丢失所属信息，
+以及历史空值借用最新头事实的问题。历史未知字段保持未知，裸深链不虚构所属
+会话；Cell 链接要求实际所属会话及 Notebook 中的生产 ID，再按该 DOM 身份
+定位，包含折叠的旧修订。响应未包含源码不代表已记录的子 Cell 不存在；相同
+字节的后续捕获记录保持不变。
+
+Local frozen-candidate evidence:
+
+- Offline pytest: **8958 passed, 26 skipped, zero failures/errors**, 834.034 s.
+  The same full run captured **1167 shapes / 212 of 212 routes**, with no breaking
+  drift. Response contract check passed independently.
+- Frontend: **800 tests / 78 files**, typechecks and production build passed;
+  committed source and dist agree. All-file pre-commit, mypy, directory coverage
+  (165 directories / 1547 direct files), source secret scan (3867 files), harness
+  (38 scenarios), Skill selftest and npm pack check (604 Skills) passed.
+- Complete Chromium smoke, admission-fault, P1 controls, Stage 1 and sandbox
+  preview passed. Chromium, Firefox and WebKit matrices passed **42/42 checks**.
+  New controls prove one GET per click/retry, no partial downloads after required
+  read failures or malformed success, retained-frame reads after sidebar changes,
+  precise producer navigation, and fixed export metadata while real WS events
+  advance the head. Unit tests cover ABA and both success/failure delivery orders.
+- The real Ark-produced `a-e173b9ee7826` was reused at `v-37083588ebbd` in all
+  three engines, with no new model requests. Downloaded metadata matches both
+  server lineage and version-list reads byte-for-value; JSON SHA-256 is
+  `c425e9386f3f7a2c648d0586eb516dde471dcbd95227c4401298a086ec812280`,
+  Markdown SHA-256 is
+  `de5123c83e722cdd48b773c4714c2a61db8ece9621a4360809c60314142dd545`.
+  Original live request/model/usage are recorded under T2; this reuse does not
+  constitute a new model or protocol verification.
+- Clean-candidate wheel/sdist resource verification and an isolated no-dependency
+  wheel install smoke passed (13 modules, 604 Skills). Original user documents
+  are excluded from the candidate and retain their original hashes.
+
+本地冻结候选：离线 8958 通过、26 跳过，834.034 秒，零失败／错误；同次运行
+捕获 1167 形状、覆盖 212/212 路由，契约另行通过。前端 800 项通过，类型检查、
+构建与 dist 一致；全量 pre-commit/mypy、双语目录、密钥扫描、38 项 harness
+和 Skills 包检查通过。完整 Chromium 深度走查及三引擎矩阵 42/42 通过；新场景
+覆盖一次操作一次读取、失败不下载、侧栏切换、精确生产者，以及真实 head
+前进期间的固定导出。ABA 和成功／失败乱序主要由单测覆盖。三引擎复用 T2
+真实 Ark 产物导出，两个文件的摘要均一致；未新增模型请求，原请求及 usage
+沿用 T2 证据。干净候选发行资产和独立无依赖安装 smoke 通过，原用户文档未变。
+
+Early failed attempts remain in the private evidence directory: the initial
+reproduction tests; two browser failures exposing lost owner metadata followed
+by a fixture that incorrectly expected producer ID in the ordinary artifact list
+(corrected to the real lineage DTO); a default-sandbox run with 10 local-socket
+setup errors and an npm cache write denial (both corresponding final checks
+passed with their required local permissions). An unstaged deleted old dist name
+also confused the directory inventory; the correctly staged clean candidate
+passed. These are not represented as successful tests. Delivery CI and final SHA
+are recorded in the following stage or the final delivery receipt.
+
+早期失败记录保留在本地证据目录：初始复现、所属信息丢失的浏览器失败，以及
+随后错误预期普通列表含生产 ID 的夹具（改用真实 lineage DTO）；默认沙箱下
+10 项本地端口初始化错误和 npm 缓存写入受限，对应最终检查均已按所需权限
+通过。未暂存的旧 dist 删除项也曾影响目录清单，正确暂存的干净候选已通过。
+这些失败不算成功证据；最终 SHA 与 CI 结果写入下一阶段或最终交付记录。
