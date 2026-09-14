@@ -204,7 +204,7 @@
       "tests": "tests/test_producer_output_budgets.py,tests/test_workspace_streaming_budgets.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "020fd1b58b536b66fac30623caf19609c3916e2826c379a21b82706151ab2fb2"
+      "evidence_digest": "afd518e4ca3d6029fd4ff9acc79749bf40a8f92cf0e7d220048ef0f4e3570ba7"
     },
     {
       "source": "R2",
@@ -383,7 +383,7 @@
       "tests": "tests/test_producer_output_budgets.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "11d513a8c00d5b22e574fe9e25f51c268756ba9ed2988d34b0a70dde35ea3ae2"
+      "evidence_digest": "b9dcd59d0446d14a5f5222fe20102b54cff48d4ade6a9a195c62739173b4e282"
     },
     {
       "source": "R4",
@@ -773,7 +773,7 @@
       "tests": "tests/test_notebook_export.py,tests/test_gateway_session_domain_routes.py",
       "browser_evidence": "tests/browser_smoke.mjs",
       "external_evidence": "",
-      "evidence_digest": "8d9c4b8a2bc4fbc93d4af853292cc3a882144c9224f3fee1223f3d8569cce37d"
+      "evidence_digest": "c775ebc12a41c3f5159af0faf2bc0cf92485e43dc516f6120233b4c77f0d10aa"
     },
     {
       "source": "R7",

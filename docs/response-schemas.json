@@ -9333,6 +9333,9 @@
     "GET /files [ok]": {
       "schema": {
         "properties": {
+          "configured": {
+            "type": "boolean"
+          },
           "entries": {
             "items": {
               "properties": {
@@ -14540,6 +14543,25 @@
                   },
                   "type": "array"
                 },
+                "cancelled": {
+                  "properties": {
+                    "execution_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "execution_id",
+                    "reason",
+                    "request_id"
+                  ],
+                  "type": "object"
+                },
                 "content": {
                   "type": "string"
                 },
@@ -15616,9 +15638,6 @@
                 "type": "string"
               },
               "missing": {
-                "items": {
-                  "type": "string"
-                },
                 "type": "array"
               },
               "phase": {
@@ -15920,6 +15939,9 @@
                 "capability_receipt": {
                   "type": "null"
                 },
+                "credential_source": {
+                  "type": "string"
+                },
                 "has_api_key": {
                   "type": "boolean"
                 },
@@ -15961,6 +15983,7 @@
               "required": [
                 "base_url",
                 "capability_receipt",
+                "credential_source",
                 "has_api_key",
                 "id",
                 "model",
@@ -16503,6 +16526,9 @@
                 "capability_receipt": {
                   "type": "null"
                 },
+                "credential_source": {
+                  "type": "string"
+                },
                 "has_api_key": {
                   "type": "boolean"
                 },
@@ -16544,6 +16570,7 @@
               "required": [
                 "base_url",
                 "capability_receipt",
+                "credential_source",
                 "has_api_key",
                 "id",
                 "model",
@@ -29150,7 +29177,10 @@
             "type": "integer"
           },
           "model": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "name": {
             "type": "null"
@@ -29834,6 +29864,9 @@
                       "interpreter": {
                         "type": "string"
                       },
+                      "kernel_mode": {
+                        "type": "string"
+                      },
                       "key": {
                         "items": {
                           "type": [
@@ -29861,6 +29894,7 @@
                       "environment_name",
                       "environment_root",
                       "interpreter",
+                      "kernel_mode",
                       "key",
                       "runtime",
                       "sandbox",
@@ -36318,6 +36352,9 @@
           "capability_receipt": {
             "type": "null"
           },
+          "credential_source": {
+            "type": "string"
+          },
           "has_api_key": {
             "type": "boolean"
           },
@@ -36359,6 +36396,7 @@
         "required": [
           "base_url",
           "capability_receipt",
+          "credential_source",
           "has_api_key",
           "id",
           "model",
@@ -38576,9 +38614,6 @@
           "ok": {
             "type": "boolean"
           },
-          "path": {
-            "type": "string"
-          },
           "problems": {
             "items": {
               "type": "string"
@@ -38597,7 +38632,6 @@
           "files_verified",
           "format",
           "ok",
-          "path",
           "problems",
           "schema_version",
           "verifies"
