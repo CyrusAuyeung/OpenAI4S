@@ -347,7 +347,7 @@ def test_connection_error_is_retryable(monkeypatch):
     def urlopen(*a, **k):
         state.append(1)
         if len(state) == 1:
-            raise urllib.error.URLError("connection refused")
+            raise urllib.error.URLError(ConnectionRefusedError("connection refused"))
         return _Resp(b'{"ok":1}')
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
@@ -405,7 +405,7 @@ def test_sse_failure_after_committed_output_is_never_retried(monkeypatch):
     assert seen == [{"delta": "committed"}]
 
 
-def test_sse_read_failure_before_any_event_is_retryable(monkeypatch):
+def test_sse_read_failure_before_any_event_is_not_replayed(monkeypatch):
     class _Stream:
         def __iter__(self):
             raise ConnectionResetError("died before any event")
@@ -424,8 +424,11 @@ def test_sse_read_failure_before_any_event_is_retryable(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
     seen = []
-    post_sse("https://x.invalid", {}, {}, 5, seen.append, sleep=_Recorder())
-    assert seen == [{"delta": "ok"}]
+    with pytest.raises(TransportError) as raised:
+        post_sse("https://x.invalid", {}, {}, 5, seen.append, sleep=_Recorder())
+    assert not raised.value.retryable
+    assert len(calls) == 1
+    assert seen == []
 
 
 # --------------------------------------------------------------------------
@@ -580,7 +583,7 @@ def test_sse_drains_a_cancelled_stream_when_the_probe_says_so(monkeypatch):
         abort_stream = False
 
         def __call__(self):
-            return True  # Stop landed before the first event
+            return bool(seen)  # Stop lands after the first event, not before send
 
     seen = []
     post_sse(

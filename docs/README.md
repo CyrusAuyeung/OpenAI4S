@@ -50,6 +50,7 @@ and the internal plans in this directory are not published by that site.
 | `v020-linux-release-prep_zh.md` | Chinese counterpart of the v0.2.0 Linux desktop release-prep packet. |
 | `v03-decisions.md` | The owner-signed answers for v0.3, frozen 2026-07-26, including the one that supersedes v0.2's PR-granularity choice and the acceptance criterion this version is measured against. It also names, in one table, everything that cannot be verified from a working copy — GitHub Actions execution, a Developer ID certificate, notarization, PyPI OIDC, a live browser, Linux CI — so their absence from the verified column is deliberate rather than an oversight. |
 | `next-version-progress.md` | The v0.3 per-item factual record: what landed, in which commit, and — the load-bearing column — what was neutered to prove each new test can fail. A test that cannot fail measures nothing, and a class with the right name is not completion evidence. Items whose proving run needs a machine this repository does not have are marked `Implemented but unverified` with the missing run named. |
+| `next-improvements-20260914.md` | Sequential T0–T9 implementation ledger, validation status and real Ark request/usage evidence for the approved next-branch improvements. |
 | `webapp.md` | Web workbench concepts, projections, status, and operator-facing behavior. |
 | `webshare.md` | Web sharing: the read-only snapshot + outbound relay tunnel, deployment, and the trust model. |
 

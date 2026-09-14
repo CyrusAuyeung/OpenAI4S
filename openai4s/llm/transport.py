@@ -27,6 +27,7 @@ import random
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from .models import (
@@ -80,6 +81,66 @@ REQUEST_BURST_BASE_BACKOFF = 4.0
 # Ceiling on time spent sleeping across a call. A provider may advertise a
 # 300s Retry-After; honouring that inside one turn would look like a hang.
 DEFAULT_RETRY_BUDGET = 30.0
+
+
+@dataclass
+class CallState:
+    """One logical chat's send, backoff and cancellation budget.
+
+    The JSON compatibility attempt shares this state with the original SSE
+    request. It is never stored on a reusable config or cancellation probe.
+    """
+
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    retry_budget: float = DEFAULT_RETRY_BUDGET
+    should_cancel: Any = None
+    attempts: int = 0
+    spent: float = 0.0
+    last_error: TransportError | None = None
+
+    def check_send(self, provider: str | None, operation: str) -> None:
+        if self.should_cancel is not None and self.should_cancel():
+            raise self.failure("cancelled before send", provider, operation)
+        if self.attempts >= self.max_attempts:
+            if self.last_error is not None:
+                raise self.last_error
+            raise self.failure("send budget exhausted", provider, operation)
+
+    def failure(
+        self, reason: str, provider: str | None, operation: str
+    ) -> TransportError:
+        err = self.last_error
+        return TransportError(
+            f"{err or 'LLM request'} ({reason})",
+            provider=err.provider if err is not None else provider,
+            operation=err.operation if err is not None else operation,
+            status=err.status if err is not None else None,
+            error_code=err.error_code if err is not None else None,
+            headers=err.headers if err is not None else None,
+            request_id=err.request_id if err is not None else None,
+            retry_after=err.retry_after if err is not None else None,
+            output_committed=err.output_committed if err is not None else False,
+            body=err.body if err is not None else None,
+            retryable=False,
+        )
+
+
+def streaming_refused(error: TransportError) -> bool:
+    """Only an explicit structured refusal of `stream` permits compatibility."""
+    if error.status not in (400, 422) or error.retryable or error.output_committed:
+        return False
+    try:
+        body = json.loads(error.body or "")
+    except (ValueError, TypeError):
+        body = None
+    detail = body.get("error", body) if isinstance(body, dict) else None
+    if isinstance(detail, dict) and "param" in detail and detail["param"] != "stream":
+        return False
+    if error.error_code == "streaming_not_supported":
+        return True
+    if error.error_code not in ("unsupported_parameter", "unknown_parameter"):
+        return False
+    return isinstance(detail, dict) and detail.get("param") == "stream"
 
 
 def _header_dict(e: urllib.error.HTTPError) -> dict[str, str]:
@@ -146,9 +207,9 @@ def _url_error(
         f"LLM connection error: {e.reason}",
         provider=provider,
         operation=operation,
-        # Never reached the server, so nothing was committed and a replay is
-        # safe. This is the one case where "no response" implies retryable.
-        retryable=True,
+        # URLError can also wrap a timeout/reset after the POST was written.
+        # Only a structured connection refusal proves no request reached it.
+        retryable=isinstance(e.reason, ConnectionRefusedError),
     )
 
 
@@ -208,6 +269,7 @@ def _retry_loop(
     retry_budget: float,
     should_cancel=None,
     sleep=None,
+    call_state: CallState | None = None,
 ):  # noqa: C901
     # Resolved per call, not captured as a default: a default argument is
     # evaluated once at def time, which would pin the original time.sleep and
@@ -219,23 +281,29 @@ def _retry_loop(
     # turn parked for the full five minutes with nothing able to interrupt it —
     # and the only test for it cancelled *before* the wait began, which is the
     # case that already worked.
-    spent = 0.0
+    state = call_state or CallState(
+        max_attempts=max_attempts,
+        retry_budget=retry_budget,
+        should_cancel=should_cancel,
+    )
     for attempt in range(1, max_attempts + 1):
+        state.check_send(provider, operation)
+        state.attempts += 1
         try:
             return attempt_fn()
         except TransportError as err:
-            last = err
+            state.last_error = err
             if not err.retryable or err.output_committed:
                 raise
-            if attempt >= max_attempts:
+            if attempt >= max_attempts or state.attempts >= state.max_attempts:
                 raise
-            delay = _sleep_for(err, attempt, base_backoff, max_backoff)
-            if spent + delay > retry_budget:
+            delay = _sleep_for(err, state.attempts, base_backoff, max_backoff)
+            if state.spent + delay > min(retry_budget, state.retry_budget):
                 # Report the real reason rather than silently giving up: a
                 # 300s Retry-After is a legitimate answer that this call is
                 # simply not allowed to wait out.
                 raise TransportError(
-                    f"{last} (retry budget of {retry_budget}s exhausted; the "
+                    f"{err} (retry budget of {min(retry_budget, state.retry_budget)}s exhausted; the "
                     f"provider asked for {delay:.1f}s more)",
                     provider=provider,
                     operation=operation,
@@ -245,26 +313,14 @@ def _retry_loop(
                     request_id=err.request_id,
                     retryable=True,
                     retry_after=err.retry_after,
+                    output_committed=err.output_committed,
                     body=err.body,
                 ) from err
-            if should_cancel is not None and should_cancel():
-                raise TransportError(
-                    f"{last} (cancelled before retry)",
-                    provider=provider,
-                    operation=operation,
-                    status=err.status,
-                    retryable=False,
+            if _wait(delay, do_sleep, state.should_cancel):
+                raise state.failure(
+                    "cancelled before retry", provider, operation
                 ) from err
-            _wait(delay, do_sleep, should_cancel)
-            spent += delay
-            if should_cancel is not None and should_cancel():
-                raise TransportError(
-                    f"{last} (cancelled before retry)",
-                    provider=provider,
-                    operation=operation,
-                    status=err.status,
-                    retryable=False,
-                ) from err
+            state.spent += delay
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -279,6 +335,7 @@ def post_json(
     retry_budget: float = DEFAULT_RETRY_BUDGET,
     should_cancel=None,
     sleep=None,
+    call_state: CallState | None = None,
 ) -> dict:
     """POST JSON and decode the whole response.
 
@@ -307,6 +364,7 @@ def post_json(
         retry_budget=retry_budget,
         should_cancel=should_cancel,
         sleep=sleep,
+        call_state=call_state,
     )
 
 
@@ -328,6 +386,7 @@ def post_sse(
     retry_budget: float = DEFAULT_RETRY_BUDGET,
     should_cancel=None,
     sleep=None,
+    call_state: CallState | None = None,
 ) -> None:
     """POST and decode a Server-Sent-Events stream.
 
@@ -362,6 +421,7 @@ def post_sse(
         retry_budget=retry_budget,
         should_cancel=should_cancel,
         sleep=sleep,
+        call_state=call_state,
     )
 
 
@@ -433,16 +493,31 @@ def _consume(resp, on_event, *, provider: str | None, should_cancel=None) -> Non
                     value = line[5:]
                     data_lines.append(value[1:] if value.startswith(" ") else value)
             dispatch()
+        except TransportError as err:
+            # An HTTP-200 SSE response may carry the failure in an event.
+            # Preserve its HTTP evidence just as for an HTTPError response,
+            # without replacing fields explicitly supplied by the adapter.
+            response_headers = getattr(resp, "headers", None)
+            if response_headers is not None:
+                err.headers = {
+                    **{k.lower(): v for k, v in response_headers.items()},
+                    **err.headers,
+                }
+                if err.request_id is None:
+                    err.request_id = _request_id(err.headers)
+                if err.retry_after is None:
+                    err.retry_after = parse_retry_after(err.headers.get("retry-after"))
+            raise
         except LLMError:
             raise
         except Exception as e:  # noqa: BLE001 - normalize transport read failures
-            # A mid-stream read failure after events were delivered must not be
-            # replayed: the caller already saw partial output.
+            # A read failure cannot prove the provider did not receive the
+            # POST, even when no event has arrived. Never transparently replay.
             raise TransportError(
                 f"LLM event stream read error: {e}",
                 provider=provider,
                 operation="post_sse",
-                retryable=not committed,
+                retryable=False,
                 output_committed=committed,
             ) from e
     finally:

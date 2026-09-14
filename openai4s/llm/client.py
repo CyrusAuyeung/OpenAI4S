@@ -17,7 +17,7 @@ from .models import LLMError
 from .providers import _WIRE_DISPATCH
 from .registry import PROVIDERS, provider_spec
 from .tooling import _canonical_tool_specs
-from .transport import bind_call_context
+from .transport import CallState, bind_call_context
 
 
 def supports_vision(provider: str) -> bool:
@@ -75,6 +75,7 @@ def chat(
     should_cancel=None,
     post_json,
     post_sse,
+    call_state: CallState | None = None,
 ) -> dict[str, Any]:
     """Route one normalized request through the configured provider adapter."""
     spec = provider_spec(cfg.provider)
@@ -118,12 +119,12 @@ def chat(
         effective_parallel = capabilities.parallel_tool_calls
     if not canonical_tools:
         effective_parallel = None
-    bound_json = bind_call_context(
-        post_json, provider=cfg.provider, should_cancel=should_cancel
+    state = call_state or CallState(should_cancel=should_cancel)
+    context = dict(
+        provider=cfg.provider, should_cancel=state.should_cancel, call_state=state
     )
-    bound_sse = bind_call_context(
-        post_sse, provider=cfg.provider, should_cancel=should_cancel
-    )
+    bound_json = bind_call_context(post_json, **context)
+    bound_sse = bind_call_context(post_sse, **context)
     # `responses` is SSE-only; `gemini` has no streaming adapter. The two wires
     # that stream *and* keep a blocking fallback need both transports.
     transport_args = {"post_sse": bound_sse}
