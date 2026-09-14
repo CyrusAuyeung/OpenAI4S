@@ -205,3 +205,64 @@ def test_catalog_candidates_are_listed_without_opening_sockets():
     assert payload["background_refresh"] is False
     assert payload["mutated_settings"] is False
     assert len(payload["endpoints"]) == len(service.endpoints)
+
+
+# --- an upgraded install is not a first run ---------------------------------
+#
+# The wizard decides whether to open from one stored flag, `onboarding_complete`.
+# 0.2.0 had the same flag but only `openai4s init` wrote it: its Web UI had no
+# wizard and no `/onboarding` route. So every 0.2.0 install configured through
+# `.env` or Customize -> Models -- and used for real work -- reopened after the
+# upgrade behind a modal saying "No profile yet". The flag is not the only
+# evidence of an install that is already set up; the database it opens is.
+
+
+def _first_boot(tmp_path):
+    """A daemon's first boot on this data dir, as `build_app_server` seeds it."""
+    runner, call = _api(tmp_path)
+    gateway_mod._seed_example_project(runner.cfg)
+    gateway_mod._seed_example_connector(runner.cfg)
+    return runner, call
+
+
+def test_a_fresh_install_still_gets_the_first_run_wizard(tmp_path):
+    """The negative control. The suite's fake provider key is in the
+    environment here, exactly as an `.env` key is on a real fresh install: an
+    environment key with no history and no stored configuration is what a
+    first run looks like, so it must not count."""
+    runner, call = _first_boot(tmp_path)
+    body = call("GET", "/onboarding")["body"]
+    assert body["complete"] is False, body
+    assert runner.store.get_setting("onboarding_complete") in (None, "")
+
+
+def test_an_upgraded_install_with_session_history_is_not_a_first_run(tmp_path):
+    """0.2.0, configured through the environment, used through the Web UI."""
+    runner, call = _first_boot(tmp_path)
+    project = runner.store.create_project(name="Work", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    frame = runner.store.new_frame(kind="turn", project_id=project, status="done")
+    runner.store.add_message(root_frame_id=frame, role="user", content="17 * 23?")
+    runner.store.add_message(root_frame_id=frame, role="assistant", content="391")
+    assert runner.store.get_setting("onboarding_complete") in (None, "")
+
+    body = call("GET", "/onboarding")["body"]
+    assert body["complete"] is True, body
+    # Answered from what is there. A GET that wrote the flag would be a read
+    # path mutating instance configuration, which team mode reserves to admins.
+    assert runner.store.get_setting("onboarding_complete") in (None, "")
+
+
+def test_an_upgraded_install_configured_in_customize_is_not_a_first_run(tmp_path):
+    """0.2.0, configured through Customize -> Models, before any session ran."""
+    runner, call = _first_boot(tmp_path)
+    saved = call(
+        "PUT",
+        "/config/llm",
+        {"provider": "chatgpt", "model": "gpt-4o", "api_key": "sk-configured-in-ui"},
+    )
+    assert saved["code"] == 200, saved
+
+    body = call("GET", "/onboarding")["body"]
+    assert body["complete"] is True, body

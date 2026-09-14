@@ -348,7 +348,7 @@ success response body. Serializer shapes are in §4.
 
 | Method & path | Behavior |
 | --- | --- |
-| `GET /onboarding` | Redacted first-run state: which of the four decisions — model path, the explicit Test, environment/network readiness, first Project — are already satisfied. Derived entirely from stored state, so opening the wizard contacts no provider and cannot be used to probe whether a key works. No credential value appears in the payload. |
+| `GET /onboarding` | Redacted first-run state: the active `provider`/`model`/`base_url`, `has_api_key`, saved `profiles`, the local-model catalogue and environment/network posture, plus one `complete` flag the wizard opens on. Derived entirely from stored state, so opening the wizard contacts no provider and cannot be used to probe whether a key works. No credential value appears in the payload. `complete` is true once `POST /onboarding/complete` (or `openai4s init`) wrote the flag, **or** when the install is evidently past its first run: a stored model configuration (`llm_*` settings, an active or saved profile) or any session that has held a message. 0.2.0 had no Web wizard and never wrote the flag from the Web UI, so without that rule an upgraded install reopened behind a first-run modal over its own history. An environment key alone does not count — with no history and no stored configuration that is what a fresh `.env` install looks like. The GET never writes the flag. |
 | `POST /onboarding/complete` | Marks first-run finished. In team mode this is admin-only (`403 admin_only`): the state is installation-wide, so a member dismissing it would be deciding for everyone. |
 
 ### Diagnostics

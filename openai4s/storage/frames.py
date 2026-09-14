@@ -905,6 +905,12 @@ class FrameRepository:
             ).fetchone()
         return row["n"] or 0
 
+    def has_message_history(self) -> bool:
+        """Whether any session on this install has ever held a message."""
+        with self._lock:
+            row = self._connection.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
+        return row is not None
+
     def cell_count(self, root_frame_id: str) -> int:
         with self._lock:
             row = self._connection.execute(
