@@ -14,11 +14,13 @@ only ever produced by a *builder* the host runs for that purpose:
 
 * The builder is the kernel's own interpreter, run through the same confined
   probe path as the package freeze (``preinstall.run_confined_probe``: the
-  scrubbed child environment and the OS sandbox), with ``-I`` and a fixed
-  program that imports matplotlib's font manager into a fresh empty cache
-  directory. No Cell code, no workspace, and no other kernel's files are
-  involved, so its output carries exactly the trust of the environment itself
-  -- which every kernel on that interpreter already executes.
+  scrubbed child environment and the OS sandbox), on a fixed program that
+  imports matplotlib's font manager into a fresh empty cache directory. It
+  resolves matplotlib exactly as that interpreter's kernels do (no ``-I``: a
+  user-site install must be found, or the list would never be built for it).
+  No Cell code, no workspace, and no other kernel's files are involved, so its
+  output carries exactly the trust of the environment itself -- which every
+  kernel on that interpreter already executes.
 * The host validates what it prints (name, size, JSON shape, version agreeing
   with the name) and writes it under ``<data_dir>/cache/matplotlib-fonts``,
   keyed by interpreter path. Kernels cannot write there: an enforced sandbox
@@ -126,13 +128,24 @@ def _font_roots(platform_name: str, home: Path) -> list[Path]:
     # The directories matplotlib's own font search walks
     # (`OSXFontDirectories` / `X11FontDirectories`).
     if platform_name == "darwin":
-        return [
+        roots = [
             Path("/Library/Fonts"),
             Path("/Network/Library/Fonts"),
             Path("/System/Library/Fonts"),
             Path("/opt/local/share/fonts"),
             home / "Library" / "Fonts",
         ]
+        # Fonts downloaded on demand (Font Book, a CJK face) land here, and
+        # matplotlib's `system_profiler` scan lists them.
+        try:
+            roots.extend(
+                sorted(
+                    Path("/System/Library/AssetsV2").glob("com_apple_MobileAsset_Font*")
+                )
+            )
+        except OSError:
+            pass
+        return roots
     # A kernel does not inherit XDG_DATA_HOME (kernel/environment.py), so its
     # matplotlib looks under the home default, and so does this fingerprint.
     return [
@@ -330,7 +343,7 @@ def build_font_cache(
 
         runner = run_confined_probe
     try:
-        completed = runner([str(interpreter), "-I", "-c", _BUILDER], timeout=timeout)
+        completed = runner([str(interpreter), "-c", _BUILDER], timeout=timeout)
     except Exception:  # noqa: BLE001 - enforce without a boundary, timeout, OSError
         return None
     if getattr(completed, "returncode", 1) != 0:

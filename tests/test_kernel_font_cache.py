@@ -114,9 +114,8 @@ def test_an_enforced_kernel_is_seeded_with_the_host_built_font_list(tmp_path):
         INTERPRETER, data_dir=data_dir, runner=_builder_runner(calls=calls)
     )
     assert built is not None and built.name == "fontlist-v3.11.0.json"
-    # The host ran the kernel's own interpreter, isolated, on a fixed program.
-    assert calls[0][0][:3] == [INTERPRETER, "-I", "-c"]
-    assert calls[0][0][3] == font_cache._BUILDER
+    # The host ran the kernel's own interpreter on a fixed program.
+    assert calls[0][0] == [INTERPRETER, "-c", font_cache._BUILDER]
 
     sandbox = _enforced_sandbox(tmp_path)
     try:
@@ -354,9 +353,8 @@ def _fake_matplotlib(root: Path) -> Path:
 def test_the_builder_program_returns_the_list_matplotlib_wrote(tmp_path):
     """The fixed program the host runs, against a stand-in matplotlib.
 
-    `-I` is dropped only so the stand-in is importable; the program is the
-    one production runs, and it must hand back what the font manager wrote
-    into the fresh directory it created -- not a pre-existing cache.
+    It must hand back what the font manager wrote into the fresh directory it
+    created -- not a pre-existing cache the environment pointed it at.
     """
 
     fake = _fake_matplotlib(tmp_path / "site")
@@ -365,7 +363,6 @@ def test_the_builder_program_returns_the_list_matplotlib_wrote(tmp_path):
     (stale / "fontlist-v3.11.0.json").write_text("poison", encoding="utf-8")
 
     def runner(command, *, timeout):
-        assert command[1] == "-I"
         env = {
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": str(fake),
@@ -373,7 +370,7 @@ def test_the_builder_program_returns_the_list_matplotlib_wrote(tmp_path):
             "TMPDIR": str(tmp_path),
         }
         return subprocess.run(
-            [command[0], *command[2:]],
+            command,
             capture_output=True,
             timeout=timeout,
             env=env,
