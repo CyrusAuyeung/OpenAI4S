@@ -286,9 +286,9 @@ contract.
   support report: it is this daemon's own correlation id, never an upstream
   provider's.
 - Some handlers still return errors **inside a 200 body** instead of an error
-  status: `POST /api/artifacts/{aid}/versions/{vid}/restore` maps a soft
+  status: `POST /api/v1/artifacts/{aid}/versions/{vid}/restore` maps a soft
   `{"error": …}` result to 404 but other handlers pass soft errors through as
-  200. Do not assume "2xx ⇒ no `error` key". `POST /api/connectors/{id}/call`
+  200. Do not assume "2xx ⇒ no `error` key". `POST /api/v1/connectors/{id}/call`
   used to be in this list and now answers `502 connector_failed`: `api()` in
   the web client only rejects on a non-2xx, so a connector that never ran was
   reported to the user as one that did.
@@ -304,10 +304,10 @@ or stored `Content-Type`:
 | `GET /static/<rel>` | file bytes | Path-traversal-guarded; 404/403 as JSON. |
 | `GET /api/v1/artifacts/{ident}` | artifact bytes | Compatibility route. `ident` may be a **version_id, artifact_id, or filename** (in that resolution order: `store.resolve_artifact_path` tries `artifact_versions.version_id` first, then `artifacts.artifact_id` → its latest version; the handler falls back to a filename lookup). `Content-Type` comes from stored metadata, else guessed from the filename. Default (flag-off) completion links use this route. The un-versioned `/api/artifacts/{ident}` form that 0.2.0 wrote into stored messages is still a 404 on the server (no alias); the workbench markdown renderer rewrites exactly that one-segment form to this route. |
 | `GET /api/v1/artifacts/versions/{version_id}` | immutable artifact-version bytes | Stage 1 trusted completion links use this reserved canonical route only. The server helper rejects empty and dot-only identifiers and encodes slash, Unicode, and URL metacharacters into one path segment. The route resolves that exact version or 404 and never falls back to an Artifact id or filename, so a reopened link remains bound to the same bytes after the head changes. |
-| `GET /api/frames/{fid}/artifacts.zip` | ZIP bytes | Current Artifact versions for one session. |
-| `GET /api/projects/{pid}/artifacts.zip` | ZIP bytes | Current Artifact versions across one project. |
-| `GET /api/frames/{fid}/notebook/export?language=` | `.ipynb`, ZIP or Markdown bytes | `python`/`r` returns one Notebook; omitted/`bundle` returns both plus a manifest; `markdown` returns one `.md` with both languages in execution order. |
-| `GET /api/frames/{fid}/session/export` | Session ZIP bytes | Deterministic `application/vnd.openai4s.session+zip`; carries schema and SHA-256 headers. |
+| `GET /api/v1/frames/{fid}/artifacts.zip` | ZIP bytes | Current Artifact versions for one session. |
+| `GET /api/v1/projects/{pid}/artifacts.zip` | ZIP bytes | Current Artifact versions across one project. |
+| `GET /api/v1/frames/{fid}/notebook/export?language=` | `.ipynb`, ZIP or Markdown bytes | `python`/`r` returns one Notebook; omitted/`bundle` returns both plus a manifest; `markdown` returns one `.md` with both languages in execution order. |
+| `GET /api/v1/frames/{fid}/session/export` | Session ZIP bytes | Deterministic `application/vnd.openai4s.session+zip`; carries schema and SHA-256 headers. |
 | `GET /preview/{ident}` | artifact bytes | Same resolution, but `Content-Type` is **forced** to `text/html; charset=utf-8`; `ident` may also be a version id, which pins that version. A filename that is ambiguous store-wide is first resolved within the frame of the referring `/preview/` document (same-origin `Referer`), the rule the grant route applies, so a report's relative sibling answers the same in both preview modes. This app-origin preview remains script-free under a response CSP sandbox, including direct navigation. Not under `/api`. |
 | `GET /sandbox/{grant}/preview/{ident}` | grant-scoped artifact bytes | Executable HTML is served only on the alternate loopback origin signed into the grant, with the minting app origin as its sole framing ancestor. The nonempty root-frame scope and deadline are checked before serving bytes; no session cookie is required or set. Relative resource paths retain the grant. Invalid/expired grants, wrong Host, a request presenting the daemon's own session cookie (a framed spend is cross-site and never carries one), foreign-frame Artifacts, API/shell paths, and non-GET methods return 404. Snapshot verification failures are recorded daemon-side under `artifact:sandbox_read` (and `artifact:sandbox_grant` at mint) without changing the response. See the [bearer URL limitations](security.md#executable-artifact-previews-use-a-scoped-alternate-origin). |
 | `GET /ketcher` | HTML | Authenticated first-party document on the app origin, with same-origin framing. Flag-off: historical placeholder. Stage 9: wrapper around vendored Ketcher 3.7.0 plus the `openai4s-artifact` save/load bridge. |
@@ -316,7 +316,7 @@ or stored `Content-Type`:
 *JSON* body `404 {"error": "artifact not found"}` — a consumer streaming the
 response to disk gets a JSON document.
 
-Note the overlap on `GET /api/artifacts/…`: the specific matchers
+Note the overlap on `GET /api/v1/artifacts/…`: the specific matchers
 (`/lineage`, `/environment`, `/versions`, …) are tried first; the final
 `re.fullmatch(r"/artifacts/(.+)")` + GET catch-all serves bytes, and because
 it matches `.+` (slashes included) it also catches any otherwise-unmatched
@@ -324,7 +324,7 @@ GET under `/api/v1/artifacts/`.
 
 ## 2. REST routes
 
-All paths below are under `/api` unless stated otherwise. "→" describes the
+All paths below are under `/api/v1` unless stated otherwise. "→" describes the
 success response body. Serializer shapes are in §4.
 
 ### Identity / config / meta
@@ -993,7 +993,7 @@ chunks and flag-off completion chunks omit `delivery_id`.
 | `plan_ready` | `frame_id`, `plan_id`, `status`, `plan`, `artifact_id` | A plan-mode turn produced a structured plan. |
 | `plan_not_captured` | `frame_id`, `request_id`, `reason` (`no_plan_steps`) | A plan-mode turn completed but its reply yielded no plan steps (neither a `json` plan block nor a numbered/bulleted list), so no plan row was stored and there is nothing to approve. Emitted before the turn's terminal `frame_update`; the turn result carries `plan_captured:false`. |
 | `plan_progress` | `frame_id`, `plan_id`, `step_id`, `status`, `note` | A plan step ticked during auto-execution. |
-| `await_permission` | `frame_id`, `decision_id`, `tool`, `kind`, `title`, `input`, `target`, `suggested_patterns`, `scopes`, `sub_agent` | A tool call is blocked awaiting user approval (answer via `POST /api/frames/{fid}/decision`). Emitted from `openai4s/permissions.py`. |
+| `await_permission` | `frame_id`, `decision_id`, `tool`, `kind`, `title`, `input`, `target`, `suggested_patterns`, `scopes`, `sub_agent` | A tool call is blocked awaiting user approval (answer via `POST /api/v1/frames/{fid}/decision`). Emitted from `openai4s/permissions.py`. |
 | `permission_resolved` | `frame_id`, `decision_id`, `allow`, `scope`, and after restart: `resolution_context`, `requires_continue`, `original_action_executed`, `continuation_expires_at`, `continuation_authorization` | The pending prompt was answered / timed out. An after-restart event explicitly says the old operation did not execute and whether the user must start a fresh continuation. |
 | `frame_update` | `frame_id`, `status`, `request_id`, `code` + `output_committed?` (terminal turn events), `cancelled` (only on a turn's `cancelled` terminal: the stopped marker's `{request_id, execution_id, reason}`), `task_summary` (only with `status:"titled"`) | Turn/session lifecycle. Emitted statuses: `processing`, `completed`, `failed`, `cancelled`, `success` (a finished REPL cell; an interrupted or cancelled REPL cell ends `cancelled` instead), `updated` (rename/PATCH), and `titled` — the background auto-title thread's upgrade of the placeholder session title, which carries an extra `task_summary` field (the new title) that no other status has. Every turn event — `processing`, the single terminal form, and the turn's `text_reset`/`text_chunk` — also carries `execution_id`, and that is the field a client filters on. A request id cannot separate two turns: clients may reuse `X-Request-Id`, and the ordering that matters (`processing(A)`, `processing(B)`, `failed(A)` — A unwinding after B was promoted out of the queue) then looks like B's own terminal event. A terminal whose `execution_id` differs from the running turn's must not close it. When one side names no execution the pair falls back to `request_id`, and when neither names anything the event is treated as current: that is the pre-identity contract, and anything stricter strands every turn against an older daemon. The `processing` event carries `request_id` too, and it is the one a queued follow-up depends on: that turn's 202 resolved while an earlier turn still owned the screen, so `processing` — "your turn is running now" — is the first moment its id is current. Under an HTTP job it is the same string the 202 returned; a direct call (CLI, recovery replay) mints one rather than emitting an empty field. A terminal turn event also carries `request_id` — the same id the submit 202 returned — and, when the turn failed, a stable `code` (`max_turns` for turn-limit exhaustion; `no_progress` when the progress circuit tripped — the Engine forced `completion=None`, so the turn is `failed` rather than left at the `completed` default, and the streamed prose reads "Stopped repeating actions. Edit the prompt or continue explicitly."; `llm_request_burst`, `llm_rate_limited`, or `llm_upstream_overloaded` for controlled LLM capacity failures; otherwise the projector's, defaulting to `turn_failed`). These local codes never expose the provider's raw error code or message. `output_committed:true` is added only when the failure happened after bytes were streamed or a tool ran: `llm/models.py` calls it the retry veto, because a transparent retry there duplicates visible output or re-fires a side effect however retryable the status looks. It is never emitted as `false` — absent is "no claim", and a `false` would assert a safety the projector cannot know. The frontend treats `completed|failed|cancelled|success|done` as terminal. A gated turn sends exactly one terminal frame event, after `candidate_resolved`, and includes `review_status` plus `user_truth`; the durable stored frame status remains `done` for a completed turn. |
 | `kernel_status` | `frame_id`, `status` ∈ `restarted|stopped|started|env_changed|packages_installed|ended`, plus per-status extras (`generation`, `env`, `installed`, `ok`, `state`, `ended_reason`, `requires_kernel_recovery`) | Kernel lifecycle changes. A successful branch revert emits `ended` after invalidating both language slots. |
@@ -1072,7 +1072,7 @@ compatibility; keep both when touching these serializers.
 
 ## 5. Known gaps and sharp edges (summary)
 
-- `GET /api/projects` pages by opaque `cursor` (`limit` 1–100) and, for one
+- `GET /api/v1/projects` pages by opaque `cursor` (`limit` 1–100) and, for one
   compatibility window, honours `offset`. An unparameterized request still
   returns the full list. Real bounded reads also exist for `from`/`limit` on
   messages, `limit` on frames, and the Timeline's `before_ordinal`/`after_ordinal`
