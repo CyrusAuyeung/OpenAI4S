@@ -17,8 +17,12 @@
   margin: 6px 0;
 }
 
-/* The marker that ends a stopped turn, live and on reopen (messages/stopped.ts). */
-.msg-stopped {
+/*
+ * The marker that ends a stopped turn, live and on reopen (messages/stopped.ts),
+ * and a reopened plan execution seed (messages/planPrompt.ts).
+ */
+.msg-stopped,
+.msg-plan-seed {
   display: flex;
   align-items: center;
   gap: 6px;

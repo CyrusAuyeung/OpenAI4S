@@ -1,6 +1,7 @@
 /** Restored messages, empty-session chips, and @-ref chips. app.js:7220-7409, 7766-7787. */
 
 import { renderMd } from "../md/render";
+import { planModeRequestText, planSeed, planSeedMarker } from "../messages/planPrompt";
 import { cancelledIdentity, stoppedMarker } from "../messages/stopped";
 import { publicText } from "../scrub/scrub";
 import { t } from "../../i18n";
@@ -62,12 +63,21 @@ export function renderStored(m: ChatMessage, target?: ParentNode | null): HTMLEl
     (target || $("#messages"))?.appendChild(marker);
     return marker;
   }
+  const seed = m.role === "user" ? planSeed(text) : null;
+  if (seed) {
+    // Same plan marker as messages/list.ts.
+    const marker = el("div", "msg plan-seed");
+    marker.appendChild(planSeedMarker(seed));
+    marker.dataset.ts = String(new Date(m.created_at || "").getTime() || 0);
+    (target || $("#messages"))?.appendChild(marker);
+    return marker;
+  }
   const w = el("div", "msg " + (m.role === "user" ? "user" : "assistant"));
   callLane("rememberCandidateIdentity", w, m);
   (w as HTMLElement & { _messageText?: string })._messageText = text;
   if (m.role === "user") {
     const b = el("div", "bubble");
-    b.textContent = text;
+    b.textContent = planModeRequestText(text);
     w.appendChild(b);
     renderMessageRefChips(w, m.artifact_refs);
   } else {

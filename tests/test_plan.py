@@ -268,6 +268,94 @@ def test_plan_mode_does_not_double_the_workbench_prompt(monkeypatch, tmp_path):
         assert "```json" not in model_input
 
 
+#: The workbench's `planModePayload` as `frontend/src/i18n/{en,zh}.ts` spell it
+#: (intro + part1 + part2 + jsonSchema + part3), without the task.
+_WORKBENCH_PLAN_PROMPTS = {
+    "en": (
+        "[Plan Mode] Do not execute or call any tools yet. Devise a structured "
+        "execution plan for the task below, and output only two parts:\n"
+        "1) A brief description of the approach (prose, explaining your chosen "
+        "goal/approach and the main analytical thread);\n"
+        "2) Immediately followed by a ```json code block, strictly using the "
+        "following structure:\n"
+        '{"title":"Plan title","rationale":"One-sentence rationale",'
+        '"confidence":"high|medium|low","steps":[{"id":"s1","title":"Step title",'
+        '"detail":"What this step does","deliverables":["intermediate-table.csv",'
+        '"figure.png"]}]}\n'
+        "Each step must have a unique id, a clear title, a brief description, and "
+        "a list of expected output filenames for that step. Wait for user approval "
+        "before executing.\n\nTask: "
+    ),
+    "zh": (
+        "[计划模式] 请先不要执行、不要调用任何工具。为下面的任务制定一个结构化执行计划，"
+        "并只输出两部分：\n1) 一段简短的方案说明；\n2) 紧接着一个 ```json 代码块。"
+        "等待用户批准后再执行。\n\n任务："
+    ),
+}
+
+
+def test_a_workbench_plan_prompt_does_not_title_the_session(monkeypatch, tmp_path):
+    """UI5-F2. The workbench sends its plan-mode prompt in front of the task, and
+    the title placeholder was the first 80 characters of that request -- "[Plan
+    Mode] Do not execute or call any tools yet. Devise a structured execution "
+    -- while the summarizer, handed the same prompt, followed its instructions
+    and ran out of tokens, so the placeholder became the permanent title.
+
+    The title is the user's task. What the model receives and the stored row are
+    unchanged."""
+    for lang, task in (
+        ("en", "Compute the mean of the integers 1 through 20"),
+        ("zh", "计算 1 到 20 的平均值"),
+    ):
+        request = _WORKBENCH_PLAN_PROMPTS[lang] + task
+        cfg = _cfg(tmp_path / lang)
+        runner = gateway_mod.SessionRunner(cfg, _Hub())
+        store = get_store(cfg.db_path)
+        fid = store.new_frame(kind="turn", project_id="default", status="ready")
+        calls = []
+        titled = []
+
+        def fake_chat(messages, cfg, on_delta=None, **kw):
+            calls.append([dict(m) for m in messages])
+            return {"content": "ok", "usage": {}}
+
+        monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+        monkeypatch.setattr(runner, "_ensure_kernel", _fake_ensure)
+        monkeypatch.setattr(
+            runner,
+            "_spawn_title_summary",
+            lambda root, text, llm_cfg, placeholder: titled.append((text, placeholder)),
+        )
+        runner.run_message(fid, "default", request, plan=True)
+
+        summary = store.get_frame(fid)["task_summary"]
+        assert summary == task, summary
+        assert titled == [(task, task)]
+        # Model input and the durable row are exactly what they were.
+        agent = _agent_calls(calls)
+        assert agent and _last_user_content(agent[0]).startswith(request)
+        stored = [m for m in store.list_messages(fid) if m["role"] == "user"]
+        assert [m["content"] for m in stored] == [request]
+
+
+def test_plan_mode_request_text_leaves_other_text_alone():
+    from openai4s.server.plans import plan_mode_request_text
+
+    assert plan_mode_request_text("Plan a small analysis.") == "Plan a small analysis."
+    # A delimiter without the marker is the user's own text.
+    assert plan_mode_request_text("Notes\n\nTask: x") == "Notes\n\nTask: x"
+    # The marker with no delimiter has no separable task: nothing is cut.
+    assert plan_mode_request_text("[Plan Mode] hello") == "[Plan Mode] hello"
+    # Only the scaffold's own delimiter is cut; the task keeps a later one.
+    assert (
+        plan_mode_request_text("[Plan Mode] x\n\nTask: a\n\nTask: b") == "a\n\nTask: b"
+    )
+    assert (
+        plan_mode_request_text("[Plan Mode] Revise ...\n\nChange requests: drop s2")
+        == "drop s2"
+    )
+
+
 def test_plan_mode_uncaptured_plan_is_not_silent(monkeypatch, tmp_path):
     """A plan turn whose reply yields no steps used to end `completed`, with
     no error, no plan row and no `plan_ready` -- an API client had nothing to

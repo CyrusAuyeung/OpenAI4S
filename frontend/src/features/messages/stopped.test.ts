@@ -471,3 +471,68 @@ describe("live activity card outcome", () => {
     }
   });
 });
+
+/**
+ * UI5-F2. The workbench sends a plan-mode request as its plan prompt followed
+ * by the task, and the approval/resume turns are server seeds; every one is a
+ * stored user row. Live, the bubble showed only the typed task, but a reload
+ * showed the whole "[Plan Mode] Do not execute or call any tools yet. …"
+ * prompt, then "Plan "…" is approved; start executing it automatically now. …"
+ * -- both as the user's own messages.
+ */
+describe("stored plan-mode rows reopen as what the user wrote", () => {
+  const TASK = "Compute the mean and standard deviation of integers 1-20";
+  const EN_PROMPT =
+    "[Plan Mode] Do not execute or call any tools yet. Devise a structured execution plan for the task below, and output only two parts:\n" +
+    "1) A brief description of the approach;\n2) Immediately followed by a ```json code block, strictly using the following structure:\n" +
+    '{"title":"Plan title","steps":[]}\nWait for user approval before executing.\n\nTask: ';
+  const ZH_PROMPT = "[计划模式] 请先不要执行、不要调用任何工具。为下面的任务制定一个结构化执行计划，并只输出两部分：\n等待用户批准后再执行。\n\n任务：";
+  const APPROVED =
+    'Plan "Mean and SD of 1-20" is approved; start executing it automatically now.\n\n' +
+    "Follow these steps strictly in order:\n- [s1] Compute: mean and SD  → deliverables: stats.csv\n\nExecution rules:\n1. …";
+
+  const renderers = [
+    ["the conversation page", renderStored],
+    ["an older page", renderOlderPage],
+  ] as const;
+
+  for (const [where, render] of renderers) {
+    it(`${where}: the plan prompt's bubble is the task, in either language`, () => {
+      for (const [prompt, task] of [[EN_PROMPT, TASK], [ZH_PROMPT, "计算 1 到 20 的平均值"]] as const) {
+        const node = render({ role: "user", content: prompt + task, created_at: "2026-09-14T00:00:00Z" }) as unknown as FakeEl;
+        expect(node.classList.contains("user")).toBe(true);
+        const bubble = node.querySelector(".bubble")!.textContent;
+        expect(bubble).toBe(task);
+        expect(bubble).not.toContain("[Plan Mode]");
+        expect(bubble).not.toContain("[计划模式]");
+      }
+    });
+
+    it(`${where}: a plan revision's bubble is the change request`, () => {
+      const node = render({
+        role: "user",
+        content: "[Plan Mode] Revise the execution plan above according to the change requests below. Do not execute anything.\n\nChange requests: drop step 2",
+      }) as unknown as FakeEl;
+      expect(node.querySelector(".bubble")!.textContent).toBe("drop step 2");
+    });
+
+    it(`${where}: the approval seed is a plan marker, not a user message`, () => {
+      for (const content of [APPROVED, "已批准计划「1-20 的均值」，现在开始自动执行。\n\n请严格按下面的步骤顺序推进：\n- [s1] …"]) {
+        const node = render({ role: "user", content }) as unknown as FakeEl;
+        expect(node.classList.contains("user")).toBe(false);
+        expect(node.querySelectorAll(".bubble")).toHaveLength(0);
+        expect(node.textContent).not.toContain("start executing it automatically");
+        expect(node.textContent).not.toContain("现在开始自动执行");
+        expect(node.textContent).toMatch(/Mean and SD of 1-20|1-20 的均值/);
+      }
+    });
+
+    it(`${where}: ordinary user text is left alone`, () => {
+      for (const content of ["[Plan Mode] notes without a task", "Notes\n\nTask: keep me", 'Plan "X" is approved, says my note']) {
+        const node = render({ role: "user", content }) as unknown as FakeEl;
+        expect(node.classList.contains("user")).toBe(true);
+        expect(node.querySelector(".bubble")!.textContent).toBe(content);
+      }
+    });
+  }
+});

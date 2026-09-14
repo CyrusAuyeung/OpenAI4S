@@ -13,6 +13,7 @@ import { renderMd } from "../md/render";
 import { el, messagesHost } from "./dom";
 import { rememberCandidateIdentity, setMessageReviewBadge } from "./identity";
 import { cancelFrame, scheduleFrame } from "./raf";
+import { planModeRequestText, planSeed, planSeedMarker } from "./planPrompt";
 import { cancelledIdentity, stoppedMarker } from "./stopped";
 
 export const INITIAL_RENDER_BATCH = 40;
@@ -162,12 +163,21 @@ export function renderStored(
     (target || messagesHost())?.appendChild(marker);
     return marker;
   }
+  const seed = m.role === "user" ? planSeed(text) : null;
+  if (seed) {
+    // A plan's execution seed is the server's instruction, not the user's message.
+    const marker = el("div", "msg plan-seed");
+    marker.appendChild(planSeedMarker(seed));
+    marker.dataset.ts = String(new Date(String(m.created_at || "")).getTime() || 0);
+    (target || messagesHost())?.appendChild(marker);
+    return marker;
+  }
   const w = el("div", "msg " + (m.role === "user" ? "user" : "assistant"));
   rememberCandidateIdentity(w, m);
   (w as HTMLElement & { _messageText?: string })._messageText = text;
   if (m.role === "user") {
     const b = el("div", "bubble");
-    b.textContent = text;
+    b.textContent = planModeRequestText(text);
     w.appendChild(b);
     callWindow("renderMessageRefChips", w, m.artifact_refs);
   } else {

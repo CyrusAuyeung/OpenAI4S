@@ -193,7 +193,7 @@ from openai4s.server.notebook_lineage import (
 from openai4s.server.plans import PlanService
 from openai4s.server.plans import extract_plan_json as _extract_plan_json
 from openai4s.server.plans import normalize_plan as _normalize_plan
-from openai4s.server.plans import plan_draft_instruction
+from openai4s.server.plans import plan_draft_instruction, plan_mode_request_text
 from openai4s.server.plans import public_plan as _plan_public
 from openai4s.server.plans import short_hash as _short_hash
 from openai4s.server.plans import slugify as _slugify
@@ -9897,8 +9897,13 @@ class SessionRunner:
             # concise LLM-written summary in the background — off the turn's path.
             frame = self.store.get_frame(root_frame_id) or {}
             title_placeholder = ""
+            # A plan turn's request can open with the workbench's plan-mode
+            # prompt; the title is the task inside it. The summarizer handed the
+            # prompt followed it instead of titling, so the 80-character
+            # "[Plan Mode] Do not execute ..." placeholder became the title.
+            title_text = plan_mode_request_text(user_text) if st.plan else user_text
             if not (frame.get("name") or frame.get("task_summary")):
-                title_placeholder = re.sub(r"\s+", " ", user_text).strip()[:80]
+                title_placeholder = re.sub(r"\s+", " ", title_text).strip()[:80]
                 self.store.update_frame(root_frame_id, task_summary=title_placeholder)
             stored_user_message = self.store.add_message(
                 root_frame_id=root_frame_id,
@@ -9925,7 +9930,7 @@ class SessionRunner:
                 # composer, the failure row was stored, and the request itself
                 # survived only as the session title.
                 self._spawn_title_summary(
-                    root_frame_id, user_text, self._llm_cfg(st), title_placeholder
+                    root_frame_id, title_text, self._llm_cfg(st), title_placeholder
                 )
             # resolve @filename references → inject the artifact content (M4)
             resolved, message_refs = self._resolve_mentions(st, user_text)

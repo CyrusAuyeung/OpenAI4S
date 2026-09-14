@@ -48,7 +48,7 @@ gateway.py
 | 文件 | 职责 |
 | --- | --- |
 | [`__init__.py`](__init__.py) | 稳定的包门面，导出 `build_server` 与 `serve`。 |
-| [`action_timeline.py`](action_timeline.py) | 把规范的 Action Ledger 投影成 UI 真正看到的 Timeline。一条记录足以说清：跑的是什么、怎么结束的、用掉哪些权限、花了多少用量、引用了哪些 Artifact，而且这些内容都有界、都经过脱敏。供应商的 `wire_state` 和原始参数字符串被刻意省略，避免有人把一个调试端点变成凭据或协议的转储口。 |
+| [`action_timeline.py`](action_timeline.py) | 把规范的 Action Ledger 投影成 UI 真正看到的 Timeline。一条记录足以说清：跑的是什么、怎么结束的、用掉哪些权限、花了多少用量、引用了哪些 Artifact，而且这些内容都有界、都经过脱敏。供应商的 `wire_state` 和原始参数字符串被刻意省略，避免有人把一个调试端点变成凭据或协议的转储口。计划模式那一轮的用户分组以任务命名，而不是以任务前面的计划模式提示命名。 |
 | [`attention.py`](attention.py) | 跨 Session 的只读「需要处理」聚合。把 running/queued 执行、待批准、可恢复失败、view-only/blocked 会话，以及 live/unknown 远程计算合成固定 shape 的卡片。team 可见性在聚合、排序、limit 之前生效。`target.surface`/`dock` 是闭集，服务端不返回任意 URL。GET 零副作用：不 spawn kernel、不打 provider、不 retry/approve/harvest。首版不建物化表。 |
 | [`attention_routes.py`](attention_routes.py) | `GET /attention?limit&cursor`，一张经校验的 `RouteSpec`。cursor 是绑在调用方 team-scope fingerprint 上的 `(updated_at, id)` keyset；来自另一用户或另一组 filter 的 cursor 返回 `400 invalid_cursor`。retry/approve/restore 仍走现有 mutation 路由。 |
 | [`agent_run.py`](agent_run.py) | 把 `AgentEngine` 适配到 Web 契约。它流式输出安全的文本与代码草稿，发出 Web 事件，处理取消，并通过注入的端口执行原生 Action 或 Cell。 |
@@ -99,7 +99,7 @@ gateway.py
 | [`notebook_export.py`](notebook_export.py) | 把原始的不可变执行历史确定性地导出成四种只读形态：每种语言一个 `.ipynb`、一个把两者打包并带 checksum 描述的 bundle，以及一份 Markdown 文档。前三种是给人重跑用的；Markdown 那份是给人阅读、以及贴进 issue 或方法学章节用的，所以它把两种语言按执行顺序放在同一份文件里——交错本身就是记录——并以一节 `## Inputs` 开头，列出这条分支的各轮所钉住的每个 Artifact 版本。没有输入时这一节整节省略，因为一个空标题也是一种声称。四种形态都不套用 Notebook 投影那道过滤，所以只含协议调用的 completion Cell 仍可能出现在导出结果里。 |
 | [`notebook_lineage.py`](notebook_lineage.py) | Stage 8 正式 live Notebook 开关，以及 host 侧 Python/R 读→version 映射和写 lineage。它不改内核。 |
 | [`stage12_ga.py`](stage12_ga.py) | Stage 12 GA 总开关声明。它不会打开更早的 Stage。 |
-| [`plans.py`](plans.py) | 管理结构化计划的生命周期。planner 的回复先被解析、规范化，草稿和它的 JSON Artifact 落库，公开的审阅形态由此暴露，通过审阅的计划再被带到执行。实时的 `host.plan_update` 变更仍留在 `HostDispatcher`。 |
+| [`plans.py`](plans.py) | 管理结构化计划的生命周期。planner 的回复先被解析、规范化，草稿和它的 JSON Artifact 落库，公开的审阅形态由此暴露，通过审阅的计划再被带到执行。`plan_mode_request_text` 从计划模式提示中取出用户自己的话，只用于会话标题和 Timeline 标题；模型输入和存储的消息行保留完整提示。实时的 `host.plan_update` 变更仍留在 `HostDispatcher`。 |
 | [`recovery_control.py`](recovery_control.py) | 投影恢复 journal 与 generation 状态，并组合出当前可行的、经校验和脱敏的恢复 Action 计划。只有在工作区目录树和完整的 bootstrap 清单都在的前提下，它才会说某个 checkpoint 可恢复。 |
 | [`recovery_execution.py`](recovery_execution.py) | 在精确的执行所有权下执行一次恢复 mutation。所有语言候选内核跑在同一个 recovery id 下，遇到第一个未完成的候选就停，最后落一条持久的会话终止事件。 |
 | [`recovery_recipe.py`](recovery_recipe.py) | 把不可变的 Cell 事实、依赖闭包、环境需求、sidecar 和确定性检查编译成一份恢复 recipe。保守是有意为之：影响状态却过不了这些检查的 Cell 会以 `never` 重放步骤的形式留在 recipe 里，于是校验会报 Partial，而不是默默宣称旧命名空间还在。 |

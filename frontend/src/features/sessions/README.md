@@ -33,4 +33,4 @@ F-13 dashboard / projects / sessions. Pagination and sort are pure functions. Wi
 | [`paging.ts`](paging.ts) | `MESSAGE_PAGE_SIZE=300`, `SESSION_MAX_PAGES=50`, sort/walk/filter. |
 | [`projects.ts`](projects.ts) | Project menu/modal/research view, `sanitizeProjectLineage`. `renderProjMenu` takes `#proj-current` over from its static `data-i18n` label. |
 | [`static-i18n-ownership.test.ts`](static-i18n-ownership.test.ts) | Once code has written the session title or the current project's name, neither the late locale-chunk repaint nor a language switch puts "Session" / "Project" back; the title input commits on blur, so that repaint renamed the session on the server. |
-| [`transcript.ts`](transcript.ts) | `renderStored`, ref chips, empty-session starters, message actions. |
+| [`transcript.ts`](transcript.ts) | `renderStored`, ref chips, empty-session starters, message actions. Plan-mode rows render like `messages/list.ts` (`messages/planPrompt.ts`). |
