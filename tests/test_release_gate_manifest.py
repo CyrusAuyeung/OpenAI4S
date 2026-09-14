@@ -1059,6 +1059,90 @@ def test_the_quality_job_budget_fits_two_full_suite_runs():
     )
 
 
+def _addopts_quiet() -> int:
+    """How many `-q` the project's pytest `addopts` already passes."""
+    import re
+    import shlex
+
+    # Read as text: `tomllib` is 3.11+, and this suite also runs on 3.10.
+    text = (ROOT / "pyproject.toml").read_text("utf-8")
+    section = text[text.index("[tool.pytest.ini_options]") :]
+    found = re.search(r"^addopts\s*=\s*(['\"])(.*?)\1\s*$", section, re.M)
+    assert found, "pyproject.toml's pytest addopts moved; re-read it here"
+    return sum(_quiet_flags(shlex.split(found.group(2))))
+
+
+def _quiet_flags(argv) -> list[int]:
+    """The verbosity each argv element lowers pytest by (`-q` 1, `-qq` 2)."""
+    counts = []
+    for part in argv:
+        part = str(part)
+        if part == "--quiet":
+            counts.append(1)
+        elif (
+            part.startswith("-")
+            and not part.startswith("--")
+            and set(part[1:]) == {"q"}
+        ):
+            counts.append(len(part) - 1)
+    return counts
+
+
+def _suite_invocations(tmp_path, monkeypatch):
+    """The argv of every place a release gate runs the whole offline suite."""
+    import subprocess
+
+    from scripts import capture_response_schemas
+    from scripts.release_pipeline import Pipeline
+
+    pytest_gate = next(g for g in release_gates.LOCAL_GATES if g.name == "pytest")
+    captured: list[list[str]] = []
+
+    def record(argv, **_kwargs):
+        captured.append([str(part) for part in argv])
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(capture_response_schemas.subprocess, "run", record)
+    capture_response_schemas._run_suite(tmp_path / "captured.json")
+    schemas = captured.pop()
+
+    Pipeline(
+        "0.2.0",
+        mode="local",
+        assets_dir=tmp_path,
+        runner=lambda argv, cwd=None: record(argv),
+    ).step_test()
+    local = captured.pop()
+    return {
+        "release pytest gate": list(pytest_gate.command),
+        "response-schemas capture": schemas,
+        "local rehearsal test step": local,
+    }
+
+
+def test_no_suite_gate_repeats_the_quiet_flag_addopts_already_passes(
+    tmp_path, monkeypatch
+):
+    """`addopts` already carries `-q`; a second one hides the result line.
+
+    At verbosity -2 pytest's terminal reporter returns before it prints
+    `N passed, M failed`, so the release quality log -- the only human-readable
+    evidence beside a receipt that records exit codes -- carried no test counts
+    for the serial suite or the schema capture. ci.yml already says so where it
+    runs the suite; the release gates did not follow.
+    """
+    baseline = _addopts_quiet()
+    assert baseline == 1, "the premise changed: addopts no longer passes one -q"
+    invocations = _suite_invocations(tmp_path, monkeypatch)
+    assert all("pytest" in " ".join(argv) for argv in invocations.values()), invocations
+    repeated = {
+        site: argv
+        for site, argv in invocations.items()
+        if baseline + sum(_quiet_flags(argv)) > 1
+    }
+    assert not repeated, f"these suite runs suppress pytest's summary line: {repeated}"
+
+
 def test_linux_bwrap_interrupt_smoke_is_an_independent_real_runtime_job():
     """The private-PID SIGINT proof must not collapse back into fake procfs.
 

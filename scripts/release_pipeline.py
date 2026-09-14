@@ -1043,7 +1043,8 @@ class Pipeline:
             )
         if self.dry_run:
             return StepResult("test", True, "would run the offline suite")
-        completed = self._run([sys.executable, "-m", "pytest", "-q", "-x"])
+        # No `-q`: addopts already passes one, and a second hides the summary.
+        completed = self._run([sys.executable, "-m", "pytest", "-x"])
         if completed.returncode != 0:
             raise ReleaseError(f"the offline suite failed ({completed.returncode})")
         return StepResult("test", True, "offline suite passed")
