@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,8 @@ from openai4s.kernel import Kernel, font_cache
 from openai4s.security.sandbox import KernelSandbox, SandboxStatus
 
 INTERPRETER = "/opt/example-env/bin/python"
+#: The stand-in matplotlib `font_manager.py` the fake builder reports.
+_STANDIN_SOURCE: list[Path] = []
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +40,10 @@ def _isolated_font_cache_state(tmp_path, monkeypatch):
     for root in roots:
         root.mkdir()
     monkeypatch.setattr(font_cache, "_font_roots", lambda platform, home: roots)
+    source = tmp_path / "mpl-install" / "matplotlib" / "font_manager.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("__version__ = '3.11.0'\n", encoding="utf-8")
+    _STANDIN_SOURCE[:] = [source]
     font_cache.disable_background_builds()
     font_cache._inflight.clear()
     font_cache._failed_at.clear()
@@ -61,22 +68,39 @@ def _fontlist(version: str = "3.11.0", **extra) -> str:
     )
 
 
-def _builder_runner(payload: dict | None = None, *, calls: list | None = None):
-    if payload is None:
-        payload = {"name": "fontlist-v3.11.0.json", "content": _fontlist()}
+def _source_fields(source: Path) -> dict:
+    """What the builder reports about the font manager it imported."""
 
+    info = source.stat()
+    return {"source": str(source), "source_stat": [info.st_mtime_ns, info.st_size]}
+
+
+def _raw_runner(payload, *, calls: list | None = None):
     def run(command, **kwargs):
         if calls is not None:
             calls.append((list(command), kwargs))
+        body = payload() if callable(payload) else payload
         return SimpleNamespace(
             returncode=0,
-            stdout=(
-                "noise\n" + font_cache._MARKER + json.dumps(payload) + "\n"
-            ).encode(),
+            stdout=("noise\n" + font_cache._MARKER + json.dumps(body) + "\n").encode(),
             stderr=b"",
         )
 
     return run
+
+
+def _builder_runner(payload: dict | None = None, *, calls: list | None = None):
+    """A builder that reports the stand-in install as it is when it runs."""
+
+    def body() -> dict:
+        reported = dict(
+            payload or {"name": "fontlist-v3.11.0.json", "content": _fontlist()}
+        )
+        if "content" in reported and "source" not in reported:
+            reported.update(_source_fields(_STANDIN_SOURCE[0]))
+        return reported
+
+    return _raw_runner(body, calls=calls)
 
 
 def _enforced_sandbox(tmp_path: Path, name: str = "kernel") -> KernelSandbox:
@@ -203,6 +227,89 @@ def test_builder_output_that_is_not_a_font_list_is_not_stored(
         is None
     )
     assert not (data_dir / "cache").exists()
+
+
+@pytest.mark.parametrize(
+    "report",
+    ["missing", "relative", "vanished", "changed-during-build"],
+)
+def test_a_list_whose_matplotlib_install_cannot_be_pinned_is_not_stored(
+    tmp_path, monkeypatch, report
+):
+    source = _STANDIN_SOURCE[0]
+    fields = _source_fields(source)
+    if report == "missing":
+        fields = {}
+    elif report == "relative":
+        # It even resolves from the host's cwd -- but the builder ran in
+        # another directory, so what it named is not knowable here.
+        monkeypatch.chdir(source.parent.parent)
+        fields["source"] = "matplotlib/font_manager.py"
+    elif report == "vanished":
+        fields["source"] = str(tmp_path / "gone" / "font_manager.py")
+    else:
+        # The builder imported one install and the host now sees another.
+        fields["source_stat"] = [fields["source_stat"][0], fields["source_stat"][1] + 1]
+    payload = {"name": "fontlist-v3.11.0.json", "content": _fontlist(), **fields}
+    data_dir = tmp_path / "data"
+    assert (
+        font_cache.build_font_cache(
+            INTERPRETER, data_dir=data_dir, runner=_raw_runner(payload)
+        )
+        is None
+    )
+    assert not (data_dir / "cache").exists()
+
+
+def test_upgrading_matplotlib_rebuilds_instead_of_seeding_the_old_list(tmp_path):
+    """A new matplotlib names its font list after its own version.
+
+    A list built for the old one is then ignored inside the kernel, which
+    scans again -- in every new kernel, for up to ``MAX_CACHE_AGE_S`` -- unless
+    the host notices the install it was built from has changed.
+    """
+
+    data_dir = tmp_path / "data"
+    assert font_cache.build_font_cache(
+        INTERPRETER, data_dir=data_dir, runner=_builder_runner()
+    )
+    first = _enforced_sandbox(tmp_path, "first")
+    try:
+        assert font_cache.seed_kernel_font_cache(
+            first, interpreter=INTERPRETER, data_dir=data_dir
+        )
+    finally:
+        first.close()
+
+    # `pip install -U matplotlib` in that environment, then a new kernel.
+    source = _STANDIN_SOURCE[0]
+    source.write_text("__version__ = '3.12.0'  # upgraded\n", encoding="utf-8")
+    os.utime(source, ns=(2_000_000_000, 2_000_000_000))
+    font_cache.enable_background_builds(data_dir)
+    calls: list = []
+    second = _enforced_sandbox(tmp_path, "second")
+    try:
+        assert not font_cache.seed_kernel_font_cache(
+            second,
+            interpreter=INTERPRETER,
+            data_dir=data_dir,
+            runner=_builder_runner(calls=calls),
+        )
+        assert not _kernel_mplconfigdir(second).exists()
+    finally:
+        second.close()
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and (not calls or font_cache._inflight):
+        time.sleep(0.01)
+    assert len(calls) == 1, "the upgrade did not start a rebuild"
+    third = _enforced_sandbox(tmp_path, "third")
+    try:
+        assert font_cache.seed_kernel_font_cache(
+            third, interpreter=INTERPRETER, data_dir=data_dir
+        )
+    finally:
+        third.close()
 
 
 def test_a_newly_installed_font_stops_the_stale_list_being_seeded(
@@ -383,6 +490,12 @@ def test_the_builder_program_returns_the_list_matplotlib_wrote(tmp_path):
     assert built is not None
     assert json.loads(built.read_text(encoding="utf-8"))["__class__"] == "FontManager"
     assert "poison" not in built.read_text(encoding="utf-8")
+    # ...and the manifest pins the font manager install it came from.
+    manifest = json.loads((built.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert (
+        Path(manifest["matplotlib_source"]).resolve()
+        == (fake / "matplotlib" / "font_manager.py").resolve()
+    )
 
 
 def _shadowing_directory(root: Path) -> Path:
@@ -486,11 +599,17 @@ def test_a_python_kernel_asks_for_its_font_list_with_its_own_sandbox(
         assert seeded == [(kernel._sandbox, sys.executable)]
 
 
+def _font_manager_source() -> Path:
+    spec = importlib.util.find_spec("matplotlib")
+    assert spec is not None and spec.submodule_search_locations
+    return Path(list(spec.submodule_search_locations)[0]) / "font_manager.py"
+
+
 def _font_manager_version() -> str | None:
     spec = importlib.util.find_spec("matplotlib")
     if spec is None or not spec.submodule_search_locations:
         return None
-    source = Path(list(spec.submodule_search_locations)[0]) / "font_manager.py"
+    source = _font_manager_source()
     match = re.search(
         r"^\s+__version__\s*=\s*['\"]([^'\"]+)['\"]",
         source.read_text(encoding="utf-8"),
@@ -514,7 +633,11 @@ def test_a_sandboxed_kernel_uses_the_seeded_list_instead_of_scanning(
     if version is None:
         pytest.skip("matplotlib is not installed")
     data_dir = Path(os.environ["OPENAI4S_DATA_DIR"])
-    payload = {"name": f"fontlist-v{version}.json", "content": _fontlist(version)}
+    payload = {
+        "name": f"fontlist-v{version}.json",
+        "content": _fontlist(version),
+        **_source_fields(_font_manager_source()),
+    }
     assert font_cache.build_font_cache(
         sys.executable, data_dir=data_dir, runner=_builder_runner(payload)
     )

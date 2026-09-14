@@ -36,7 +36,13 @@ only ever produced by a *builder* the host runs for that purpose:
 The list is only reused while the font directories matplotlib scans look the
 way they did when it was built, so installing a font (a CJK face for Chinese
 labels, say) is picked up by the next kernel rather than hidden behind a stale
-cache. ``MAX_CACHE_AGE_S`` backstops sources a directory walk cannot see.
+cache. It is also pinned to the ``font_manager.py`` it was built by (that
+file's size and modification time, as the builder saw it and the host still
+sees it): matplotlib names its list after its own version, so after an
+upgrade in that environment an old list would be ignored inside every new
+kernel, each scanning again, while the cache still looked valid. A changed
+install is rebuilt instead. ``MAX_CACHE_AGE_S`` backstops sources neither
+check can see.
 
 Builds happen in the background and only in a process that called
 :func:`enable_background_builds` -- the daemon does, from ``run_server``. A
@@ -63,7 +69,7 @@ from typing import Any
 
 _CACHE_PARTS = ("cache", "matplotlib-fonts")
 _MANIFEST_NAME = "manifest.json"
-_MANIFEST_FORMAT = 1
+_MANIFEST_FORMAT = 2
 _MARKER = "__OPENAI4S_FONTLIST__"
 _FONTLIST_NAME = re.compile(r"fontlist-v[0-9][0-9A-Za-z.+_-]{0,63}\.json")
 
@@ -99,10 +105,13 @@ _BUILDER = (
     "    name = 'fontlist-v%s.json' % (font_manager.FontManager.__version__,)\n"
     "    with open(os.path.join(matplotlib.get_cachedir(), name), encoding='utf-8') as handle:\n"
     "        content = handle.read()\n"
+    "    source = os.path.abspath(font_manager.__file__)\n"
+    "    info = os.stat(source)\n"
     "except Exception as error:\n"
     f"    print({_MARKER!r} + json.dumps({{'error': type(error).__name__}}))\n"
     "else:\n"
-    f"    print({_MARKER!r} + json.dumps({{'name': name, 'content': content}}))\n"
+    f"    print({_MARKER!r} + json.dumps({{'name': name, 'content': content,"
+    " 'source': source, 'source_stat': [info.st_mtime_ns, info.st_size]}))\n"
     "finally:\n"
     "    shutil.rmtree(cache, ignore_errors=True)\n"
 )
@@ -305,6 +314,25 @@ def _validated_fontlist(name: Any, content: Any) -> bytes | None:
     return data
 
 
+def _install_identity(source: Any) -> list[int] | None:
+    """The size and mtime of the ``font_manager.py`` a list was built by.
+
+    Replacing matplotlib (``pip install -U``, a new conda build) rewrites that
+    file, so this changes with the version that names the list. A stat, not a
+    read or an import: it runs on every enforced kernel spawn.
+    """
+
+    if not isinstance(source, str) or not os.path.isabs(source):
+        return None
+    try:
+        info = os.stat(source)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return [info.st_mtime_ns, info.st_size]
+
+
 def _builder_payload(stdout: Any) -> dict | None:
     if isinstance(stdout, bytes):
         stdout = stdout.decode("utf-8", "replace")
@@ -366,12 +394,20 @@ def build_font_cache(
     data = _validated_fontlist(name, payload.get("content"))
     if data is None:
         return None
+    source = payload.get("source")
+    identity = _install_identity(source)
+    if identity is None or payload.get("source_stat") != identity:
+        # Unpinnable, or matplotlib changed between the builder's import and
+        # now: a list stored here could not tell a later upgrade apart.
+        return None
     manifest = {
         "format": _MANIFEST_FORMAT,
         "interpreter": os.path.abspath(str(interpreter)),
         "fontlist": name,
         "sha256": hashlib.sha256(data).hexdigest(),
         "fingerprint": fingerprint,
+        "matplotlib_source": source,
+        "matplotlib_identity": identity,
         "built_at": time.time(),
     }
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -489,12 +525,21 @@ def _seed(
         manifest = json.loads(raw_manifest) if raw_manifest is not None else None
     except ValueError:
         manifest = None
+    installed = (
+        _install_identity(manifest.get("matplotlib_source"))
+        if isinstance(manifest, dict)
+        else None
+    )
     if (
         not isinstance(manifest, dict)
         or manifest.get("format") != _MANIFEST_FORMAT
         or manifest.get("interpreter") != os.path.abspath(str(interpreter))
         or not isinstance(manifest.get("fontlist"), str)
         or not _FONTLIST_NAME.fullmatch(manifest["fontlist"])
+        # matplotlib upgraded or removed since the build: its list is named
+        # for another version now, so seeding this one would save nothing.
+        or installed is None
+        or installed != manifest.get("matplotlib_identity")
         or manifest.get("fingerprint") != font_directory_fingerprint()
     ):
         rebuild()
