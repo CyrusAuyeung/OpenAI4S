@@ -386,3 +386,33 @@ def test_create_session_docs_row_requires_project_id():
     )
     assert "project_id?" not in row
     assert "project_id_required" in row
+
+
+@pytest.mark.parametrize(
+    "error", [ConnectionResetError(54, "reset"), BrokenPipeError(32, "pipe")]
+)
+def test_client_disconnect_is_not_logged_as_a_server_traceback(error, capfd):
+    """A browser closing a keep-alive socket is not a server error.
+
+    The stdlib `handle_error` printed "Exception occurred during processing of
+    request" plus a full ConnectionResetError traceback for each one, which an
+    operator reading an upgrade or CI log takes for a crash.
+    """
+    server = object.__new__(gateway_mod._GatewayHTTPServer)
+    try:
+        raise error
+    except OSError:
+        server.handle_error(None, ("127.0.0.1", 50000))
+    err = capfd.readouterr().err
+    assert "Traceback" not in err
+    assert "Exception occurred" not in err
+
+
+def test_a_real_handler_crash_still_gets_the_stdlib_traceback(capfd):
+    server = object.__new__(gateway_mod._GatewayHTTPServer)
+    try:
+        raise ValueError("a real bug")
+    except ValueError:
+        server.handle_error(None, ("127.0.0.1", 50000))
+    err = capfd.readouterr().err
+    assert "Traceback" in err and "ValueError" in err

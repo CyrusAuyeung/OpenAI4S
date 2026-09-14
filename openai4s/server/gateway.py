@@ -164,6 +164,7 @@ from openai4s.server.errors import (
     GatewayError,
     error_code_for,
     gateway_error_payload,
+    log_turn_failure,
     public_exception,
     public_failure,
     record_diagnostic,
@@ -7152,8 +7153,9 @@ class SessionRunner:
                 "send_message": runner.send_message,
                 "delegation_stats": runner.delegation_stats,
             }
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
+        except Exception as error:  # noqa: BLE001
+            # A 409 for a dangling model pin is a refusal, not a crash.
+            log_turn_failure(error, surface="web:delegation_wiring")
 
     def _resolve_env(self, st: SessionState):
         """The Environment this session's kernel should run in. Sets st.env_name
@@ -8339,7 +8341,7 @@ class SessionRunner:
                         # twice.
                         raise
                     except Exception as e:  # noqa: BLE001
-                        traceback.print_exc()
+                        log_turn_failure(e, surface="web:message")
                         emit = self.hub.emitter(root_frame_id)
                         message = job.project(e, "web:message")
                         self._persist_outer_failure(root_frame_id, job, message)
@@ -10020,7 +10022,7 @@ class SessionRunner:
                         "chunk": "\n\n" + err_text + "\n",
                     }
                 )
-                traceback.print_exc()
+                log_turn_failure(e, surface="web:turn")
             if st.guardian_blocked_reason:
                 status = "blocked_by_guardian"
             elif st.cancel.is_set():
@@ -12184,7 +12186,7 @@ class SessionRunner:
                         outcome["handled"] = e
                         raise
                     except Exception as e:  # noqa: BLE001
-                        traceback.print_exc()
+                        log_turn_failure(e, surface="web:plan")
                         message = job.project(e, "web:plan")
                         self._persist_outer_failure(root_frame_id, job, message)
                         emit = self.hub.emitter(root_frame_id)
@@ -12334,9 +12336,25 @@ class SessionRunner:
             self.executions.mark_finalizing(
                 execution, reason="persisting notebook cell"
             )
-            emit(
-                {"type": "frame_update", "frame_id": root_frame_id, "status": "success"}
-            )
+            # An interrupted cell is not a success, whether the stop came
+            # through the coordinator or as a kernel interrupt; the Notebook
+            # already said "interrupted" for the same cell.
+            if execution.cancellation.is_set() or r.get("interrupted"):
+                emit(
+                    {
+                        "type": "frame_update",
+                        "frame_id": root_frame_id,
+                        "status": "cancelled",
+                    }
+                )
+            else:
+                emit(
+                    {
+                        "type": "frame_update",
+                        "frame_id": root_frame_id,
+                        "status": "success",
+                    }
+                )
             return {
                 "status": (
                     "cancelled" if execution.cancellation.is_set() else "completed"
@@ -12429,7 +12447,7 @@ class SessionRunner:
                     }
                 )
             except Exception as error:  # noqa: BLE001 - job owns its failure
-                traceback.print_exc()
+                log_turn_failure(error, surface="web:repl")
                 # A *kernel* error is not this path: a traceback from the
                 # user's own cell arrives as a normal result and is the whole
                 # point of a REPL. This clause only fires when the machinery
@@ -19678,9 +19696,24 @@ def _format_annotations_block(annos: list) -> str:
 class _GatewayHTTPServer(ThreadingHTTPServer):
     """HTTP server whose resource close also closes every SessionRunner slot."""
 
+    #: A peer that went away mid-request. Browsers close keep-alive sockets
+    #: and tabs all the time; the stdlib printed "Exception occurred during
+    #: processing of request" plus a full traceback for each, which reads as a
+    #: crash in every upgrade and CI log.
+    _CLIENT_DISCONNECTS = (
+        ConnectionResetError,
+        BrokenPipeError,
+        ConnectionAbortedError,
+    )
+
     def __init__(self, *args, runner: SessionRunner, **kwargs) -> None:
         self.runner = runner
         super().__init__(*args, **kwargs)
+
+    def handle_error(self, request, client_address) -> None:
+        if isinstance(sys.exc_info()[1], self._CLIENT_DISCONNECTS):
+            return
+        super().handle_error(request, client_address)
 
     def server_close(self) -> None:
         try:

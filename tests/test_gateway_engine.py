@@ -2911,3 +2911,152 @@ def test_reopened_messages_project_the_stopped_marker(monkeypatch, tmp_path):
         assert all("cancelled" not in m for m in messages[:-1])
     finally:
         node.close()
+
+
+# --- daemon log noise: expected refusals are one line, not a crash -----------
+
+
+def test_interrupted_repl_cell_does_not_report_success(monkeypatch, tmp_path):
+    """The Notebook said "interrupted" and the terminal frame event said
+    "success" for the same cell."""
+    runner = gateway_mod.SessionRunner(_cfg(tmp_path), _Hub())
+    frame_id = runner.store.new_frame(kind="turn", project_id="default", status="ready")
+    outcomes = iter(
+        [
+            {"stdout": "", "stderr": "", "error": None, "interrupted": True},
+            {"stdout": "ok\n", "stderr": "", "error": None},
+        ]
+    )
+
+    def fake_execute(state, code, origin, emit, stream=True, language="python"):
+        del state, code, origin, emit, stream, language
+        return {
+            "idx": 1,
+            "state_revision": 1,
+            "generation_id": "gen-1",
+            "result": next(outcomes),
+            "figures": [],
+            "files_written": [],
+        }
+
+    monkeypatch.setattr(runner, "_execute_and_log", fake_execute)
+    hub = runner.hub
+    try:
+        interrupted = runner.run_repl(
+            frame_id, "default", "import time; time.sleep(60)"
+        )
+        assert interrupted["cell"]["status"] == "interrupted"
+        terminal = [e for e in hub.events if e.get("type") == "frame_update"]
+        assert terminal[-1]["status"] == "cancelled"
+
+        finished = runner.run_repl(frame_id, "default", "print('ok')")
+        assert finished["cell"]["status"] == "ok"
+        terminal = [e for e in hub.events if e.get("type") == "frame_update"]
+        assert terminal[-1]["status"] == "success"
+    finally:
+        runner.close()
+
+
+def test_missing_llm_key_turn_logs_one_line_not_a_traceback(
+    monkeypatch, tmp_path, capfd
+):
+    """A credential-less daemon printed a full traceback for every turn --
+    an expected, user-fixable refusal that buried real server errors in the
+    log CI dumps after a failure."""
+    import openai4s.llm as llm_facade
+    from openai4s.config import LLMConfig as _LLMConfig
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("this test must never reach a provider")
+
+    # The offline transport injection seam: a missing key must be refused
+    # before any request is built, and nothing here may egress if it is not.
+    monkeypatch.setattr(llm_facade, "_post_json", no_network)
+    monkeypatch.setattr(llm_facade, "_post_sse", no_network)
+
+    def keyless(st=None):
+        cfg = _LLMConfig(provider="claude")
+        cfg.api_key = ""  # after __post_init__'s environment fallback
+        return cfg
+
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+    monkeypatch.setattr(runner, "_llm_cfg", keyless)
+    capfd.readouterr()
+
+    result = runner.run_message(frame_id, "default", "hello")
+
+    assert result["status"] == "failed"
+    err = capfd.readouterr().err
+    assert "Traceback" not in err, err
+    lines = [line for line in err.splitlines() if "web:turn" in line]
+    assert len(lines) == 1, err
+    assert "llm_credential_missing" in lines[0]
+
+
+def test_unexpected_turn_failure_still_prints_its_traceback(
+    monkeypatch, tmp_path, capfd
+):
+    """Control: only expected refusals are quietened."""
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+
+    def broken_chat(messages, cfg, on_delta=None, **kwargs):
+        raise ZeroDivisionError("a real bug")
+
+    monkeypatch.setattr(gateway_mod, "chat", broken_chat)
+    capfd.readouterr()
+
+    result = runner.run_message(frame_id, "default", "hello")
+
+    assert result["status"] == "failed"
+    err = capfd.readouterr().err
+    assert "Traceback" in err and "ZeroDivisionError" in err
+
+
+def test_model_revision_refusal_in_delegation_wiring_logs_one_line(
+    monkeypatch, tmp_path, capfd
+):
+    runner = gateway_mod.SessionRunner(_cfg(tmp_path), _Hub())
+    frame_id = runner.store.new_frame(kind="turn", project_id="default", status="ready")
+    state = runner._state(frame_id, "default")
+
+    def unavailable(_st=None):
+        raise gateway_mod.GatewayError(
+            409,
+            "the pinned model revision is unavailable",
+            "model_revision_unavailable",
+        )
+
+    monkeypatch.setattr(runner, "_llm_cfg", unavailable)
+    capfd.readouterr()
+    try:
+        runner._wire_delegation(state, dispatcher=SimpleNamespace())
+        err = capfd.readouterr().err
+        assert "Traceback" not in err, err
+        assert "409 model_revision_unavailable" in err
+    finally:
+        runner.close()
+
+
+def test_queued_turn_refusal_logs_one_line(monkeypatch, tmp_path, capfd):
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+
+    def refuse(*args, **kwargs):
+        raise gateway_mod.GatewayError(
+            409,
+            "the pinned model revision is unavailable",
+            "model_revision_unavailable",
+        )
+
+    monkeypatch.setattr(runner, "run_message", refuse)
+    capfd.readouterr()
+    try:
+        job = runner.submit_message(frame_id, "default", "hello")
+        assert job.done.wait(5)
+        err = capfd.readouterr().err
+        assert "Traceback" not in err, err
+        assert "409 model_revision_unavailable" in err
+    finally:
+        runner.close()
