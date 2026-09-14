@@ -299,6 +299,10 @@ class Agent:
     # issue the receipt ``test_evidence`` is verified against in a run that has
     # nobody to approve it. The receipt requirement itself is unchanged.
     allowed_test_commands: Sequence[str] = ()
+    # Record this root Agent's cells to `execution_log` even without an
+    # explicit code mode. `openai4s run --auto` sets it: its post-run review
+    # can only judge the executed code and output the run actually recorded.
+    record_cells: bool = False
     # Durable kernel-generation store handle (duck-typed Store). When set (or
     # defaulted from the dispatcher's store), each worker lifetime writes a
     # kernel_generations row under this Agent's frame so artifact environment
@@ -722,13 +726,14 @@ class Agent:
         set_mode = getattr(self.dispatcher, "set_task_mode", None)
         if callable(set_mode):
             set_mode(mode.value if explicit else None)
-        if explicit and mode.value in EVIDENCE_REQUIRED_MODES:
+        if self.record_cells or (explicit and mode.value in EVIDENCE_REQUIRED_MODES):
             # The armed contract demands test_evidence naming real
             # execution_log rows, and a root CLI Agent historically recorded
             # none — which made the requirement unsatisfiable and the refusal
             # ("this run never executed that cell") actively false. Recording
-            # rides the explicit contract only, so every other CLI run keeps
-            # its historical no-rows behaviour.
+            # rides the explicit contract, or an explicit `record_cells`
+            # request (`--auto`'s reviewer), so every other CLI run keeps its
+            # historical no-rows behaviour.
             self._install_cell_recorder()
         fragment = task_mode_prompt(mode, explicit=explicit)
         authorized_tests = self.authorize_test_commands() if explicit else []
@@ -1349,45 +1354,142 @@ def enable_auto_run_environment(
     return applied
 
 
+def _cli_run_evidence(
+    store: Any, root_frame_id: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The run's native tool ledger, and the evidence gaps its record shows.
+
+    A CLI dispatcher projects no activity steps, so the tool calls live only
+    in the canonical action ledger: each ``result`` event is projected into
+    the reviewer's ``kind/title/status/summary`` shape. Every started Cell
+    allocates an execution attempt whether or not a recorder is armed, so an
+    attempt with no ``execution_log`` row is a Cell that ran and cannot be
+    shown -- declared, rather than letting a packet without it read complete.
+    """
+
+    ledger: list[dict[str, Any]] = []
+    for group in store.list_action_groups(root_frame_id, include_events=True):
+        if group.get("kind") != "native_tools":
+            continue
+        events = list(group.get("events") or [])
+        names = {
+            event.get("action_id"): str(
+                (event.get("canonical_arguments") or {}).get("name") or ""
+            )
+            for event in events
+            if event.get("type") == "proposed"
+            and isinstance(event.get("canonical_arguments"), Mapping)
+        }
+        for event in events:
+            message = event.get("result")
+            if event.get("type") != "result" or not isinstance(message, Mapping):
+                continue
+            ledger.append(
+                {
+                    "kind": "tool",
+                    "title": names.get(event.get("action_id"))
+                    or str(message.get("name") or ""),
+                    "status": "error" if message.get("is_error") else "done",
+                    "summary": str(message.get("content") or "")[:2_000],
+                }
+            )
+    recorded = {
+        str(cell.get("producing_cell_id") or "")
+        for cell in store.list_cells(root_frame_id)
+    }
+    unrecorded = sorted(
+        {
+            str(attempt.get("producing_cell_id") or "")
+            for attempt in store.list_execution_attempts(root_frame_id=root_frame_id)
+            if attempt.get("terminal_state") != "prepare_failed"
+        }
+        - recorded
+        - {""}
+    )
+    gaps: list[dict[str, Any]] = []
+    if unrecorded:
+        gaps.append({"kind": "cells_unrecorded", "count": len(unrecorded)})
+    return ledger, gaps
+
+
 def review_cli_result(
     task: str,
     result: Mapping[str, Any],
     *,
     cfg: Config,
+    store: Any = None,
+    root_frame_id: str | None = None,
     chat_call: Any = None,
 ) -> dict[str, Any]:
     """Post-run Scientific Reviewer adapter for the CLI.
 
     The Web path reviews through `CompletionGateService`, which needs durable
-    frame, branch and turn rows the one-shot CLI never creates. This reviews the
-    same evidence the engine actually produced and returns the same terminal
-    vocabulary, so `--auto` reports a real verdict rather than a placeholder.
+    branch and turn rows the one-shot CLI never creates. This reviews the
+    evidence the run actually recorded under its root frame -- the cells it
+    executed (code, output, errors), its native tool ledger, its artifacts and
+    lineage -- through the same collector the Web path uses, and returns the
+    same terminal vocabulary, so `--auto` reports a real verdict rather than a
+    placeholder. Without a Store and frame, or when the record cannot be read
+    or is missing executed cells, the snapshot says so as an omission: a review
+    of an answer with no evidence behind it is never reported as verified.
     """
 
     from openai4s.server.completion_gate import terminal_for_review
-    from openai4s.server.evidence_snapshot import freeze_evidence_snapshot
+    from openai4s.server.evidence_snapshot import (
+        collect_turn_evidence,
+        freeze_evidence_snapshot,
+    )
     from openai4s.server.scientific_review import ScientificReviewService
 
     answer = str(result.get("final_message") or "")
-    # A one-shot run has no durable frame, but it does have an identity, and
+    structured = result.get("submitted_output")
+    # A one-shot run has no durable turn row, but it does have an identity, and
     # leaving the block empty is not the same as saying so: the reviewer read
     # four blank ids as missing provenance and raised a finding about the
     # harness rather than the answer. `cli:<uuid>` is true and self-describing.
     run_id = f"cli:{uuid.uuid4().hex[:16]}"
-    snapshot = freeze_evidence_snapshot(
-        {
-            "identity": {
-                "root_frame_id": run_id,
-                "branch_id": run_id,
-                "turn_id": run_id,
-                "execution_id": run_id,
-            },
-            "user_request": task,
-            "candidate_answer": answer,
-            "structured_completion": result.get("submitted_output"),
-            "environment": {"runtime": "cli"},
-        }
-    )
+    root = str(root_frame_id or "").strip()
+    snapshot: dict[str, Any] | None = None
+    unavailable = "the run's durable execution record was not supplied"
+    if store is not None and root:
+        try:
+            tool_ledger, gaps = _cli_run_evidence(store, root)
+            snapshot = collect_turn_evidence(
+                store,
+                root_frame_id=root,
+                branch_id=root,
+                turn_id=run_id,
+                execution_id=run_id,
+                user_request=task,
+                candidate_answer=answer,
+                structured_completion=structured,
+                tool_ledger=tool_ledger,
+                environment_defaults={"runtime": "cli"},
+                collection_omissions=gaps,
+            )
+        except Exception as error:  # noqa: BLE001 - unreadable evidence is a gap
+            snapshot = None
+            unavailable = (
+                f"the execution record could not be read ({type(error).__name__})"
+            )
+    if snapshot is None:
+        snapshot = freeze_evidence_snapshot(
+            {
+                "identity": {
+                    "root_frame_id": root or run_id,
+                    "branch_id": root or run_id,
+                    "turn_id": run_id,
+                    "execution_id": run_id,
+                },
+                "user_request": task,
+                "candidate_answer": answer,
+                "structured_completion": structured,
+                "environment": {"runtime": "cli"},
+                "collection_omissions": [
+                    {"kind": "execution_evidence_unavailable", "reason": unavailable}
+                ],
+            }
+        )
     service = ScientificReviewService(store=None, config=cfg, chat_call=chat_call)
     try:
         review = service.evaluate(

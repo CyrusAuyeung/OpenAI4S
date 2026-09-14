@@ -1035,6 +1035,10 @@ def cmd_run(args) -> int:
     agent_options: dict = {}
     if allowed_tests:
         agent_options["allowed_test_commands"] = tuple(allowed_tests)
+    if getattr(args, "auto", False):
+        # The post-run review judges what the run recorded; without its cells
+        # the reviewer sees an answer and no executed code or output at all.
+        agent_options["record_cells"] = True
     agent = Agent(cfg=cfg, verbose=args.verbose, task_mode=mode, **agent_options)
     if mode in EVIDENCE_REQUIRED_MODES:
         # Before the first model call: an explicit code mode that can never
@@ -1066,7 +1070,13 @@ def cmd_run(args) -> int:
     if getattr(args, "auto", False):
         # A machine-readable terminal is the point of --auto: CI needs to tell
         # "ran and was verified" from "ran and nobody checked".
-        review = review_cli_result(args.task, result, cfg=cfg)
+        review = review_cli_result(
+            args.task,
+            result,
+            cfg=cfg,
+            store=getattr(getattr(agent, "dispatcher", None), "store", None),
+            root_frame_id=getattr(agent, "frame_id", None),
+        )
         result = dict(result)
         result["auto_mode"] = {
             "preset": "autonomous",
