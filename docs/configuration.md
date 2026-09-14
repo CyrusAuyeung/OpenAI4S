@@ -67,7 +67,7 @@ leaves after the summarized chunk, so a small `context_window_tokens` in a
 
 The core engine stays stdlib-only, and the control `.venv` carries just the optional `science` extra (numpy / pandas / matplotlib). A baseline scientific stack (scipy / seaborn / scikit-learn / biopython / httpx / …, see `CORE_PACKAGES` in [`openai4s/kernel/preinstall.py`](../openai4s/kernel/preinstall.py)) is available on top of that, but **`serve` does not install it**.
 
-Starting the daemon never modifies your Python environment. `serve` only *reports* what is missing — on stderr and via `GET /api/kernel/packages` (`preinstall.phase == "needs_provision"`). Installing is an explicit act:
+Starting the daemon never modifies your Python environment. `serve` only *reports* what is missing — on stderr and via `GET /api/v1/kernel/packages` (`preinstall.phase == "needs_provision"`). Installing is an explicit act:
 
 ```bash
 openai4s setup            # provision the kernel environments

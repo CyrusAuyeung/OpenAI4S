@@ -292,6 +292,74 @@ def test_the_document_spells_no_route_under_the_removed_unversioned_root(doc):
     ), "a section still says its paths are under the un-versioned root"
 
 
+#: Historical plans record what was proposed before the API was versioned.
+_HISTORICAL_DOCS = frozenset({"refactor-plan.md", "team-server-plan.md"})
+
+
+def _unversioned_route_spellings(text: str) -> list[tuple[int, str]]:
+    """Backticked gateway paths under the removed root, with their line.
+
+    A path is allowed only inside a block (a paragraph, list item or table
+    row) that says that form is gone -- a `404`, or "un-versioned" -- which is
+    how the upgrade guide and the web app notes name the links 0.2.0 stored.
+    """
+    import re
+
+    spelling = re.compile(r"`(?:(?:GET|POST|PUT|PATCH|DELETE) )?/api/(?!v1[/`?])[^`]*`")
+    offenders: list[tuple[int, str]] = []
+    block: list[tuple[int, str]] = []
+
+    def flush() -> None:
+        joined = " ".join(line for _, line in block)
+        if "404" in joined or "un-versioned" in joined:
+            return
+        for number, line in block:
+            offenders.extend((number, match) for match in spelling.findall(line))
+
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith(("* ", "- ", "| ", "#")):
+            flush()
+            block = []
+        if stripped:
+            block.append((number, line))
+    flush()
+    return offenders
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(
+        path.name
+        for path in _DOC.parent.glob("*.md")
+        if path.name not in _HISTORICAL_DOCS
+    ),
+)
+def test_no_user_doc_spells_a_route_under_the_removed_unversioned_root(name):
+    """RFD-4. b1b90ea0 moved docs/webapp-api.md to /api/v1, but
+    docs/configuration.md still sent readers to `GET /api/kernel/packages` and
+    docs/skills.md to `/api/skills/<name>/versions` -- both a JSON 404 on 0.3.0.
+    The guard above reads one document and only method-qualified paths."""
+    offenders = _unversioned_route_spellings((_DOC.parent / name).read_text("utf-8"))
+    assert not offenders, f"docs/{name} spells un-versioned routes: {offenders}"
+
+
+def test_the_unversioned_route_scan_keeps_notes_that_say_the_form_is_gone():
+    """The rule has to tell a stale path from a note about one, or it forbids
+    the upgrade guide's explanation of the links 0.2.0 stored."""
+    stale = "Probe `GET /api/kernel/packages` for the phase.\n"
+    note = (
+        "\n* Links (`/api/artifacts/<id>`) are rewritten; the server\n  answers 404.\n"
+    )
+    table = "| `GET /api/v1/x` | bytes | The `/api/x` form is un-versioned. |\n"
+    assert _unversioned_route_spellings(stale) == [(1, "`GET /api/kernel/packages`")]
+    assert _unversioned_route_spellings(note) == []
+    assert _unversioned_route_spellings(table) == []
+    assert _unversioned_route_spellings(stale + note) == [
+        (1, "`GET /api/kernel/packages`")
+    ]
+
+
 def test_the_resume_cursor_is_documented(doc):
     """A client cannot implement resume from the code; it has to be written
     down or the contract is only nominally versioned."""
