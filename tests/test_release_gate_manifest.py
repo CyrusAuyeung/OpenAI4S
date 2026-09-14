@@ -1031,6 +1031,34 @@ def test_every_job_has_an_explicit_timeout(workflow):
         ), f"{workflow}:{name} has an implausible timeout: {budget}"
 
 
+def test_the_quality_job_budget_fits_two_full_suite_runs():
+    """The quality job runs the whole suite twice inside one timeout.
+
+    `LOCAL_GATES` runs one after another: a serial `pytest -q`, then the
+    response-schema capture re-runs the suite under four workers. The last
+    v0.2.0-era dispatch spent 37 minutes in that step; the suite has grown ~18%
+    since, projecting ~44 minutes, and busy hosted runners have been measured at
+    1.3-2.8x their usual wall time. At 60 minutes a slow runner times the job
+    out after most of the work, with no receipt and a failure that reads like a
+    test failure. This pins a policy, not a measurement: the real check is the
+    step time of the first dispatch.
+    """
+    from scripts import release_gates
+
+    quality = _workflow("release.yml")["jobs"]["quality"]
+    pytest_gate = next(g for g in release_gates.LOCAL_GATES if g.name == "pytest")
+    serial = not any(
+        part == "-n" or part.startswith("-n") or part.startswith("--numprocesses")
+        for part in pytest_gate.command
+    )
+    floor = 90 if serial else 45
+    assert quality["timeout-minutes"] >= floor, (
+        f"the quality job runs a {'serial' if serial else 'parallel'} suite plus "
+        f"the schema capture in {quality['timeout-minutes']} minutes; "
+        f"budget at least {floor}"
+    )
+
+
 def test_linux_bwrap_interrupt_smoke_is_an_independent_real_runtime_job():
     """The private-PID SIGINT proof must not collapse back into fake procfs.
 
