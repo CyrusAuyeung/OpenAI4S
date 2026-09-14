@@ -664,3 +664,103 @@ def test_the_revision_seed_follows_the_plan_and_is_not_instructed_twice(tmp_path
     assert args[2].startswith("[计划模式]")
     assert "不要执行、不要调用任何工具" in args[2]
     assert plan_draft_instruction(args[2]) is None
+
+
+def _draft_with_two_steps(store, frame_id):
+    return store.create_plan(
+        frame_id=frame_id,
+        project_id="science",
+        title="Mean and standard deviation",
+        rationale="",
+        confidence="high",
+        steps=[
+            {"id": "s1", "title": "Compute", "detail": "numbers", "deliverables": []},
+            {"id": "s2", "title": "Report results", "detail": "", "deliverables": []},
+        ],
+    )
+
+
+def _assert_not_complete_with_a_step_in_progress(store, events, plan_id):
+    row = store.get_plan(plan_id)
+    in_progress = [
+        step_id
+        for step_id, entry in (row["step_status"] or {}).items()
+        if (entry or {}).get("status") == "in_progress"
+    ]
+    assert in_progress == ["s2"], row["step_status"]
+    assert row["status"] == "paused", row
+    last = [event for event in events if event.get("type") == "plan_ready"][-1]
+    assert last["status"] == "paused"
+    assert [step["status"] for step in last["plan"]["steps"]] == [
+        "completed",
+        "in_progress",
+    ]
+
+
+def test_a_completed_turn_that_left_a_step_in_progress_does_not_complete_the_plan(
+    tmp_path,
+):
+    """The plan card read PLAN COMPLETE next to an in-progress step, and the row
+    said the same: status completed, s2 in_progress, for good -- only a paused
+    plan can resume. The model marked the last step in progress and called
+    host.submit_output in the same Cell, which ended the turn, and a completed
+    turn was mapped to a completed plan without looking at the steps.
+
+    Nothing records that the step's work landed, so it is not settled on the
+    agent's behalf. The plan pauses instead: the step stays in progress, the
+    card says a step remains, and Resume can finish it."""
+    store, events, service = _service(tmp_path)
+    frame_id = store.new_frame(kind="turn", project_id="science")
+    plan = _draft_with_two_steps(store, frame_id)
+    plan_id = plan["plan_id"]
+
+    def run_message(root_frame_id, project_id, seed, model, plan=False):
+        # The host.plan_update sequence recorded for the Chromium frame.
+        store.set_plan_step_status(plan_id, "s1", "in_progress")
+        store.set_plan_step_status(plan_id, "s1", "completed")
+        store.set_plan_step_status(plan_id, "s2", "in_progress")
+        return {"status": "completed", "frame_id": root_frame_id}
+
+    service.run_message = run_message
+    result = service.run_execution(frame_id, "science")
+
+    assert result["status"] == "completed"
+    assert result["plan_status"] == "paused"
+    _assert_not_complete_with_a_step_in_progress(store, events, plan_id)
+    assert service.claim_resume(frame_id)["ok"] is True
+
+
+def test_a_completed_resume_that_left_a_step_in_progress_pauses_again(tmp_path):
+    store, events, service = _service(tmp_path)
+    frame_id = store.new_frame(kind="turn", project_id="science")
+    plan = _draft_with_two_steps(store, frame_id)
+    plan_id = plan["plan_id"]
+    store.set_plan_step_status(plan_id, "s1", "completed")
+    store.update_plan(plan_id, status="paused")
+
+    def run_message(root_frame_id, project_id, seed, model, plan=False):
+        store.set_plan_step_status(plan_id, "s2", "in_progress")
+        return {"status": "completed", "frame_id": root_frame_id}
+
+    service.run_message = run_message
+    result = service.resume_execution(frame_id, "science")
+
+    assert result["plan_status"] == "paused"
+    _assert_not_complete_with_a_step_in_progress(store, events, plan_id)
+
+
+def test_a_completed_turn_that_settled_every_step_still_completes_the_plan(tmp_path):
+    store, events, service = _service(tmp_path)
+    frame_id = store.new_frame(kind="turn", project_id="science")
+    plan_id = _draft_with_two_steps(store, frame_id)["plan_id"]
+
+    def run_message(root_frame_id, project_id, seed, model, plan=False):
+        store.set_plan_step_status(plan_id, "s1", "completed")
+        store.set_plan_step_status(plan_id, "s2", "in_progress")
+        store.set_plan_step_status(plan_id, "s2", "completed")
+        return {"status": "completed", "frame_id": root_frame_id}
+
+    service.run_message = run_message
+    assert service.run_execution(frame_id, "science")["plan_status"] == "completed"
+    assert store.get_plan(plan_id)["status"] == "completed"
+    assert events[-1]["status"] == "completed"
