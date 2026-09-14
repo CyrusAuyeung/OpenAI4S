@@ -864,6 +864,62 @@ def test_watchdog_hard_cancel_is_durably_classified_as_cancelled(tmp_path):
     assert "private worker detail" not in persisted
 
 
+def test_a_cancellation_during_preparation_finishes_the_cell_without_running_it(
+    tmp_path,
+):
+    """Preparation (a cold kernel's bootstrap) cannot be interrupted, and the
+    watchdog only looks at cancellation once user code is running. A Stop or a
+    daemon shutdown landing in between must end the Cell as interrupted with
+    none of its code started -- not start it and interrupt it a poll later."""
+
+    harness = Harness()
+    cancelled = {"value": False}
+    attempts: list[tuple] = []
+
+    def prepare_during_which_shutdown_lands(session, language):
+        harness.order.append("prepare")
+        cancelled["value"] = True
+        return None
+
+    ports = replace(
+        harness.ports(),
+        prepare_language=prepare_during_which_shutdown_lands,
+        cancelled=lambda session: cancelled["value"],
+        allocate_attempt=lambda *args: "attempt-before-start",
+        finish_attempt=lambda attempt_id, state, error: attempts.append(
+            (attempt_id, state, error)
+        ),
+    )
+    service = CellExecutionService(ports, id_factory=lambda: "cell-before-start")
+    events: list[dict] = []
+
+    result = service.execute(
+        _session(tmp_path),
+        CellRequest("open('marker', 'w').write('ran')", "user"),
+        events.append,
+    )
+
+    assert "run" not in harness.order
+    assert "capture" not in harness.order
+    assert result.executed is False
+    assert result.result["interrupted"] is True
+    assert "none of its code ran" in result.result["error"]
+    assert attempts == [
+        (
+            "attempt-before-start",
+            "interrupted",
+            {
+                "kind": "ExecutionCancelled",
+                "message": "the execution attempt was cancelled",
+                "code": "cell_cancelled",
+            },
+        )
+    ]
+    assert harness.records[0]["result"]["interrupted"] is True
+    assert events[-1]["type"] == "notebook_cell_finished"
+    assert events[-1]["status"] == "interrupted"
+
+
 def test_attempt_milestone_write_failure_still_finalizes_attempt(tmp_path):
     """A milestone write that raises (e.g. SQLite 'database is locked') must
     still finalize the attempt as record_failed; otherwise terminal_state stays
