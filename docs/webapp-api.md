@@ -408,12 +408,15 @@ profile says today.
   or a legacy session's unique match) has no usable credential, so it is not
   pinned at all. Rebinding would land on the same profile; the answer is a key.
 - **One credential rule** serves readiness, every binding branch and the pinned
-  dispatch: the profile's own key; else a key the daemon's environment holds for
-  the *same* provider (`OPENAI4S_<PROVIDER>_API_KEY`, the provider's native
+  dispatch: the profile's own key; else keyless for a local endpoint (loopback,
+  private, link-local, `.local` or `host.docker.internal`) — checked before any
+  inherited key, so a cloud credential such as `OPENAI_API_KEY` is never sent
+  over plain http to a local server; a local server that needs a key gets the
+  one saved on its profile; else a key the daemon's environment holds for the
+  *same* provider (`OPENAI4S_<PROVIDER>_API_KEY`, the provider's native
   variable, or — for the daemon's own provider only — its resolved key and an
-  operator-injected `llm` credential), never another provider's; else keyless
-  for a local endpoint. A brokered key that no longer resolves is refused rather
-  than replaced by an environment key.
+  operator-injected `llm` credential), never another provider's. A brokered key
+  that no longer resolves is refused rather than replaced by an environment key.
 - `409 model_revision_ambiguous` — a legacy session whose recorded model
   matches more than one live profile. Backfill happens only on a **unique** match;
   an ambiguous one stays unbound and asks, because picking either would be a

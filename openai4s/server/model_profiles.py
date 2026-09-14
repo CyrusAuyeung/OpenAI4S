@@ -257,10 +257,14 @@ class ModelProfileService:
         1. the profile's own key, brokered or legacy plaintext;
         2. a brokered key that no longer resolves is a refusal, not a fallback:
            the profile asked for *that* credential;
-        3. a key the daemon's environment holds for the SAME provider -- never
-           another provider's (see :func:`provider_env_api_key`);
-        4. keyless, when the endpoint is local by the rule `chat()` and
-           `doctor` apply.
+        3. keyless, when the endpoint is local by the rule `chat()` and
+           `doctor` apply -- BEFORE any inherited key. A same-provider
+           environment key is a cloud credential (`OPENAI_API_KEY` for the
+           OpenAI-compatible protocol local discovery adds), and a local
+           endpoint is plain http to a loopback, private or `.local` host. A
+           local server that wants a key gets the one saved on its profile;
+        4. a key the daemon's environment holds for the SAME provider -- never
+           another provider's (see :func:`provider_env_api_key`).
 
         `configuration` is the revision being dispatched, when that is not the
         profile's current one: an inherited or keyless answer is about the
@@ -277,13 +281,13 @@ class ModelProfileService:
             return ProfileCredential("", CREDENTIAL_REVOKED)
         target = configuration if configuration is not None else profile
         provider = str(target.get("provider") or "").strip().lower()
-        inherited = self._provider_key(provider)
-        if inherited:
-            return ProfileCredential(inherited, CREDENTIAL_ENVIRONMENT)
         if self._keyless_endpoint(
             provider, str(target.get("model") or ""), str(target.get("base_url") or "")
         ):
             return ProfileCredential("", CREDENTIAL_LOCAL)
+        inherited = self._provider_key(provider)
+        if inherited:
+            return ProfileCredential(inherited, CREDENTIAL_ENVIRONMENT)
         return ProfileCredential("", CREDENTIAL_MISSING)
 
     def _provider_key(self, provider: str) -> str:

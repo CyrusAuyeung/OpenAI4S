@@ -607,9 +607,14 @@ def test_a_keyless_local_profile_dispatches_without_borrowing_any_key(api, monke
 
     Keyless, and it must stay keyless: `replace()` re-runs `LLMConfig`'s env
     resolution, which would otherwise hand the daemon's generic key -- set by
-    the suite for another provider -- to whatever is listening on loopback.
+    the suite for another provider -- to whatever is listening locally. Nor
+    does the SAME provider's key count: `OPENAI_API_KEY` is a cloud credential
+    a developer machine usually exports, and this endpoint is plain http on a
+    LAN address.
     """
     runner, call = api
+    monkeypatch.setenv("OPENAI_API_KEY", _ENV_KEY)
+    monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", _ENV_KEY)
     seen = _dispatch_spy(runner, monkeypatch)
     created = call(
         "POST",
@@ -617,7 +622,7 @@ def test_a_keyless_local_profile_dispatches_without_borrowing_any_key(api, monke
         {
             "name": "Ollama · llama3.2",
             "provider": "chatgpt",
-            "base_url": "http://127.0.0.1:11434/v1",
+            "base_url": "http://192.168.1.50:11434/v1",
             "model": "llama3.2",
         },
     )
@@ -628,7 +633,7 @@ def test_a_keyless_local_profile_dispatches_without_borrowing_any_key(api, monke
     accepted, result = _send(runner, call, frame, "hello")
     assert accepted["code"] == 202, accepted
     assert result and result.get("status") == "completed", result
-    assert seen and seen[-1].base_url == "http://127.0.0.1:11434/v1"
+    assert seen and seen[-1].base_url == "http://192.168.1.50:11434/v1"
     assert seen[-1].api_key == "", "a key was sent to a keyless local endpoint"
 
 

@@ -328,3 +328,51 @@ def test_a_listed_profile_says_where_its_credential_comes_from(tmp_path, monkeyp
     assert (local["has_api_key"], local["credential_source"]) == (False, "local")
     assert (none["has_api_key"], none["credential_source"]) == (False, "missing")
     assert "environment-key-for-claude" not in repr([env, own, local, none])
+
+
+def test_a_keyless_local_profile_never_borrows_its_providers_cloud_key(
+    tmp_path, monkeypatch
+):
+    """Local before inherited. The environment fallback used to run first, so a
+    keyless OpenAI-compatible profile at a loopback, private or `.local` address
+    was answered with `OPENAI_API_KEY` -- a cloud credential -- and a turn sent
+    it over plain http to whatever was listening there. A local server that
+    wants a key gets the one saved on its profile."""
+    monkeypatch.setenv("OPENAI_API_KEY", "cloud-credential-for-openai")
+    monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", "cloud-credential-for-chatgpt")
+    store, service = _service(tmp_path)
+    endpoints = (
+        "http://127.0.0.1:11434/v1",
+        "http://192.168.1.50:8000/v1",
+        "http://gpu-box.local:11434/v1",
+    )
+    for base_url in endpoints:
+        created = service.create(
+            {
+                "name": base_url,
+                "provider": "chatgpt",
+                "model": "m",
+                "base_url": base_url,
+            }
+        )
+        row = next(p for p in store.list_model_profiles() if p["id"] == created["id"])
+        credential = service.credential(row)
+        assert (credential.source, credential.api_key) == ("local", ""), base_url
+        assert created["readiness"]["state"] == "ready", created["readiness"]
+        assert created["credential_source"] == "local", created
+
+    # The same provider at its cloud endpoint still inherits the environment key,
+    # and a key saved on a local profile is still the one it is dispatched under.
+    remote = service.create({"name": "cloud", "provider": "chatgpt", "model": "m"})
+    keyed = service.create(
+        {
+            "name": "keyed-local",
+            "provider": "chatgpt",
+            "model": "m",
+            "base_url": endpoints[1],
+            "api_key": "saved-on-the-profile",
+        }
+    )
+    rows = {row["id"]: row for row in store.list_model_profiles()}
+    assert service.credential(rows[remote["id"]]).source == "environment"
+    assert service.credential(rows[keyed["id"]]).api_key == "saved-on-the-profile"
