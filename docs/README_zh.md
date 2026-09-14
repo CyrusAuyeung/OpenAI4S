@@ -48,7 +48,7 @@
 | `v02-decisions.md` | nextgen 改进提案第 8 节里那些待定决策的所有者签署答复，2026-07-20 冻结。依赖其中任何一条的工作，在答案被记录到一个 reviewer 查得到的地方之前不得启动。每一行还写明这个选择放弃了什么——代价看不见的决策，后来会被悄悄推翻。|
 | `v020-linux-release-prep.md` | v0.2.0 Linux 半边的维护者材料：发布说明草稿，以及产出桌面 tarball、wheel、sdist 所需的系统软件包与完整命令。它不发布。中文对应文件是 `v020-linux-release-prep_zh.md`。 |
 | `v020-linux-release-prep_zh.md` | v0.2.0 Linux 桌面发布准备材料的中文对应文件。 |
-| `v03-decisions.md` | v0.3 的所有者签署答复，2026-07-26 冻结，包含推翻 v0.2「每个 Phase 一个大 PR」的那一条，以及本版本据以衡量的验收口径。它还用一张表列出所有无法从工作副本验证的事项——GitHub Actions 的真实执行、Developer ID 证书、公证、PyPI OIDC、实机浏览器、Linux CI——好让它们不出现在「已验证」一栏是有意为之，而不是疏漏。|
+| `v03-decisions.md` | v0.3 的所有者签署答复，2026-07-26 冻结，包含推翻 v0.2「每个 Phase 一个大 PR」的那一条，以及本版本据以衡量的验收口径。它还用一张表列出所有无法从工作副本验证的事项——GitHub Actions 的真实执行、Developer ID 证书、公证、PyPI OIDC、实机浏览器、Linux CI——好让它们不出现在「已验证」一栏是有意为之，而不是疏漏。 2026-09-14 的修订记录了 v0.3.0 发布相关的决策：不发布 DMG（D11）、把 crosswalk 中唯一处于 open 状态的 P0 行 R2/P0-03 作为已声明的已知限制予以豁免（D12-W1）、发布 Windows/WSL2 zip（D13），以及发布 npm Skills 包 0.3.0（D14）。 |
 | `next-version-progress.md` | v0.3 的逐项事实记录：什么落地了、在哪个提交、以及那一列真正承重的内容——为证明每个新测试确实会失败，把什么缺陷放了回去。不会失败的测试什么也没测，而存在一个同名的类不构成完成证据。凡是证明所需的那次运行需要本仓库没有的机器，一律标 `Implemented but unverified` 并写明缺的是哪一次运行。|
 | `webapp.md` | Web workbench 的概念、投影、状态与面向运维的行为。 |
 | `webshare.md` | Web 分享：只读快照 + 出站 relay 隧道、部署方式与信任模型。 |
