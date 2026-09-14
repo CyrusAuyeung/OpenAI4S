@@ -3971,13 +3971,21 @@ class ArtifactManager:
 
 
 def _capture_snippet(index: int) -> str:
+    # pyplot is read from sys.modules, never imported, as in
+    # kernel/guards.py: importing it builds matplotlib's font list, and an
+    # enforced sandbox gives each kernel an empty private MPLCONFIGDIR. The
+    # old `'matplotlib' in sys.modules` test imported pyplot after a Cell that
+    # only imported `matplotlib`, or whose first pyplot import was stopped,
+    # so a font scan (8-48s on macOS) ran after the Cell and the Stop or the
+    # daemon shutdown waited it out. A process that has not imported pyplot
+    # has no pyplot figures to capture.
     return (
         "import json as __oj\n"
         "__osfigs=[]\n"
         "try:\n"
         " import sys as __sys\n"
-        " if 'matplotlib' in __sys.modules:\n"
-        "  import matplotlib.pyplot as __plt\n"
+        " __plt=__sys.modules.get('matplotlib.pyplot')\n"
+        " if __plt is not None:\n"
         "  for __n in list(__plt.get_fignums()):\n"
         f"   __nm='figure_cell{index}_'+str(__n)+'.png'\n"
         "   try:\n"
