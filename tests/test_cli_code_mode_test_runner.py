@@ -354,6 +354,71 @@ def test_the_fragment_teaches_the_contract_the_host_enforces(mode):
     assert "keyword argument" in body
 
 
+@pytest.mark.parametrize("mode", [TaskMode.REUSABLE_PIPELINE, TaskMode.CODEBASE_CHANGE])
+def test_a_detected_fragment_carries_none_of_the_armed_contract_teaching(mode):
+    """A DETECTED mode stamps no binding mode, so its Observations carry no
+    `[cell id: …]` line and nothing pre-authorizes `host.bash` (the CLI refuses
+    `--allow-test-command` without `--mode`; the Web raises an approval card
+    per command). Its fragment must not teach a runner and an id that only an
+    explicit selection makes real."""
+
+    detected = " ".join(task_mode_prompt(mode, explicit=False).split())
+    assert "host.bash" not in detected
+    assert "[cell id:" not in detected
+    assert "producing_cell_id" not in detected
+    # Still the structure guidance, and still honest about being advisory.
+    assert "source_files" in detected and "entry_points" in detected
+    assert "advisory" in detected
+
+
+_DETECTED_PIPELINE_TASK = (
+    "Build a reusable pipeline script that I can re-run on new CSV files, with tests."
+)
+
+
+@pytest.mark.parametrize(
+    ("task_mode", "allowed"),
+    [(None, ()), ("reusable_pipeline", (TEST_COMMAND,))],
+    ids=["detected", "explicit"],
+)
+def test_the_mode_fragment_promises_only_what_the_run_keeps(
+    monkeypatch, tmp_path, task_mode, allowed
+):
+    """Bind the request the model reads to what the runtime then does: a
+    promised `[cell id: …]` line is one the Observation carries, a named
+    `host.bash` runner is one this run could authorize, and a
+    `producing_cell_id` is asked for only where an id is shown."""
+
+    from openai4s.agent.task_modes import resolve_task_mode
+    from openai4s.permissions import broker
+
+    assert resolve_task_mode(_DETECTED_PIPELINE_TASK) is TaskMode.REUSABLE_PIPELINE
+    agent, chat = _fake_kernel_agent(
+        monkeypatch,
+        tmp_path,
+        task_mode=task_mode,
+        replies=["```python\nprint('2 passed')\n```", "Stopping."],
+    )
+    agent.allowed_test_commands = allowed
+    agent.run(_DETECTED_PIPELINE_TASK)
+
+    request = " ".join(str(chat.calls[0][1]["content"]).split())
+    observation = str(chat.calls[1][-1]["content"])
+    assert "[TASK MODE: reusable_pipeline]" in request
+    shows_cell_id = _CELL_ID_LINE.search(observation) is not None
+    assert ("[cell id:" in request) == shows_cell_id, (request, observation)
+    if not shows_cell_id:
+        assert "producing_cell_id" not in request
+    bash_reachable = broker().approval_reachable(
+        store=agent.dispatcher.store,
+        frame_id=str(agent.frame_id),
+        method="bash",
+        side_effect_class="runtime_mutation",
+        guardian_config=agent.cfg,
+    )
+    assert bash_reachable or "host.bash" not in request, request
+
+
 def _fake_kernel_agent(monkeypatch, tmp_path, *, task_mode, replies):
     from openai4s.agent import loop as loop_mod
 

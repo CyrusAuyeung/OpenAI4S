@@ -590,9 +590,12 @@ description of them — decide whether it passed, and whose action group must
 also hold the Host's own successful `host.bash` receipt for that exact command
 string (a test run through `subprocess`, or merely printed, never counts). The
 model learns the Host-minted cell id from the `[cell id: …]` line that heads
-every Observation while the contract is armed (Web and CLI alike), and the mode
-fragment names `host.bash` as the runner and the four fields as keyword
-arguments of `host.submit_output`. So that this contract is satisfiable outside
+every Observation while the contract is armed (Web and CLI alike), and the
+explicit mode fragment names `host.bash` as the runner and the four fields as
+keyword arguments of `host.submit_output`. A detected mode's fragment keeps the
+same structure guidance but swaps in an advisory completion that teaches
+neither the runner nor the cell id — its Observations carry no id, and nothing
+pre-authorizes `host.bash` for it. So that this contract is satisfiable outside
 the Web gateway (which records every cell itself), a root CLI `Agent` running an
 explicit code mode installs the same cell recorder delegated children get,
 writing its cells to `execution_log` under its own frame with `origin="agent"`;
