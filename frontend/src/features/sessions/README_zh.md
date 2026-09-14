@@ -20,7 +20,7 @@ F-13 仪表盘 / 项目 / 会话。分页与排序是纯函数。窗口契约名
 | [`actions.cancel.test.ts`](actions.cancel.test.ts) | 取消回执只有在它命名的执行仍是本客户端正在运行的那个时，才切换到「正在停止…」。 |
 | [`dashboard.ts`](dashboard.ts) | 首页列表、项目搜索 / 加载更多 / 重试、示例 CTA 轮询绑视图生命周期、仪表盘轮询。 |
 | [`dom.ts`](dom.ts) | `$` / `el` / `ago` / `navURL` / composer 辅助。 |
-| [`icon.ts`](icon.ts) | 本车道菜单和行用到的线性图标。 |
+| [`icon.ts`](icon.ts) | 本车道菜单、行和 `[data-icon]` 标记用的 `icon` / `iconEl` / `paintIcons`。图形路径取自共享的 `icons/paths.ts` 表。 |
 | [`index.ts`](index.ts) | 对外 re-export；import 时挂 window 名字。 |
 | [`lane.ts`](lane.ts) | 用 `isReady` 包一层，调用后续车道的 window 名字。 |
 | [`load.ts`](load.ts) | `loadSessions` 游标走页、`loadProjects` keyset 分页（不发 `offset`）、文件夹、`renderSessions`。 |

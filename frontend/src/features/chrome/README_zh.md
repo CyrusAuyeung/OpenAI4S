@@ -10,7 +10,7 @@ F-20 工作台外壳：团队面、模态焦点陷阱、⌘K palette、上传 / 
 | --- | --- |
 | [`api.ts`](api.ts) | 同源 JSON 助手（`/api/v1`、`ApiError`）。 |
 | [`chrome.css`](chrome.css) | 本车道样式：palette / notes / team / resizer 类名。 |
-| [`dom.ts`](dom.ts) | `$` / `el` / `icon` / `ago` / `hint` / `grow`。 |
+| [`dom.ts`](dom.ts) | `$` / `el` / `icon` / `ago` / `hint` / `grow`。`icon` 取自共享的 `icons/paths.ts` 表。 |
 | [`host.ts`](host.ts) | 用 `isReady` 查 window 能力。不 import `window-exports`。 |
 | [`index.ts`](index.ts) | `bootChrome()`：window 赋值、快捷键、绑定、`bootTeam`。 |
 | [`layout.test.ts`](layout.test.ts) | `os-layout` 持久化、compact/wide 类、列宽钳制。 |

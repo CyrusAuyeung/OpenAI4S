@@ -20,7 +20,7 @@ F-13 dashboard / projects / sessions. Pagination and sort are pure functions. Wi
 | [`actions.cancel.test.ts`](actions.cancel.test.ts) | A cancel ack is applied to "Stopping…" only when it names the execution this client is still running. |
 | [`dashboard.ts`](dashboard.ts) | Home list, project search / load-more / retry, example CTA poll bound to view lifecycle, dash poll. |
 | [`dom.ts`](dom.ts) | `$` / `el` / `ago` / `navURL` / composer helpers. |
-| [`icon.ts`](icon.ts) | Line icons used by this lane's menus and rows. |
+| [`icon.ts`](icon.ts) | `icon` / `iconEl` / `paintIcons` for this lane's menus, rows and `[data-icon]` markup. Paths come from the shared `icons/paths.ts` table. |
 | [`index.ts`](index.ts) | Public re-exports; installs window names on import. |
 | [`lane.ts`](lane.ts) | `isReady` wrapper for later-lane window names. |
 | [`load.ts`](load.ts) | `loadSessions` cursor walk, `loadProjects` keyset pages (no `offset`), folders, `renderSessions`. |

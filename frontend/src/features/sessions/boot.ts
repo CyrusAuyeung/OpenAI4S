@@ -2,7 +2,7 @@
 
 import { applyStaticI18n, setLang, t } from "../../i18n";
 import { _titleName, currentId, editingProject } from "../../stores/session";
-import { cycleTheme } from "../theme/theme";
+import { cycleTheme, refreshThemeToggle } from "../theme/theme";
 import { setLoadSessionsImpl } from "../ws/handlers";
 import {
   addToMessageMenu,
@@ -81,6 +81,9 @@ export function bindWorkbench(): Promise<void> {
   if (bound) return initialViewReady || Promise.resolve();
   bound = true;
   paintIcons();
+  // installTheme() ran before the Shell existed, so the theme buttons still
+  // carry the markup's "moon"; show the glyph for the theme actually applied.
+  refreshThemeToggle();
   applyStaticI18n(document);
   watchActivateKeys(document);
   watchDisconnect();

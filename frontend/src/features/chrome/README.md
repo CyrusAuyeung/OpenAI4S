@@ -10,7 +10,7 @@ F-20 workbench chrome: team mode, the modal focus trap, the ⌘K palette, upload
 | --- | --- |
 | [`api.ts`](api.ts) | Same-origin JSON helper (`/api/v1`, `ApiError`). |
 | [`chrome.css`](chrome.css) | Lane styles for palette / notes / team / resizer class names. |
-| [`dom.ts`](dom.ts) | `$` / `el` / `icon` / `ago` / `hint` / `grow`. |
+| [`dom.ts`](dom.ts) | `$` / `el` / `icon` / `ago` / `hint` / `grow`. `icon` draws from the shared `icons/paths.ts` table. |
 | [`host.ts`](host.ts) | `isReady` window-capability lookups. Does not import `window-exports`. |
 | [`index.ts`](index.ts) | `bootChrome()`: window assignments, keydown, binds, `bootTeam`. |
 | [`layout.test.ts`](layout.test.ts) | `os-layout` persistence, compact/wide classes, column-width clamp. |

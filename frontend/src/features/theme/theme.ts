@@ -17,6 +17,7 @@ type HostWindow = Window & {
 };
 
 import { isReady } from "../../compat/stub";
+import { iconSvg } from "../icons/paths";
 let theme: ThemeMode | undefined;
 let watchingSystem = false;
 
@@ -75,8 +76,13 @@ export function refreshThemeToggle(): void {
   for (const sel of ["#dash-theme", "#ws-theme"]) {
     const button = document.querySelector(sel);
     if (button === null) continue;
-    const el = button as HTMLElement;
+    const el = button as HTMLElement & { _painted?: boolean };
     el.dataset.icon = name;
+    // Repaint the drawing too (app.js:216-227 did). paintIcons() marks a node
+    // painted and never visits it again, so swapping data-icon alone leaves the
+    // glyph from boot on the button forever.
+    el.innerHTML = iconSvg(name, +(el.dataset.iconSize || 20) || 20);
+    el._painted = true;
     if (title !== "") {
       el.title = title;
       el.setAttribute("aria-label", title);
