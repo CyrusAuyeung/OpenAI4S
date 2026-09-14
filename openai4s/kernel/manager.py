@@ -500,6 +500,9 @@ class Kernel:
             env_name=self.env_name,
             kernel_generation=self.authorization_generation,
             repo_root=repo_root,
+            # A Python worker's shell resolves `python` to this worker's own
+            # interpreter. An R worker (its own argv) keeps the host PATH.
+            interpreter=self.python if self.argv is None else None,
         )
 
     def _send(self, obj: dict) -> None:

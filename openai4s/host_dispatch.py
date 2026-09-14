@@ -1212,6 +1212,10 @@ class HostDispatcher:
         #  - on_env_switch(name): record a host.env.use() request to apply next cell.
         self.active_env_bin: str | None = None
         self.on_env_switch: Callable[[str], None] | None = None
+        # Optional model-facing tool projection (set by an Agent that builds
+        # this dispatcher): `search_capabilities` then names only the tools
+        # the provider `tools=` list offers. None keeps the full listing.
+        self.model_tool_offered: Callable[[Any], bool] | None = None
         # R execution channel: host.env.use() on an R-only env retargets the
         # persistent R kernel (```r cells) instead of being refused; the outer
         # loops consult this name when (re)spawning the R kernel.
@@ -2213,7 +2217,11 @@ class HostDispatcher:
         return self._remote_capability_service.register(spec)
 
     def _m_search_capabilities(self, spec: dict) -> dict:
-        return self.tool_catalog().search_capabilities(str(spec.get("query") or ""))
+        catalog = self.tool_catalog()
+        query = str(spec.get("query") or "")
+        if self.model_tool_offered is None:
+            return catalog.search_capabilities(query)
+        return catalog.search_capabilities(query, offered=self.model_tool_offered)
 
     # --- current-session orchestration ---------------------------------
     def _m_session_status(self, spec: dict | None = None) -> dict:

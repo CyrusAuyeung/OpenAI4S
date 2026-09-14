@@ -4,6 +4,7 @@ usage accounting, and host_call RPC round-trip (dispatcher stubbed)."""
 import ntpath
 import os
 import signal
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -403,6 +404,105 @@ def test_kernel_child_environment_is_rebuilt_from_strict_allowlist(tmp_path):
     assert forbidden.isdisjoint(env)
     assert "/host/injected-pythonpath" not in env["PYTHONPATH"]
     assert source["OPENAI4S_LLM_API_KEY"] == "llm-secret"  # source not mutated
+
+
+def test_the_kernel_interpreter_bin_dir_leads_path_when_no_env_is_selected(tmp_path):
+    """A shell a Cell starts must resolve `python` to the Cell's own
+    interpreter. Only a selected conda prefix used to reach PATH, so a daemon
+    or CLI launched by absolute path from a non-activated venv gave
+    `host.bash("python -m pytest -q")` whatever `python` the host PATH had --
+    nothing at all on macOS (exit 127)."""
+
+    source = {"PATH": "/usr/bin:/bin", "HOME": "/home/scientist"}
+    interpreter = str(tmp_path / "venv" / "bin" / "python")
+
+    env = build_kernel_environment(
+        source=source, cwd=str(tmp_path), interpreter=interpreter
+    )
+    assert env["PATH"].split(os.pathsep) == [
+        str(tmp_path / "venv" / "bin"),
+        "/usr/bin",
+        "/bin",
+    ]
+
+    # Unresolved: a venv interpreter is often a symlink to a base Python, and
+    # the base Python's directory has none of the venv's site-packages.
+    linked = tmp_path / "linked-venv" / "bin"
+    linked.mkdir(parents=True)
+    (linked / "python").symlink_to(sys.executable)
+    env = build_kernel_environment(
+        source=source, cwd=str(tmp_path), interpreter=str(linked / "python")
+    )
+    assert env["PATH"].split(os.pathsep)[0] == str(linked)
+
+    # A selected conda prefix still wins, and a bare or relative interpreter
+    # never puts the workspace ('.') on PATH.
+    conda = tmp_path / "conda" / "science"
+    env = build_kernel_environment(
+        source=source,
+        cwd=str(tmp_path),
+        env_root=str(conda),
+        interpreter=interpreter,
+    )
+    assert env["PATH"].split(os.pathsep) == [str(conda / "bin"), "/usr/bin", "/bin"]
+    for bare in ("python", "./python", ""):
+        env = build_kernel_environment(
+            source=source, cwd=str(tmp_path), interpreter=bare
+        )
+        assert env["PATH"] == "/usr/bin:/bin"
+    assert build_kernel_environment(source=source, cwd=str(tmp_path))["PATH"] == (
+        "/usr/bin:/bin"
+    )
+
+
+def test_an_r_worker_path_is_not_given_the_daemon_python(monkeypatch, tmp_path):
+    """The R kernel reuses this manager with its own argv; `self.python` is
+    still the daemon's interpreter there, which R's shell must not inherit."""
+
+    # Sparse, as in a non-activated launch: `uv run` would otherwise already
+    # have put the venv's bin dir first and this would prove nothing.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    def child_env(argv):
+        kernel = manager_mod.Kernel.__new__(manager_mod.Kernel)
+        kernel.mode = "repl"
+        kernel.cwd = str(tmp_path)
+        kernel.python = sys.executable
+        kernel.env_root = None
+        kernel.env_name = None
+        kernel.argv = argv
+        kernel.authorization_generation = "kernel:test"
+        return kernel._child_env()
+
+    python_dir = os.path.dirname(sys.executable)
+    assert child_env(None)["PATH"].split(os.pathsep)[0] == python_dir
+    r_path = child_env(["sh", "-c", "exec Rscript r_worker.R"])["PATH"]
+    assert r_path == "/usr/bin:/bin"
+
+
+def test_host_bash_python_is_the_kernel_interpreter_in_a_non_activated_launch(
+    monkeypatch, tmp_path
+):
+    """The command the explicit code modes teach, run the way they teach it,
+    from a launch with no venv activated and no `python` on the host PATH."""
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    code = """
+import sys
+version = host.bash('python -m pytest --version')
+print('pytest-exit', version['exit_code'])
+probe = host.bash('python -c "import sys; print(sys.prefix)"')
+print('same-prefix', probe['stdout'].strip() == sys.prefix)
+"""
+    with Kernel(
+        dispatcher=_authorized_bash_dispatcher(tmp_path), cwd=str(tmp_path)
+    ) as kernel:
+        result = kernel.execute(code)
+
+    assert result["error"] is None, result
+    assert "pytest-exit 0" in result["stdout"], result
+    assert "same-prefix True" in result["stdout"], result
 
 
 def test_python_kernel_and_its_subprocesses_cannot_inherit_host_api_key(

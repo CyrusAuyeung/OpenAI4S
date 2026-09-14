@@ -1117,15 +1117,20 @@ def cmd_url(args) -> int:
 #: Only ``stop_reason == "submitted"`` is a completion; ``max_turns``,
 #: ``no_progress``, ``cancelled`` and any reason the CLI does not know all map
 #: here, so an unknown terminal fails closed. Not 2, which already means a
-#: refusal (usage error, environment readiness, a newer database schema).
+#: refusal (a usage error, a code mode whose test runner nothing can
+#: authorize, environment readiness, a newer database schema).
 RUN_NOT_COMPLETED_EXIT = 3
 
 _RUN_EXIT_STATUS_HELP = """\
 exit status:
   0  the run completed (stop_reason "submitted")
   1  an unhandled error (a Python traceback on stderr)
-  2  refused: a usage error, the standard environment is not ready, or the
-     database schema is newer than this build
+  2  refused: a usage error (an empty task: empty_task; an invalid
+     --allow-test-command: invalid_allow_test_command), an explicit --mode
+     reusable_pipeline|codebase_change whose test command nothing can
+     authorize (code_mode_test_runner_unauthorized), the standard environment
+     is not ready, or the database schema is newer than this build; --json
+     prints the code
   3  the run ended without completing: stop_reason max_turns, no_progress,
      cancelled, or any other value
 
@@ -1155,6 +1160,14 @@ def cmd_run(args) -> int:
     from openai4s.host.code_evidence import EVIDENCE_REQUIRED_MODES
     from openai4s.kernel.readiness import EnvironmentReadinessError
 
+    if not str(getattr(args, "task", "") or "").strip():
+        # A blank task is a usage error, refused before any config, store or
+        # provider call: otherwise the model is paid to answer nothing, and
+        # the run can even finalize with exit 0.
+        return _run_refusal(
+            args,
+            {"error": "the task must not be empty or whitespace", "code": "empty_task"},
+        )
     mode = getattr(args, "mode", None)
     allowed_tests = [
         str(item) for item in getattr(args, "allow_test_command", None) or []
@@ -1196,8 +1209,18 @@ def cmd_run(args) -> int:
     if mode in EVIDENCE_REQUIRED_MODES:
         # Before the first model call: an explicit code mode that can never
         # obtain its test receipt would otherwise spend every turn it has.
-        refusal = agent.code_mode_preflight_refusal()
+        # The Agent has already opened its turn frame and only `run` closes
+        # it, so a refusal here closes it too -- or it stays `processing`.
+        try:
+            refusal = agent.code_mode_preflight_refusal()
+        except KeyboardInterrupt:
+            agent.close_unrun_frame("cancelled")
+            raise
+        except BaseException:
+            agent.close_unrun_frame("failed")
+            raise
         if refusal is not None:
+            agent.close_unrun_frame("failed")
             return _run_refusal(
                 args,
                 {"error": refusal, "code": "code_mode_test_runner_unauthorized"},
@@ -2394,11 +2417,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="CMD",
         default=None,
         help=(
-            "pre-authorize host.bash for exactly this test command in this run "
+            "pre-authorize host.bash for this exact command string in this run "
             "(repeatable; requires --mode reusable_pipeline or codebase_change). "
             "A headless run has nobody to approve the shell command its test "
             "evidence must come from; this installs a conversation-scoped "
-            "exact-command allow rule and nothing broader"
+            "exact-command allow rule and nothing broader. The receipt that "
+            "backs test_evidence is the kernel worker's report of that string's "
+            "exit status, run with the Cell's environment (PATH, cwd): it catches "
+            "a test that was not run, only printed, or failed, and is not proof "
+            "against a Cell that fakes the runner"
         ),
     )
     pr.add_argument(

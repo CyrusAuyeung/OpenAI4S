@@ -178,6 +178,91 @@ def test_explicit_code_mode_refuses_before_any_model_call_when_bash_is_unauthori
     assert "host.bash" in payload["error"]
 
 
+def _frame_statuses(cfg) -> list[str]:
+    """Every frame row's status, read without opening a Store."""
+
+    import sqlite3
+
+    if not cfg.db_path.exists():
+        return []
+    with sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True) as db:
+        return [row[0] for row in db.execute("SELECT status FROM frames")]
+
+
+@pytest.mark.parametrize("mode", ["codebase_change", "reusable_pipeline"])
+def test_a_preflight_refusal_closes_the_frame_the_agent_opened(
+    tmp_path, monkeypatch, capsys, mode
+):
+    """The Agent opens its root turn frame before the preflight can refuse, and
+    only `Agent.run` used to close it. A refused run never reaches `run`, so
+    its row stayed `processing` forever: a phantom in-progress turn for a run
+    that did no work."""
+
+    from openai4s.agent import loop as loop_mod
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    cli = _cli()
+    cfg = _cfg(tmp_path, max_turns=2)
+    monkeypatch.setattr(cli, "get_config", lambda: cfg)
+    chat = _ScriptedChat(["Stopping."])
+    monkeypatch.setattr(loop_mod, "chat", chat)
+
+    status = cli.cmd_run(_args(mode=mode))
+    payload = _json_payload(capsys.readouterr().out)
+
+    assert status == 2 and chat.calls == []
+    assert payload["code"] == "code_mode_test_runner_unauthorized"
+    assert _frame_statuses(cfg) == ["failed"]
+
+
+def test_a_preflight_that_raises_still_closes_the_frame(tmp_path, monkeypatch):
+    from openai4s.agent import loop as loop_mod
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    cli = _cli()
+    cfg = _cfg(tmp_path, max_turns=2)
+    monkeypatch.setattr(cli, "get_config", lambda: cfg)
+    chat = _ScriptedChat(["Stopping."])
+    monkeypatch.setattr(loop_mod, "chat", chat)
+
+    def broken(self):
+        raise RuntimeError("the permission store is unreadable")
+
+    monkeypatch.setattr(loop_mod.Agent, "code_mode_preflight_refusal", broken)
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        cli.cmd_run(_args(mode="codebase_change"))
+
+    assert chat.calls == []
+    assert _frame_statuses(cfg) == ["failed"]
+
+
+def test_closing_an_unrun_frame_never_writes_a_frame_the_agent_does_not_own(
+    tmp_path,
+):
+    from openai4s.agent import loop as loop_mod
+
+    owner = _agent(tmp_path, task_mode="codebase_change")
+    store = owner.dispatcher.store
+    borrowed = loop_mod.Agent(
+        cfg=_cfg(tmp_path),
+        use_skills=False,
+        allow_delegate=False,
+        workspace=str(tmp_path),
+        dispatcher=owner.dispatcher,
+        frame_id=owner.frame_id,
+    )
+
+    borrowed.close_unrun_frame("failed")
+    assert store.get_frame(owner.frame_id)["status"] == "processing"
+    owner.close_unrun_frame("failed")
+    assert store.get_frame(owner.frame_id)["status"] == "failed"
+
+
 def test_the_refusal_is_plain_text_without_json(tmp_path, monkeypatch, capsys):
     from openai4s.agent import loop as loop_mod
 
@@ -225,6 +310,49 @@ def test_allow_test_command_is_validated_before_anything_runs(
     assert status == 2 and chat.calls == []
     assert payload["code"] == "invalid_allow_test_command"
     assert message in payload["error"]
+
+
+def test_the_receipt_is_described_as_the_worker_report_it_is():
+    """`host.bash` runs inside the Cell's own kernel process, with the Cell's
+    PATH, cwd and in-process state, and the worker reports its exit status.
+    The rule authorizes an exact command string; the receipt is not proof
+    against a Cell that fakes the runner. Every place that described it as
+    the Host's own receipt for "exactly this test command" must say so."""
+
+    from pathlib import Path
+
+    from openai4s import prompts
+
+    root = Path(__file__).resolve().parents[1]
+    parser = _cli().build_parser()
+    run = next(
+        action
+        for action in parser._subparsers._group_actions[0].choices["run"]._actions
+        if "--allow-test-command" in action.option_strings
+    )
+    flag_help = " ".join(str(run.help).split())
+    assert "exact command string" in flag_help
+    assert "worker" in flag_help and "not proof" in flag_help
+
+    fragment = " ".join(prompts._TASK_MODE_SHARED_COMPLETION.split())
+    assert "its own receipt" not in fragment
+    assert "never evidence" not in fragment
+    assert "exact command string" in fragment
+    assert "exit status" in fragment and "`PATH`" in fragment
+
+    architecture = " ".join(
+        (root / "docs" / "architecture.md").read_text(encoding="utf-8").split()
+    )
+    assert "Host's own successful `host.bash` receipt" not in architecture
+    assert "never counts" not in architecture
+    assert "kernel worker's own report" in architecture
+
+    cli = root / "openai4s" / "cli"
+    english = " ".join((cli / "README.md").read_text(encoding="utf-8").split())
+    chinese = "".join((cli / "README_zh.md").read_text(encoding="utf-8").split())
+    assert "pre-authorizes exactly that command for" not in english
+    assert "exact command string" in english and "not proof" in english
+    assert "精确命令字符串" in chinese and "并不能证明" in chinese
 
 
 def test_the_opt_in_is_parsed_as_a_repeatable_flag():
