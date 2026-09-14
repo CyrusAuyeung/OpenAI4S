@@ -318,3 +318,75 @@ def test_a_tool_only_run_hands_the_reviewer_its_tool_ledger(tmp_path, monkeypatc
     ledger = _packet(seen["packet"])["tool_ledger"]
     assert [item["title"] for item in ledger] == ["list_dir"]
     assert ledger[0]["status"] == "done"
+
+
+@pytest.mark.parametrize("record_cells", [False, True], ids=["unrecorded", "recorded"])
+def test_executed_cells_missing_from_the_record_are_declared_not_complete(
+    tmp_path, monkeypatch, record_cells
+):
+    """A caller that hands the reviewer a Store and frame but never armed the
+    cell recorder has execution attempts with no `execution_log` rows. That
+    packet would read `complete` with `cells: []` -- the fail-open the adapter
+    closes -- so the gap is a `cells_unrecorded` omission and never
+    `verified`. The recorded control proves the omission tracks the gap."""
+
+    from openai4s.agent import loop as loop_mod
+
+    class _Kernel:
+        def __init__(self, *a, **k):
+            pass
+
+        def execute(self, *a, **k):
+            return {"stdout": "r=0.9990\n", "error": None}
+
+        def shutdown(self):
+            pass
+
+    replies = ["```python\nprint('r=0.9990')\n```", "r = 0.9990."]
+
+    def agent_chat(messages, cfg, **kwargs):
+        del messages, cfg, kwargs
+        return {"content": replies.pop(0) if replies else "Done.", "usage": {}}
+
+    monkeypatch.setattr(loop_mod, "Kernel", _Kernel)
+    monkeypatch.setattr(loop_mod, "chat", agent_chat)
+    agent = loop_mod.Agent(
+        cfg=_llm_cfg(tmp_path),
+        max_turns=2,
+        use_skills=False,
+        allow_delegate=False,
+        workspace=str(tmp_path),
+        record_cells=record_cells,
+    )
+    result = agent.run("Compute r.")
+    store = agent.dispatcher.store
+    assert store.list_execution_attempts(root_frame_id=agent.frame_id), result
+
+    seen: dict[str, object] = {}
+
+    def lenient(messages, *_args, **_kwargs):
+        seen["packet"] = messages[-1]["content"]
+        return {"content": json.dumps({"verdict": "pass", "findings": []}), "usage": {}}
+
+    review = review_cli_result(
+        "Compute r.",
+        result,
+        cfg=_cfg(),
+        store=store,
+        root_frame_id=agent.frame_id,
+        chat_call=lenient,
+    )
+    packet = _packet(seen["packet"]) if "packet" in seen else None
+    gaps = [
+        item
+        for item in (packet or {}).get("omissions", [])
+        if item.get("kind") == "cells_unrecorded"
+    ]
+    if record_cells:
+        assert packet is not None and not gaps and packet["complete"] is True
+        assert review["terminal"] == "verified"
+    else:
+        assert review["terminal"] != "verified"
+        assert review["unverified"] is True
+        assert packet is not None and packet["complete"] is False, packet
+        assert [gap.get("count") for gap in gaps] == [1], packet["omissions"]
