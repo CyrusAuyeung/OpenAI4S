@@ -402,9 +402,11 @@ profile says today.
 - `409 model_revision_unavailable` — the session is pinned to a revision that
   no longer exists, or whose credential no longer resolves. Resolving to the
   nearest one would be the silent follow-latest behaviour this replaces,
-  wearing a number. A pinned revision whose provider or effective endpoint (an
-  empty `base_url` is the protocol's default) is not the one the profile names
-  now is refused the same way: the profile's key is shared across revisions and
+  wearing a number. A pinned revision whose provider or effective endpoint is
+  not the one the profile names now is refused the same way (an empty
+  `base_url` is resolved the way dispatch resolves it:
+  `OPENAI4S_<PROVIDER>_BASE_URL`, then `OPENAI4S_LLM_BASE_URL`, then the
+  protocol's default): the profile's key is shared across revisions and
   belongs to its current configuration, so it is never sent to an older
   revision's endpoint — nor is an environment key substituted for it. A
   model-only revision keeps provider and endpoint and still dispatches.

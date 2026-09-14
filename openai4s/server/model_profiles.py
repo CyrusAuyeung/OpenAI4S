@@ -313,12 +313,28 @@ class ModelProfileService:
     def _credential_scope(self, configuration: Mapping[str, Any]) -> tuple[str, str]:
         """`(provider, effective endpoint)`: where a request under it is sent.
 
-        An empty base_url dispatches to the protocol's default, so `""` and the
-        default spelled out are one endpoint; `normalize_endpoint` makes a
-        trailing slash or a stripped query the same one too.
+        An empty base_url is resolved by the code that dispatches it, not by a
+        copy of its rule: the pinned dispatch hands `base_url=None` to
+        `LLMConfig.__post_init__`, which reads `OPENAI4S_<P>_BASE_URL`, then
+        `OPENAI4S_LLM_BASE_URL`, and only then the protocol's default. Judged
+        against the static default alone, a revision pinned to `""` while the
+        environment named a proxy matched a revision spelling out the official
+        endpoint, and the key entered for that endpoint went to the proxy. With
+        no override, `""` and the default spelled out are still one endpoint;
+        `normalize_endpoint` makes a trailing slash or a stripped query the same
+        one too.
         """
         provider = str(configuration.get("provider") or "").strip().lower()
         endpoint = normalize_endpoint(str(configuration.get("base_url") or ""))
+        if not endpoint:
+            dispatched = provider or str(getattr(self.cfg.llm, "provider", "") or "")
+            try:
+                resolved = LLMConfig(
+                    provider=dispatched, base_url="", model="unused", api_key="unused"
+                ).base_url
+            except Exception:  # noqa: BLE001 - fall back to the static default
+                resolved = ""
+            endpoint = normalize_endpoint(str(resolved or ""))
         if not endpoint:
             spec = self._providers().get(provider, {})
             endpoint = normalize_endpoint(str(spec.get("base_url") or ""))

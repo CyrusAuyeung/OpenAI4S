@@ -1174,6 +1174,80 @@ def test_a_rotated_key_on_the_same_endpoint_still_reaches_the_pinned_session(
     assert (runner.store.get_frame(frame) or {}).get("model_profile_revision") == 1
 
 
+_ENV_PROXY = "https://llm-proxy.example.org/v1"
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    "variable", ["OPENAI4S_CHATGPT_BASE_URL", "OPENAI4S_LLM_BASE_URL"]
+)
+def test_an_empty_base_url_is_the_endpoint_the_environment_names(
+    api, monkeypatch, variable
+):
+    """`base_url: ""` is not "the protocol's default". Dispatch resolves it
+    through `OPENAI4S_<P>_BASE_URL` -> `OPENAI4S_LLM_BASE_URL` -> default, the
+    layer `LLMConfig` documents. Judged against the static default instead, a
+    revision pinned to `""` -- really the proxy the environment names -- matched
+    one that spelled out the official endpoint, and the key entered for that
+    endpoint went to the proxy."""
+    runner, call = api
+    monkeypatch.setenv(variable, _ENV_PROXY)
+    seen, frame, project, profile_id = _keyed_workbench_session(
+        runner, call, monkeypatch, provider="chatgpt", base_url="", key="sk-proxy-OLD"
+    )
+    # The premise: the pinned revision really is dispatched to the proxy.
+    assert runner._llm_cfg(runner._state(frame, project)).base_url == _ENV_PROXY
+    edited = call(
+        "PATCH",
+        f"/model-profiles/{profile_id}",
+        {"base_url": "https://api.openai.com/v1", "api_key": "sk-REAL-NEW"},
+    )
+    assert edited["code"] == 200 and edited["body"]["revision"] == 2, edited
+
+    refused = call(
+        "POST", f"/frames/{frame}/message", {"request": "again", "wait": False}
+    )
+    assert refused["code"] == 409, refused
+    assert refused["body"].get("code") == "model_revision_unavailable", refused
+    assert not seen, f"dispatched {seen[-1].base_url} with ...{seen[-1].api_key[-4:]}"
+    with pytest.raises(GatewayError) as dispatch:
+        runner._llm_cfg(runner._state(frame, project))
+    assert dispatch.value.error_code == "model_revision_unavailable"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_revision"] == 2, rebound
+    accepted, result = _send_this(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen[-1].base_url == "https://api.openai.com/v1"
+    assert seen[-1].api_key == "sk-REAL-NEW"
+
+
+@pytest.mark.stubbed_backend
+def test_a_rotation_under_an_environment_endpoint_still_reaches_the_pinned_session(
+    api, monkeypatch
+):
+    """The over-refusal guard for the same layer: both revisions leave
+    `base_url` empty, so both reach the endpoint the environment names, and a
+    rotated key or a model-only edit keeps the pinned session sendable."""
+    runner, call = api
+    monkeypatch.setenv("OPENAI4S_CHATGPT_BASE_URL", _ENV_PROXY)
+    seen, frame, _project, profile_id = _keyed_workbench_session(
+        runner, call, monkeypatch, provider="chatgpt", base_url="", key="sk-OLD"
+    )
+    call("PATCH", f"/model-profiles/{profile_id}", {"api_key": "sk-ROTATED"})
+    moved = call("PATCH", f"/model-profiles/{profile_id}", {"model": "gpt-y"})
+    assert moved["body"]["revision"] == 2, moved
+
+    accepted, result = _send_this(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen[-1].base_url == _ENV_PROXY
+    assert seen[-1].model == "gpt-x", "the pinned revision's model"
+    assert seen[-1].api_key == "sk-ROTATED"
+
+
 # --------------------------------------------------------------------------
 # a rebind with nothing active must not report a success the send refuses
 # --------------------------------------------------------------------------
