@@ -139,6 +139,17 @@ describe("ModelsTab active configuration", () => {
     expect(row).toContain("[redacted]");
   });
 
+  it("redacts an Ark key that ended up in the live row", async () => {
+    const pasted = ["ark-fake", "3f2a9c1e", "7b4d", "4e8a", "9c2f", "1a2b3c4d5e6f", "ab12c"].join("-");
+    const tree = await open({
+      "/model-profiles": () => response({ profiles: [], active_id: "", protocols: ["ark"] }),
+      "/config/llm": () => response({ ...LIVE, model: pasted }),
+    });
+    const row = content(tagged(tree, "data-live-model")[0]);
+    expect(row).not.toContain("3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f");
+    expect(row).toContain("[redacted]");
+  });
+
   it("keeps the empty state when nothing is configured anywhere", async () => {
     const tree = await open({
       "/model-profiles": () => response({ profiles: [], active_id: "", protocols: ["ark"] }),
