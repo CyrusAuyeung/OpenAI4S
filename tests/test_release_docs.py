@@ -280,6 +280,9 @@ PARITY_AUDIT = ROOT / "docs" / "windows-wsl-parity-audit.md"
 #: each README half must use to disclose it. Keyed by the audit's own wording,
 #: so an audit that later certifies one of them releases the docs from it.
 _WINDOWS_LIMITATIONS = {
+    # D13 names this one first; the audit's final section says it "does not
+    # certify macOS execution" because the macOS side was read from source.
+    "macOS execution": ("side-by-side macOS run", "与 macOS 并排运行"),
     "Windows reboot": ("A Windows reboot", "Windows 整机重启"),
     "Conda provisioning": ("Conda environment provisioning", "Conda 环境准备"),
     "real provider login/inference": (

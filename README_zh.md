@@ -185,6 +185,7 @@ tar -xzf OpenAI4S-*-linux-x86_64.tar.gz && cd OpenAI4S-*-linux-x86_64
 
 `v0.3.0` 是第一个发布这个安装包的版本，它的验收证据只覆盖 x86_64 上的 WSL2 和测试所用的 Ubuntu 24.04 发行版。[WSL2 一致性审计](docs/windows-wsl-parity-audit_zh.md)的最后一节（「修复验收记录 — 2026-09-07」）列出以下尚未验证的范围：
 
+- 与 macOS 并排运行的一致性对比。对比中的 macOS 一侧来自源码阅读，并未实际运行。
 - Windows on ARM、其他发行版，以及测试所用之外的 WSL 网络模式。
 - 真实的供应商登录与推理。科学家流程是在 `OPENAI4S_NOTEBOOK_REPL=1` 下运行的，没有调用真实模型。
 - Conda 环境准备，因此 Windows 上的 R 和其他命名环境都未经验证。R 只是作为测试前提装进了测试发行版。

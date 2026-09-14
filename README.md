@@ -196,6 +196,7 @@ Download `OpenAI4S-<version>-windows-x86_64.zip`, unzip it, and double-click `Op
 
 `v0.3.0` is the first release that ships this package. Its acceptance evidence covers WSL2 on x86_64 with the tested Ubuntu 24.04 distribution. The last section of the [WSL2 parity audit](docs/windows-wsl-parity-audit.md) ("Fix verification — 2026-09-07") leaves the following unverified:
 
+- A side-by-side macOS run for the parity comparison. The macOS side of that comparison was read from source, not run.
 - Windows on ARM, other distributions, and WSL network modes other than the tested one.
 - Real provider sign-in and inference. The scientist flow ran with `OPENAI4S_NOTEBOOK_REPL=1` and no live model.
 - Conda environment provisioning, so R and other named environments on Windows are unverified. R was installed in the test distribution only as a test prerequisite.
