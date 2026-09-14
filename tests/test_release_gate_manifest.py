@@ -965,6 +965,58 @@ def test_the_container_publication_boundary_is_held_to_the_same_rule():
     assert "^v[0-9]+\\.[0-9]+\\.[0-9]+$" in str(resolve.get("run") or "")
 
 
+def test_a_published_release_dispatches_its_container_image():
+    """`finalize` must start `publish-image.yml` itself, for the tag it published.
+
+    `publish-image.yml` listens for `release: published`, but `finalize` makes
+    the release public with the job's `GITHUB_TOKEN`, and GitHub starts no
+    workflow run for an event that token raised (`workflow_dispatch` is the
+    documented exception). So the image never built on its own: `:latest`
+    would have stayed at the previous version while every README said it
+    ships with each release.
+
+    The dispatch has to name the tag twice. `--ref` makes `github.sha` in the
+    image workflow the tagged commit, which its `revalidate_release_tag.sh`
+    compares the tag against; `-f ref=` is the tag it builds and pushes.
+    """
+    finalize = _workflow("release.yml")["jobs"]["finalize"]
+    assert (finalize.get("permissions") or {}).get("actions") == "write", (
+        "dispatching a workflow needs `actions: write`; without it the step "
+        "fails after the release is already public"
+    )
+    steps = finalize.get("steps") or []
+    names = [str(step.get("name") or "") for step in steps]
+    publish = next(
+        index
+        for index, step in enumerate(steps)
+        if "--only publish" in str(step.get("run") or "")
+    )
+    dispatches = [
+        index
+        for index, step in enumerate(steps)
+        if "publish-image.yml" in str(step.get("run") or "")
+    ]
+    assert len(dispatches) == 1, "finalize does not dispatch the image workflow"
+    dispatch = steps[dispatches[0]]
+    assert (
+        dispatches[0] > publish
+    ), f"the image must be dispatched only after the release is public: {names}"
+    assert "if" not in dispatch, "a condition could dispatch after a failed publish"
+
+    command = " ".join(str(dispatch.get("run") or "").split())
+    assert "gh workflow run publish-image.yml" in command
+    assert '--ref "$TAG"' in command
+    assert '-f ref="$TAG"' in command
+    env = dispatch.get("env") or {}
+    assert env.get("TAG") == "${{ inputs.tag }}"
+    assert env.get("GH_TOKEN") == "${{ github.token }}"
+
+    image = _workflow("publish-image.yml")
+    triggers = image.get("on", image.get(True)) or {}
+    assert "workflow_dispatch" in triggers
+    assert "ref" in (triggers["workflow_dispatch"].get("inputs") or {})
+
+
 @pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
 def test_every_job_has_an_explicit_timeout(workflow):
     """Item 4. ci.yml had none at all on any of its ten jobs, so a hung browser

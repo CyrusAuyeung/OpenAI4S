@@ -834,6 +834,9 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      # Only to dispatch publish-image.yml for the tag once it is public; see
+      # the last step.
+      actions: write
     steps:
       - name: Check out the pipeline at the frozen release SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -871,3 +874,21 @@ jobs:
             --attestation attestation/stage-attestation.json \
             --workflow-run-id "$GITHUB_RUN_ID" \
             --json
+      # publish-image.yml listens for `release: published`, but the step above
+      # makes the release public with this job's GITHUB_TOKEN, and GitHub starts
+      # no workflow run for an event that token raised -- workflow_dispatch is
+      # the documented exception. Without this the image never built and
+      # `:latest` stayed on the previous version. `--ref` is the tag so the
+      # image job's `github.sha` is the tagged commit its tag revalidation
+      # compares against; `-f ref=` is the tag it builds and pushes. Unconditional
+      # on purpose: steps stop at the first failure, so this runs only after a
+      # successful publish. A re-run dispatches again, which rebuilds the same
+      # tag under publish-image's non-cancelling per-tag concurrency group.
+      - name: Dispatch the container image for the published tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-image.yml --repo "$GH_REPO" --ref "$TAG" -f ref="$TAG"
