@@ -4348,7 +4348,6 @@ def test_token_gate_401_and_cookie_redirect(monkeypatch, tmp_path, capsys):
     timing. And the redirect went to "/" unconditionally, so a bookmarked deep
     link carrying a token landed on the dashboard instead of its target.
     """
-    monkeypatch.setenv("OPENAI4S_REQUIRE_TOKEN", "1")
     cfg = _cfg(tmp_path)
     runner = gateway_mod.SessionRunner(cfg, _Hub())
     handler_cls = gateway_mod.make_handler(cfg, _Hub(), runner)
