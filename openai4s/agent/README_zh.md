@@ -31,7 +31,7 @@
 | [`events.py`](./events.py) | `AgentEngine` 发出的类型化生命周期事件。 |
 | [`finalize.py`](./finalize.py) | 持有 `finalize_response` 的 schema。provider 那边只看到一份纯元数据的 spec，Host 在接受之前会把同一份封闭 schema 再校验一遍，有效的单独调用则转成结构化 completion record。它有意不注册为控制 `Tool`。接受与否背后的执行证据账本也在这里：executor 在分发现场调用 `note_execution_evidence`——只在内核真的跑过、或分发出去的调用报告 ok 之后记，拒绝和权限否决从不记——`reconcile_completion_claims` 则拒掉零执行却主张执行过工作的 payload。CJK bullet 没有时态形态，永远不会被标记。 |
 | [`ledger.py`](./ledger.py) | 把类型化的 Engine 事件写进只追加的 Action Ledger，写入时遮蔽声明过的 secret。往回读时，它把 group 归约成 provider 能接受的重启历史，并给崩溃时没拿到结果的工具调用补上收尾。团队模式下它还把模型用量计到 session 属主头上，尽力而为：没有归属记录时只是两次读、零次写，而且计量永远不会让动作失败。 |
-| [`loop.py`](./loop.py) | 向后兼容的本地 `Agent` facade，也是本地进程生命周期的归属地。它把 Engine 接到模型、dispatcher、ledger、委派，以及只在某个回合真的要跑代码时才启动的常驻内核上。当 Web gateway 把它作为被委派的子 Agent 嵌入时，它还接受父 session 的工作区、一份 OS 读隔离策略和 Cell 捕获钩子；不设置时各自保持 CLI 契约——进程 cwd、历史读行为、不做捕获。 |
+| [`loop.py`](./loop.py) | 向后兼容的本地 `Agent` facade，也是本地进程生命周期的归属地。它把 Engine 接到模型、dispatcher、ledger、委派，以及只在某个回合真的要跑代码时才启动的常驻内核上。当 Web gateway 把它作为被委派的子 Agent 嵌入时，它还接受父 session 的工作区、一份 OS 读隔离策略和 Cell 捕获钩子；不设置时各自保持 CLI 契约——进程 cwd、历史读行为、不做捕获。它向模型声明的工具会参照当前授权姿态：一个需要审批、却没有任何已连接通道、常设允许规则、Guardian 允许名单或无人值守策略能批准的工具，不会出现在投影里（Web session 的子 Agent 因为根会话挂着通道，照旧看到全部工具）；而 catalog 和权限闸门仍然看得见它，模型硬要调用时照样拒绝并留审计。 |
 | [`models.py`](./models.py) | 在 Engine 里流转、与 provider 无关的那些值：标准化后的模型回复、可变的运行状态、一次执行的 outcome，以及最终结果。 |
 | [`ports.py`](./ports.py) | Engine 依赖的一组 protocol，每个都配一个不做任何事的默认实现。正是它们让 `engine.py` 不必 import 具体的模型、存储、内核和 UI 代码。 |
 | [`progress_circuit.py`](./progress_circuit.py) | 通用 Agent 无进展熔断。在一个外部用户消息 epoch 内统计相同 tool+canonical args、连续 malformed、归一化同类 tool error、以及保守的长文本近重复。阈值由服务端固定。唯一持久权威是 Action Ledger；`RunState.metadata` 只是本进程缓存。触发后 `stop_reason=no_progress` 并携带闭集 `progress_reason`，绝不推断 completed。 |

@@ -1257,7 +1257,12 @@ class LocalActionExecutor:
         # while those synthesized dicts carry only "error".
         if isinstance(result, dict) and "stdout" in result:
             note_execution_evidence(state.metadata, cells=1)
-        observation = format_observation(result)
+        observation = format_observation(
+            result,
+            cell_id=evidence_cell_id(
+                self.dispatcher, attempt[2] if attempt is not None else None
+            ),
+        )
         if count_code_blocks(reply.content) > 1 or has_incomplete_code_block(
             reply.content
         ):
@@ -1491,13 +1496,34 @@ def _budgeted(text: str, kind: str, workspace: str | None) -> str:
     return text[:_PREVIEW_HEAD] + marker + text[-_PREVIEW_TAIL:]
 
 
-def format_observation(result: dict) -> str:
+def evidence_cell_id(dispatcher: Any, cell_id: Any) -> str | None:
+    """The durable cell id to show the model, or ``None`` to show nothing.
+
+    Only while an explicit code mode arms the completion contract: its
+    ``test_evidence`` must name the producing cell, and that id is minted by
+    the Host, so the Observation is the one place the model can learn it.
+    Every other run keeps its Observation byte for byte.
+    """
+
+    from openai4s.host.code_evidence import requires_code_evidence
+
+    mode = getattr(dispatcher, "binding_task_mode", None)
+    if not requires_code_evidence(mode) or not cell_id:
+        return None
+    return str(cell_id)
+
+
+def format_observation(result: dict, *, cell_id: str | None = None) -> str:
     """Format one kernel result as the stable observation protocol.
 
     Oversized stdout/stderr are previewed and their full bytes spilled to a
-    workspace-relative content reference the agent can open.
+    workspace-relative content reference the agent can open. ``cell_id`` adds
+    a ``[cell id: …]`` line directly under the header; callers pass it only
+    when a completion contract needs the model to cite the cell.
     """
     parts = ["[Observation]"]
+    if cell_id:
+        parts.append(f"[cell id: {cell_id}]")
     out = result.get("stdout") or ""
     err = result.get("stderr") or ""
     error = result.get("error")
@@ -1544,5 +1570,6 @@ __all__ = [
     "LocalActionExecutor",
     "TranscriptEventSink",
     "TranscriptTurn",
+    "evidence_cell_id",
     "format_observation",
 ]

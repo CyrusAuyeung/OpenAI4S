@@ -38,7 +38,7 @@ from openai4s.agent.finalize import (
     note_execution_evidence,
 )
 from openai4s.agent.models import ExecutionOutcome, ModelReply, RunState
-from openai4s.agent.runtime import format_observation
+from openai4s.agent.runtime import evidence_cell_id, format_observation
 from openai4s.server.completions import action_narration, outcome_narration
 from openai4s.tools import (
     MAX_TOOL_CALLS_PER_TURN,
@@ -556,7 +556,13 @@ class WebActionExecutor:
                 result, executed = cell_outcome, True
             if executed:
                 note_execution_evidence(state.metadata, cells=1)
-            observation = format_observation(result)
+            observation = format_observation(
+                result,
+                cell_id=evidence_cell_id(
+                    self.dispatcher(),
+                    result.get("id") if executed and isinstance(result, dict) else None,
+                ),
+            )
             if count_code_blocks(reply.content) > 1 or has_incomplete_code_block(
                 reply.content
             ):

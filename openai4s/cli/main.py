@@ -1058,17 +1058,73 @@ auto_mode.terminal for the review verdict.
 """
 
 
+def _run_refusal(args, payload: dict) -> int:
+    """Print a pre-run refusal in the same JSON/text contract as a run error."""
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"error: {payload['error']}", file=sys.stderr)
+    return 2
+
+
 def cmd_run(args) -> int:
     from openai4s.agent import Agent
-    from openai4s.agent.loop import enable_auto_run_environment, review_cli_result
+    from openai4s.agent.loop import (
+        allowed_test_command_error,
+        enable_auto_run_environment,
+        review_cli_result,
+    )
+    from openai4s.host.code_evidence import EVIDENCE_REQUIRED_MODES
     from openai4s.kernel.readiness import EnvironmentReadinessError
+
+    mode = getattr(args, "mode", None)
+    allowed_tests = [
+        str(item) for item in getattr(args, "allow_test_command", None) or []
+    ]
+    if allowed_tests:
+        # Validated before anything else happens: the flag widens what a
+        # headless run may execute, so a flag that cannot mean exactly one
+        # command must not reach a rule.
+        problem = None
+        if mode not in EVIDENCE_REQUIRED_MODES:
+            problem = (
+                "--allow-test-command applies only with --mode reusable_pipeline "
+                "or --mode codebase_change, whose completion cites test commands"
+            )
+        else:
+            for command in allowed_tests:
+                reason = allowed_test_command_error(command)
+                if reason is not None:
+                    problem = f"--allow-test-command {command!r}: {reason}"
+                    break
+        if problem is not None:
+            return _run_refusal(
+                args, {"error": problem, "code": "invalid_allow_test_command"}
+            )
 
     auto_applied: dict[str, str] = {}
     if getattr(args, "auto", False):
         # Before get_config(), which reads these at construction.
         auto_applied = enable_auto_run_environment()
     cfg = get_config()
-    agent = Agent(cfg=cfg, verbose=args.verbose, task_mode=getattr(args, "mode", None))
+    agent_options: dict = {}
+    if allowed_tests:
+        agent_options["allowed_test_commands"] = tuple(allowed_tests)
+    if getattr(args, "auto", False):
+        # The post-run review judges what the run recorded; without its cells
+        # the reviewer sees an answer and no executed code or output at all.
+        agent_options["record_cells"] = True
+    agent = Agent(cfg=cfg, verbose=args.verbose, task_mode=mode, **agent_options)
+    if mode in EVIDENCE_REQUIRED_MODES:
+        # Before the first model call: an explicit code mode that can never
+        # obtain its test receipt would otherwise spend every turn it has.
+        refusal = agent.code_mode_preflight_refusal()
+        if refusal is not None:
+            return _run_refusal(
+                args,
+                {"error": refusal, "code": "code_mode_test_runner_unauthorized"},
+            )
     try:
         with _foreground_cell_interrupt(agent):
             result = agent.run(args.task)
@@ -1090,7 +1146,13 @@ def cmd_run(args) -> int:
     if getattr(args, "auto", False):
         # A machine-readable terminal is the point of --auto: CI needs to tell
         # "ran and was verified" from "ran and nobody checked".
-        review = review_cli_result(args.task, result, cfg=cfg)
+        review = review_cli_result(
+            args.task,
+            result,
+            cfg=cfg,
+            store=getattr(getattr(agent, "dispatcher", None), "store", None),
+            root_frame_id=getattr(agent, "frame_id", None),
+        )
         result = dict(result)
         result["auto_mode"] = {
             "preset": "autonomous",
@@ -2245,7 +2307,21 @@ def build_parser() -> argparse.ArgumentParser:
             "defaults to analysis_run. Selecting reusable_pipeline or "
             "codebase_change explicitly requires the run to save source "
             "files, keep a thin entry point, and back its completion with "
-            "verified source/entry-point/test evidence"
+            "verified source/entry-point/test evidence, including a "
+            "Host-authorized host.bash receipt for each test command"
+        ),
+    )
+    pr.add_argument(
+        "--allow-test-command",
+        action="append",
+        metavar="CMD",
+        default=None,
+        help=(
+            "pre-authorize host.bash for exactly this test command in this run "
+            "(repeatable; requires --mode reusable_pipeline or codebase_change). "
+            "A headless run has nobody to approve the shell command its test "
+            "evidence must come from; this installs a conversation-scoped "
+            "exact-command allow rule and nothing broader"
         ),
     )
     pr.add_argument(

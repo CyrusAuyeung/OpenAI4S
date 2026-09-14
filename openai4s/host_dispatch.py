@@ -1504,6 +1504,16 @@ class HostDispatcher:
         self._task_turn_id = None
         self._task_branch_id = None
 
+    @property
+    def binding_task_mode(self) -> str | None:
+        """The turn's BINDING task mode (see :meth:`set_task_mode`), read-only.
+
+        Runtimes read it to decide what the model must be shown for the armed
+        completion contract -- a code mode's ``test_evidence`` names a cell id
+        only the Observation can reveal.
+        """
+        return self._task_mode
+
     def set_task_evidence_scope(
         self, *, turn_id: str | None, branch_id: str | None = None
     ) -> None:
