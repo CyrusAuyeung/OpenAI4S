@@ -205,7 +205,16 @@ async function renderProvEnvironment(body: HTMLElement, a: ArtifactRow): Promise
   const py = envPythonChip(env);
   if (py) chips.appendChild(chip(py.label, py.value));
   if (env.environment_name) chips.appendChild(chip("Env", publicText(env.environment_name, 48)));
-  chips.appendChild(chip("Packages", String(envPackageCount(env))));
+  const packageCount = envPackageCount(env);
+  const pythonKind = String(env.kind || "python").toLowerCase() === "python";
+  chips.appendChild(
+    chip(
+      "Packages",
+      packageCount != null
+        ? String(packageCount)
+        : filesT(pythonKind ? "prov.env.packagesUnknown" : "prov.env.packagesNotApplicable"),
+    ),
+  );
   body.appendChild(chips);
   if (env.interpreter) body.appendChild(el("div", "env-plat", publicText(env.interpreter, 160)));
   if (env.platform) body.appendChild(el("div", "env-plat", env.platform));
@@ -286,7 +295,8 @@ async function renderProvEnvironment(body: HTMLElement, a: ArtifactRow): Promise
     body.appendChild(rw);
   }
   if (!pkgs.length) {
-    body.appendChild(el("div", "dock-empty", t("prov.env.noPackages")));
+    // An unread list is not an empty one; the warn note above says why.
+    if (packageCount != null) body.appendChild(el("div", "dock-empty", t("prov.env.noPackages")));
     return;
   }
   const wrap = el("div", "env-tbl-wrap");
