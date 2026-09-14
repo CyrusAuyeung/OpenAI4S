@@ -11,6 +11,7 @@
 
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
+import { paintIcon } from "../icons/paths";
 import { renderMd } from "../md/render";
 import { liveCells, _liveCell } from "../../stores/notebook";
 import { stream as liveStream, stepEls } from "../../stores/stream";
@@ -258,15 +259,13 @@ export function feed(
       const card = el("div", "activity" + (suba ? " subagent" : ""));
       const h = el("div", "a-head");
       const ic = el("span", "ic");
-      ic.setAttribute("data-icon", "check");
-      ic.setAttribute("data-icon-size", "16");
+      paintIcon(ic, "check", 16);
       h.appendChild(ic);
       h.appendChild(el("span", "lbl", label));
       const meta = el("span", "meta", "");
       h.appendChild(meta);
       const chev = el("span", "chev-t");
-      chev.setAttribute("data-icon", "chevron-down");
-      chev.setAttribute("data-icon-size", "14");
+      paintIcon(chev, "chevron-down", 14);
       h.appendChild(chev);
       const { pre, handle } = newToolPre();
       handle.append(raw + "\n");

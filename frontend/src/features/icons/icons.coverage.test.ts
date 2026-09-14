@@ -9,9 +9,9 @@
  * the only way back to the sidebar.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { icon as chromeIcon } from "../chrome/dom";
 import { icon as sessionsIcon, paintIcons } from "../sessions/icon";
 
@@ -30,7 +30,7 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-/** Names written as markup (`data-icon="x"`) or set on a node (`setAttribute("data-icon", "x")`). */
+/** Names written as markup (`data-icon="x"`), set on a node (`setAttribute("data-icon", "x")`) or painted (`paintIcon(node, "x")`). */
 function paintedNames(): Map<string, string[]> {
   const names = new Map<string, string[]>();
   const note = (name: string, file: string) => {
@@ -43,6 +43,7 @@ function paintedNames(): Map<string, string[]> {
     for (const m of text.matchAll(/setAttribute\(\s*"data-icon",\s*"([a-z0-9-]+)"\s*\)/g)) {
       note(m[1]!, file);
     }
+    for (const m of text.matchAll(/paintIcon\(\s*[\w.]+,\s*"([a-z0-9-]+)"/g)) note(m[1]!, file);
   }
   // refreshThemeToggle swaps the theme buttons between these two.
   const theme = join(srcRoot, "features/theme/theme.ts");
@@ -74,10 +75,48 @@ describe("workbench icon coverage", () => {
     for (const node of nodes) expect(node.innerHTML, node.dataset.icon).toMatch(SHAPE);
   });
 
+  it("draws a node given data-icon after boot where the node is made", () => {
+    // paintIcons() runs once, from bindWorkbench(). A node created later that
+    // only carries data-icon stays an empty button: the copy / thumbs / edit
+    // actions on every stored assistant message, the activity cards' check and
+    // chevron, the team-admin chip. Those go through paintIcon() instead.
+    const unpainted = sourceFiles(srcRoot)
+      .filter((file) => !file.includes(`${sep}features${sep}icons${sep}`))
+      .flatMap((file) =>
+        [...readFileSync(file, "utf8").matchAll(/setAttribute\(\s*"data-icon"/g)].map(() => relative(srcRoot, file)),
+      );
+    expect(unpainted).toEqual([]);
+  });
+
   it("the chrome and sessions icon helpers draw the same picture for a name", () => {
     const drift = [...names.keys(), "sparkles", "file", "message-square"]
       .filter((name) => chromeIcon(name, 16) !== sessionsIcon(name, 16))
       .sort();
     expect(drift).toEqual([]);
+  });
+});
+
+describe("the notebook's iconEl", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("draws its icons (no global iconEl is ever installed), including the environment note's package", async () => {
+    vi.stubGlobal("document", {
+      createElement: () => {
+        const attrs = new Map<string, string>();
+        return {
+          innerHTML: "",
+          dataset: {} as Record<string, string>,
+          setAttribute: (name: string, value: string) => attrs.set(name, value),
+          getAttribute: (name: string) => attrs.get(name) ?? null,
+        };
+      },
+    });
+    const { iconEl } = await import("../notebook/chrome");
+    // Every name features/notebook and features/execution pass to it.
+    for (const name of ["package", "clock", "file", "download", "chevron-down", "arrow-left"]) {
+      expect(iconEl(name, 13).innerHTML, name).toMatch(SHAPE);
+    }
   });
 });

@@ -1,11 +1,13 @@
 /**
- * The workbench's line icons (lucide paths, app.js:7-77), in one table.
+ * The shared table of the workbench's line icons (lucide paths, app.js:7-77).
  *
  * The port split app.js's single table into per-lane copies, and the copies
  * drifted: `panel-left` / `panel-right` / `moon` / `sun` ended up in no table
  * `paintIcons()` reads, so the sidebar, dock and theme buttons rendered an
- * empty `<svg>`. `features/sessions/icon.ts` and `features/chrome/dom.ts`
- * both draw from this table; add a name here, not to a lane.
+ * empty `<svg>`. `features/sessions/icon.ts`, `features/chrome/dom.ts` and
+ * `features/notebook/chrome.ts` draw from this table; add a name here, not to
+ * a lane. send/icon.ts, timeline/dom.ts, islands/dom.ts and artifacts/api.ts
+ * still keep tables of their own.
  *
  * Paths are a closed allowlist of static markup, injected as innerHTML the
  * way app.js did. Never build an entry from data.
@@ -37,6 +39,8 @@ export const ICON_PATHS: Readonly<Record<string, string>> = {
   pencil:
     '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  package:
+    '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>',
   "trash-2":
     '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
   download:
@@ -80,6 +84,18 @@ export const ICON_PATHS: Readonly<Record<string, string>> = {
   "panel-left": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>',
   "panel-right": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
 };
+
+/**
+ * Give a node its icon and draw it now. paintIcons() runs once, when the Shell
+ * is bound, so a node created after that which only carries `data-icon` stays
+ * an empty button.
+ */
+export function paintIcon(node: HTMLElement, name: string, size = 16): void {
+  node.setAttribute("data-icon", name);
+  node.setAttribute("data-icon-size", String(size));
+  node.innerHTML = iconSvg(name, size);
+  (node as HTMLElement & { _painted?: boolean })._painted = true;
+}
 
 /** An inline `<svg>` for `name`; an unknown name is an empty drawing. */
 export function iconSvg(name: string, size?: number, cls?: string): string {

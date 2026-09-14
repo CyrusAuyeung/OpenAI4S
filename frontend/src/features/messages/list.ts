@@ -8,6 +8,7 @@
 
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
+import { paintIcon } from "../icons/paths";
 import { renderMd } from "../md/render";
 import { el, messagesHost } from "./dom";
 import { rememberCandidateIdentity, setMessageReviewBadge } from "./identity";
@@ -89,7 +90,7 @@ function addMsgActions(wrap: HTMLElement, text: string): void {
   const row = el("div", "msg-actions");
   const copy = el("button");
   copy.title = t("msgAction.copy");
-  copy.setAttribute("data-icon", "copy");
+  paintIcon(copy, "copy");
   copy.onclick = () => {
     try {
       if (navigator.clipboard) void navigator.clipboard.writeText(text || "");
@@ -99,13 +100,13 @@ function addMsgActions(wrap: HTMLElement, text: string): void {
   };
   const tup = el("button");
   tup.title = t("msgAction.thumbsUp");
-  tup.setAttribute("data-icon", "thumbs-up");
+  paintIcon(tup, "thumbs-up");
   const tdn = el("button");
   tdn.title = t("msgAction.thumbsDown");
-  tdn.setAttribute("data-icon", "thumbs-down");
+  paintIcon(tdn, "thumbs-down");
   const edit = el("button");
   edit.title = t("common.edit");
-  edit.setAttribute("data-icon", "pencil");
+  paintIcon(edit, "pencil");
   edit.onclick = () => {
     const c = document.getElementById("composer") as HTMLTextAreaElement | null;
     if (!c) return;
