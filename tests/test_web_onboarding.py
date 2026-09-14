@@ -266,3 +266,29 @@ def test_an_upgraded_install_configured_in_customize_is_not_a_first_run(tmp_path
 
     body = call("GET", "/onboarding")["body"]
     assert body["complete"] is True, body
+
+
+def test_an_install_with_only_a_saved_profile_is_not_a_first_run(tmp_path):
+    """0.2.0, with a profile saved in Customize -> Models and never activated:
+    no `llm_*` row, no active profile and no message, so the profile is the only
+    evidence -- and it is enough. A deleted profile is not: it configures
+    nothing."""
+    runner, call = _first_boot(tmp_path)
+    created = call(
+        "POST",
+        "/model-profiles",
+        {"name": "saved", "provider": "claude", "model": "claude-sonnet-4-5"},
+    )
+    assert created["code"] == 201, created
+    for key in OnboardingService._CONFIGURATION_SETTINGS:
+        assert runner.store.get_setting(key) in (None, ""), key
+    assert not runner.store.has_message_history()
+    assert call("GET", "/onboarding")["body"]["complete"] is True
+
+    assert call("DELETE", f"/model-profiles/{created['body']['id']}")["code"] in (
+        200,
+        204,
+    )
+    for key in OnboardingService._CONFIGURATION_SETTINGS:
+        assert runner.store.get_setting(key) in (None, ""), key
+    assert call("GET", "/onboarding")["body"]["complete"] is False
