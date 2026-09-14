@@ -20,7 +20,7 @@ import { currentId, project } from "../../stores/session";
 import { resetStoreFields } from "../../stores/signal-field";
 import { running } from "../../stores/stream";
 import { UPLOAD_STATE } from "../chrome/upload";
-import { rebindDoneText, send } from "./send";
+import { rebindConfirmText, rebindDoneText, send } from "./send";
 
 type FakeEl = Record<string, unknown> & {
   classList: { add: (name: string) => void; remove: () => void; toggle: () => void; contains: () => boolean };
@@ -157,6 +157,28 @@ describe("send(): a message the server refuses before admission", () => {
     expect(openCust).not.toHaveBeenCalled();
   });
 
+  it("asks about a moved profile without claiming the pinned configuration no longer exists", async () => {
+    // gateway._unusable_pin_error for a credential scope mismatch (SEC-2): the
+    // profile still exists, it now names a different provider or endpoint.
+    routes["/frames/frame_1/message"] = refusal(
+      "model_revision_unavailable",
+      "this session is pinned to an earlier configuration of its model profile, and the profile now names a " +
+        "different provider or endpoint; its credential is not sent to the old one. Rebind the session to continue",
+    );
+    const asked: string[] = [];
+    vi.stubGlobal("confirm", (text: string) => {
+      asked.push(text);
+      return false;
+    });
+    await send("hello");
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).not.toBe(t("model.rebind.confirm"));
+    expect(asked[0]).not.toMatch(/no longer exists/);
+    expect(asked[0]).toMatch(/provider or endpoint/);
+    expect(nodes.composer!.value).toBe("hello");
+  });
+
   it("keeps the text after a confirmed rebind, and says what the rebind actually did", async () => {
     routes["/frames/frame_1/message"] = refusal("model_revision_ambiguous", "more than one model profile matches");
     routes["/frames/frame_1/model-binding"] = {
@@ -277,6 +299,34 @@ describe("send(): a message the server refuses before admission", () => {
     await send("hello");
     expect(nodes.composer!.value).toBe("hello");
     expect(userBubble()?.removed).toBe(true);
+  });
+});
+
+describe("rebindConfirmText", () => {
+  const unavailable = (error: string) => ({ code: "model_revision_unavailable", message: error });
+
+  it("says 'no longer exists' only when the server said it", () => {
+    expect(
+      rebindConfirmText(unavailable("this session is pinned to a model configuration that no longer exists; choose one to continue")),
+    ).toMatch(/no longer exists/);
+    for (const message of [
+      "this session is pinned to a model configuration that is no longer usable; rebind it to continue",
+      "this session's pinned model configuration could not be read; rebind it to continue",
+      "this session is pinned to a model profile whose credential is not available; add its API key in Customize -> Models or rebind the session to continue",
+      "this session is pinned to an earlier configuration of its model profile, and the profile now names a different provider or endpoint; its credential is not sent to the old one. Rebind the session to continue",
+      "",
+    ]) {
+      expect(rebindConfirmText(unavailable(message))).not.toMatch(/no longer exists/);
+    }
+  });
+
+  it("names the actual reason for a moved profile, a missing key and an ambiguous match", () => {
+    const moved = rebindConfirmText(unavailable("... the profile now names a different provider or endpoint; ..."));
+    const keyless = rebindConfirmText(unavailable("... whose credential is not available; add its API key ..."));
+    const ambiguous = rebindConfirmText({ code: "model_revision_ambiguous", message: "more than one model profile matches 'gpt-4o'" });
+    expect(new Set([moved, keyless, ambiguous, rebindConfirmText(unavailable(""))]).size).toBe(4);
+    expect(keyless).toMatch(/API key/);
+    expect(ambiguous).toMatch(/more than one/i);
   });
 });
 

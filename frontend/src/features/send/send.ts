@@ -518,7 +518,7 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
     let settingsCode = err?.code;
     if (err && (err.code === "model_revision_unavailable" || err.code === "model_revision_ambiguous")) {
       const ask =
-        typeof globalThis.confirm === "function" ? globalThis.confirm(t("model.rebind.confirm")) : false;
+        typeof globalThis.confirm === "function" ? globalThis.confirm(rebindConfirmText(err)) : false;
       if (ask) {
         try {
           const rebound = await api(`/frames/${encodeURIComponent(dispatchFrameId)}/model-binding`, {
@@ -565,6 +565,55 @@ const REBIND_COPY: Record<"en" | "zh", Record<"unbound" | "backfilled", string>>
     backfilled: "已改绑到与该会话模型匹配的已保存模型配置",
   },
 };
+
+type RebindReason = "moved" | "keyless" | "unreadable" | "ambiguous" | "unusable";
+
+/** Feature-local copy: every refusal a re-bind answers, in its own words. */
+const REBIND_CONFIRM_COPY: Record<"en" | "zh", Record<RebindReason, string>> = {
+  en: {
+    moved:
+      "The model profile this session was pinned to now names a different provider or endpoint, so its key is not sent to the earlier configuration. Re-bind the session to the active configuration and continue?",
+    keyless:
+      "The model profile this session was pinned to has no usable API key. Re-bind the session to the active configuration and continue? (Cancel to add the key in Customize → Models instead.)",
+    unreadable:
+      "The model configuration this session was pinned to could not be read. Re-bind it to the active configuration and continue?",
+    ambiguous:
+      "More than one saved model profile matches the model this session used, so which one it ran under is unknown. Re-bind it to the active configuration and continue?",
+    unusable:
+      "The model configuration this session was pinned to is no longer usable. Re-bind it to the active configuration and continue?",
+  },
+  zh: {
+    moved:
+      "该会话固定的模型配置现在指向不同的提供商或端点，因此其密钥不会发往原先的配置。是否将该会话改绑到当前启用的配置以继续？",
+    keyless:
+      "该会话固定的模型配置没有可用的 API 密钥。是否将该会话改绑到当前启用的配置以继续？（取消后可在 自定义 → 模型 中添加密钥。）",
+    unreadable: "无法读取该会话固定的模型配置。是否改绑到当前启用的配置以继续？",
+    ambiguous:
+      "有多个已保存的模型配置与该会话使用的模型匹配，无法确定它当时使用的是哪一个。是否改绑到当前启用的配置以继续？",
+    unusable: "该会话固定的模型配置已不可用。是否改绑到当前启用的配置以继续？",
+  },
+};
+
+/**
+ * The re-bind prompt for a `model_revision_unavailable` /
+ * `model_revision_ambiguous` refusal. One sentence -- "no longer exists" --
+ * was shown for all of them, including a profile that still exists and only
+ * moved to another provider or endpoint (the SEC-2 scope mismatch). The codes
+ * are shared, so the server's message picks the reason; "no longer exists"
+ * is kept for the refusal that says exactly that.
+ */
+export function rebindConfirmText(error: unknown): string {
+  const rec = error && typeof error === "object" ? (error as { code?: unknown; message?: unknown }) : null;
+  const code = String((rec && rec.code) || "");
+  const message = String((rec && rec.message) || "").toLowerCase();
+  const copy = REBIND_CONFIRM_COPY[LANG === "zh" ? "zh" : "en"];
+  if (code === "model_revision_ambiguous") return copy.ambiguous;
+  if (message.includes("different provider or endpoint")) return copy.moved;
+  if (message.includes("credential is not available")) return copy.keyless;
+  if (message.includes("could not be read")) return copy.unreadable;
+  if (message.includes("no longer exists")) return t("model.rebind.confirm");
+  return copy.unusable;
+}
 
 /**
  * What `POST /frames/{id}/model-binding` actually did. "Re-bound to the active
