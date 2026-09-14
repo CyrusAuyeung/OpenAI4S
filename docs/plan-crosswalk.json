@@ -245,7 +245,7 @@
       "tests": "tests/test_auth_exit_matrix.py,tests/test_gateway_host_allowlist.py,tests/test_token_query_bootstrap.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "560630deeda39e96420a673b9772a3d48d0721567283183d9275f3f509663198"
+      "evidence_digest": "3a65b2400021a6e17fac6cc07231c6fcbdb3d891cf964f2ae59cc29064ca421d"
     },
     {
       "source": "R3",

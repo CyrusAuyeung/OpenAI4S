@@ -348,7 +348,6 @@ async function main() {
         OPENAI4S_DATA_DIR: dataDir,
         OPENAI4S_HOST: "127.0.0.1",
         OPENAI4S_PORT: String(port),
-        OPENAI4S_REQUIRE_TOKEN: "1",
         OPENAI4S_ALLOW_NETWORK: "0",
         OPENAI4S_WEBUI: "",
         OPENAI4S_STAGE9_ARTIFACT_WORKBENCH: "1",
