@@ -1479,6 +1479,10 @@ def review_cli_result(
     placeholder. Without a Store and frame, or when the record cannot be read
     or is missing executed cells, the snapshot says so as an omission: a review
     of an answer with no evidence behind it is never reported as verified.
+    Scope: the root run's own cells. A delegated child records its cells under
+    its own frame, and those are not collected (nor declared missing), the same
+    as on the Web path; the reviewer sees a child's work only through the
+    parent cell that received its result.
     """
 
     from openai4s.server.completion_gate import terminal_for_review
