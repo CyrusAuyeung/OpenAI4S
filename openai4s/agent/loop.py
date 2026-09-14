@@ -832,8 +832,8 @@ class Agent:
                 model: Any = ChatModel(
                     self.cfg.llm,
                     chat,
-                    tools=lambda messages: with_finalize_response(
-                        tool_catalog.specs_for(messages)
+                    tools=lambda messages: self._model_tool_specs(
+                        tool_catalog, messages
                     ),
                     # ChatModel owns cancellation end to end: it refuses to
                     # start a cancelled call, returns the canonical no-op reply
@@ -855,8 +855,8 @@ class Agent:
                 policy_providers: dict[str, Any] = dict(
                     log=self._log,
                     context_budget_provider=_child_context_budget(self.cfg),
-                    tool_schema_provider=lambda state: with_finalize_response(
-                        tool_catalog.specs_for(state.messages)
+                    tool_schema_provider=lambda state: self._model_tool_specs(
+                        tool_catalog, state.messages
                     ),
                     workspace_provider=lambda _s: run_cwd,
                     should_cancel=(
@@ -913,6 +913,49 @@ class Agent:
             completion=result.completion,
             turns=result.turns,
         )
+
+    def _model_tool_specs(
+        self, tool_catalog: Any, messages: Sequence[Mapping[str, Any]]
+    ) -> tuple[Any, ...]:
+        """The tool declarations this run offers the model.
+
+        The session catalog's progressive projection, minus every
+        approval-required tool no approval path in this process could allow:
+        with no channel attached, no standing allow rule, and an unattended
+        posture (or the Guardian) that refuses it, each call is only a wasted
+        turn. A Web session attaches a channel for its root, so its delegated
+        children keep everything. Hiding is a projection, never the control:
+        the catalog, the ledger's resolver, and the permission gate still see
+        every tool, so one called anyway is refused and audited as before.
+        """
+
+        specs = tool_catalog.specs_for(messages)
+        store = getattr(self.dispatcher, "store", None)
+        if store is None or not self.frame_id:
+            return with_finalize_response(specs)
+        from openai4s.permissions import broker
+
+        permission_broker = broker()
+        reachable: dict[str, bool] = {}
+        visible = []
+        for spec in specs:
+            tool = tool_catalog.get(getattr(spec, "name", ""))
+            if tool is None or not getattr(tool, "requires_approval", False):
+                visible.append(spec)
+                continue
+            method = str(tool.host_method)
+            if method not in reachable:
+                reachable[method] = permission_broker.approval_reachable(
+                    store=store,
+                    frame_id=str(self.frame_id),
+                    method=method,
+                    dangerous=bool(getattr(tool, "dangerous", False)),
+                    side_effect_class=str(getattr(tool, "side_effect_class", "")),
+                    guardian_config=self.cfg,
+                )
+            if reachable[method]:
+                visible.append(spec)
+        return with_finalize_response(visible)
 
     def _session_is_metered(self) -> bool:
         """Whether the team ledger charges this run's session root.
