@@ -12,6 +12,7 @@ import { renderMd } from "../md/render";
 import { el, messagesHost } from "./dom";
 import { rememberCandidateIdentity, setMessageReviewBadge } from "./identity";
 import { cancelFrame, scheduleFrame } from "./raf";
+import { cancelledIdentity, stoppedMarker } from "./stopped";
 
 export const INITIAL_RENDER_BATCH = 40;
 
@@ -28,6 +29,7 @@ export type StoredMessage = {
   created_at?: unknown;
   artifact_refs?: unknown;
   failure?: { request_id?: unknown; code?: unknown; output_committed?: unknown };
+  cancelled?: { request_id?: unknown; execution_id?: unknown; reason?: unknown };
   review_status?: unknown;
   metadata?: { review_status?: unknown };
   [key: string]: unknown;
@@ -149,6 +151,16 @@ export function renderStored(
 ): HTMLElement | null {
   const text = messageText(m);
   if (!text.trim()) return null;
+  const stopped = m.role !== "user" ? cancelledIdentity(m.cancelled) : null;
+  if (stopped) {
+    // The stopped marker row renders as the marker the live stream showed.
+    const marker = el("div", "msg assistant turn-stopped");
+    marker.dataset.turnStatus = "cancelled";
+    marker.appendChild(stoppedMarker(stopped));
+    marker.dataset.ts = String(new Date(String(m.created_at || "")).getTime() || 0);
+    (target || messagesHost())?.appendChild(marker);
+    return marker;
+  }
   const w = el("div", "msg " + (m.role === "user" ? "user" : "assistant"));
   rememberCandidateIdentity(w, m);
   (w as HTMLElement & { _messageText?: string })._messageText = text;

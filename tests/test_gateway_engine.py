@@ -2004,7 +2004,93 @@ def test_cancel_after_llm_reply_prevents_returned_cell(monkeypatch, tmp_path):
     assert hub.events[-1]["status"] == "cancelled"
     stored = runner.store.list_messages(frame_id)
     assert [message["role"] for message in stored] == ["user", "assistant"]
-    assert stored[-1]["content"] == "_已取消。_"
+    # English request, English marker: this used to be a hard-coded
+    # "_已取消。_" in every session.
+    assert stored[-1]["content"] == "_Stopped by user._"
+    assert json.loads(stored[-1]["metadata"])["cancelled"]["reason"] == "user"
+
+
+def _stored_metadata(message: dict) -> dict:
+    raw = message.get("metadata")
+    return json.loads(raw) if isinstance(raw, str) and raw else dict(raw or {})
+
+
+@pytest.mark.parametrize(
+    ("request_text", "budget", "marker", "reason"),
+    [
+        ("Run the 600-iteration loop", False, "_Stopped by user._", "user"),
+        ("运行这个 600 次循环", False, "_已由用户停止。_", "user"),
+        (
+            "Run the 600-iteration loop",
+            True,
+            "_Stopped: the Auto Mode budget was reached._",
+            "auto_budget",
+        ),
+    ],
+)
+def test_stopped_cell_turn_stores_and_streams_a_marker_after_narration(
+    monkeypatch, tmp_path, request_text, budget, marker, reason
+):
+    """A Stop while a Cell runs must leave a durable, streamed stopped marker.
+
+    The Web narration "I have prepared a Python cell and am running it now"
+    counts as prose, and the cancel note was written only for a turn with no
+    prose -- so every Cell turn stopped mid-run reopened with nothing but a
+    claim that the cell was still running, and the live view showed nothing
+    either. Stored truth (frame status, execution log) said cancelled.
+    """
+    dispatcher = SimpleNamespace(last_output=None)
+    runner, hub, frame_id = _prepare_message_runner(monkeypatch, tmp_path, dispatcher)
+    reply = "```python\nimport time\nfor _ in range(600):\n    time.sleep(1)\n```"
+
+    def fake_chat(messages, cfg, on_delta=None, **kwargs):
+        del messages, cfg, on_delta, kwargs
+        return {"content": reply, "usage": {}}
+
+    def stopped_execute(state, code, origin, emit, stream=True, language="python"):
+        del code, origin, emit, stream, language
+        if budget:
+            state.auto_budget_terminal_reason = "max_tool_calls"
+        state.cancel.set()
+        return {
+            "status": "error",
+            "interrupted": True,
+            "result": {"stdout": "", "stderr": "", "error": None, "interrupted": True},
+        }
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+    monkeypatch.setattr(runner, "_execute_and_log", stopped_execute)
+
+    result = runner.run_message(frame_id, "default", request_text)
+
+    assert result["status"] == "cancelled"
+    stored = runner.store.list_messages(frame_id)
+    # The in-progress narration is still there; it is no longer the last word.
+    narration = stored[-2]["content"]
+    assert "running it now" in narration or "正在执行" in narration, narration
+    last = stored[-1]
+    assert last["role"] == "assistant"
+    assert last["content"] == marker
+    cancelled = _stored_metadata(last)["cancelled"]
+    assert cancelled["reason"] == reason
+    assert cancelled["request_id"] == result["request_id"]
+    assert cancelled["execution_id"] == result["execution_id"]
+
+    # Streamed live, as the chunk right before the terminal frame event.
+    markers = [
+        (index, event)
+        for index, event in enumerate(hub.events)
+        if event.get("type") == "text_chunk" and event.get("cancelled")
+    ]
+    assert len(markers) == 1
+    index, chunk = markers[0]
+    assert chunk["block_type"] == "text"
+    assert chunk["chunk"].strip() == marker
+    assert chunk["cancelled"] == cancelled
+    terminal = hub.events[-1]
+    assert terminal["type"] == "frame_update" and terminal["status"] == "cancelled"
+    assert terminal["cancelled"] == cancelled
+    assert index < len(hub.events) - 1
 
 
 def test_cancel_blocked_llm_releases_running_state_and_drops_late_output(
@@ -2762,3 +2848,66 @@ def test_trusted_and_gated_completion_chunks_also_start_a_new_paragraph(
             assert "gradient.\n\nPrinted mean petal length" in live, (flags, live)
         finally:
             runner.close()
+
+
+def test_reopened_messages_project_the_stopped_marker(monkeypatch, tmp_path):
+    """GET /frames/{fid}/messages carries the stopped marker's identity.
+
+    Allowlisted like `failure`: the three scalars the live surfaces already
+    published, nothing else from the metadata blob. Driven end to end -- a real
+    cancelled turn on the daemon's runner, then the real handler over a socket.
+    """
+    from tests.test_team_auth_routes import _body_json, _get, _TeamDaemon
+
+    node = _TeamDaemon(tmp_path / "home", team_mode=False)
+    try:
+        runner = node.runner
+        pid = node.store.create_project(name="Stop project")["project_id"]
+        frame_id = node.store.new_frame(kind="turn", project_id=pid, status="ready")
+        node.store.update_frame(frame_id, name="Stopped session")
+        dispatcher = SimpleNamespace(last_output=None)
+
+        def ensure_runtime(state):
+            state.dispatcher = dispatcher
+            state.messages = [{"role": "system", "content": "sys"}]
+            return dispatcher
+
+        def fake_chat(messages, cfg, on_delta=None, **kwargs):
+            del messages, cfg, on_delta, kwargs
+            return {"content": "```python\nimport time\ntime.sleep(600)\n```"}
+
+        def stopped_execute(state, code, origin, emit, stream=True, language="python"):
+            del code, origin, emit, stream, language
+            state.cancel.set()
+            return {"result": {"stdout": "", "stderr": "", "error": None}}
+
+        monkeypatch.setattr(runner, "_ensure_runtime", ensure_runtime)
+        monkeypatch.setattr(runner, "_spawn_title_summary", lambda *a, **k: None)
+        monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+        monkeypatch.setattr(runner, "_execute_and_log", stopped_execute)
+
+        result = runner.run_message(frame_id, pid, "Sleep for ten minutes")
+        assert result["status"] == "cancelled"
+        # Junk beside the marker must not be published by the projection.
+        last = runner.store.list_branch_message_boundaries(
+            frame_id, branch_id=runner.store.active_session_branch(frame_id)
+        )[-1]
+        runner.store.update_message_metadata(
+            last["message_id"], {"internal_note": "do not publish"}
+        )
+
+        status, raw = _get(
+            node.port, f"/api/v1/frames/{frame_id}/messages", token=node.token
+        )
+        assert status == 200, raw[:300]
+        messages = _body_json(raw)["messages"]
+        assert messages[-1]["content"] == "_Stopped by user._"
+        assert messages[-1]["cancelled"] == {
+            "request_id": result["request_id"],
+            "execution_id": result["execution_id"],
+            "reason": "user",
+        }
+        assert "internal_note" not in json.dumps(messages)
+        assert all("cancelled" not in m for m in messages[:-1])
+    finally:
+        node.close()

@@ -148,7 +148,12 @@ from openai4s.server.completion_gate import (
     CompletionGateService,
     message_review_metadata,
 )
-from openai4s.server.completions import completion_message, response_language
+from openai4s.server.completions import (
+    CANCEL_REASONS,
+    cancellation_marker,
+    completion_message,
+    response_language,
+)
 from openai4s.server.delivery import (
     CompletionDeliveryService,
     DeliveryValidationError,
@@ -9882,6 +9887,8 @@ class SessionRunner:
             # and the retry veto if it read one. The id above is not in here,
             # because it exists whether or not anything was raised.
             failure_meta: dict[str, object] = {}
+            # Set once this turn's stopped marker is durable and streamed.
+            cancel_identity: dict[str, object] | None = None
             loop_reason: str | None = None
             try:
                 st.dispatcher.last_output = None
@@ -10526,8 +10533,14 @@ class SessionRunner:
                     "Blocked · Guardian. The denied action was not executed; "
                     "a fresh continuation is required."
                 )
-            elif status == "cancelled" and not had_prose:
-                tail = "_已取消。_"
+            elif status == "cancelled":
+                # Whether or not prose streamed. A Web Cell turn always has the
+                # in-progress narration ("... am running it now"), so gating
+                # this on "no prose" left every turn stopped mid-Cell reopening
+                # with only a claim that the cell was still running.
+                cancel_identity = self._close_cancelled_turn(
+                    st, emit, turn_identity, user_text
+                )
             elif status == "completed" and loop_reason != "submitted" and not had_prose:
                 tail = "_(no textual response)_"
             if tail:
@@ -10582,6 +10595,10 @@ class SessionRunner:
                     status = "blocked_by_guardian"
                 elif st.cancel.is_set():
                     status = "cancelled"
+                    if cancel_identity is None:
+                        cancel_identity = self._close_cancelled_turn(
+                            st, emit, turn_identity, user_text
+                        )
             if (
                 (not gated)
                 and self.cfg.roadmap_features.stage3_scientific_review_shadow
@@ -10669,6 +10686,7 @@ class SessionRunner:
                 # The stream is the surface the user is watching, and it is the
                 # one that said only "failed".
                 **turn_identity,
+                **({"cancelled": dict(cancel_identity)} if cancel_identity else {}),
                 **(
                     {
                         "review_status": gate_metadata.get("review_status"),
@@ -10680,6 +10698,51 @@ class SessionRunner:
             }
         )
         return response
+
+    def _close_cancelled_turn(
+        self,
+        st: SessionState,
+        emit: Callable[[dict], None],
+        turn_identity: Mapping[str, object],
+        user_text: str,
+    ) -> dict[str, object]:
+        """Persist and stream the stopped marker that ends a cancelled turn.
+
+        One row, one chunk, one identity: the REST reopen, the live stream and
+        the terminal ``frame_update`` carry the same ``cancelled`` object, so a
+        client renders the same marker whichever surface it read. The content
+        is in the request's language, the reason says whose stop it was.
+        """
+
+        identity: dict[str, object] = {
+            **{
+                key: value
+                for key, value in turn_identity.items()
+                if key in ("request_id", "execution_id")
+            },
+            "reason": "auto_budget" if st.auto_budget_terminal_reason else "user",
+        }
+        marker = cancellation_marker(
+            str(identity["reason"]), response_language(user_text)
+        )
+        self.store.add_message(
+            root_frame_id=st.root_frame_id,
+            branch_id=st.branch_id,
+            role="assistant",
+            content=marker,
+            frame_id=st.root_frame_id,
+            metadata={"cancelled": dict(identity)},
+        )
+        emit(
+            {
+                "type": "text_chunk",
+                "frame_id": st.root_frame_id,
+                "block_type": "text",
+                "chunk": "\n\n" + marker + "\n",
+                "cancelled": dict(identity),
+            }
+        )
+        return identity
 
     def _resolve_mentions(self, st: SessionState, text: str) -> tuple[str, list[dict]]:
         """Append the content of any @-referenced artifact to the prompt.
@@ -15969,6 +16032,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                                 if _message_failure(mm)
                                 else {}
                             ),
+                            # Absent unless this row is a cancelled turn's
+                            # stopped marker; the same identity the live
+                            # chunk and terminal frame_update carried.
+                            **(
+                                {"cancelled": _message_cancelled(mm)}
+                                if _message_cancelled(mm)
+                                else {}
+                            ),
                             **(
                                 {"review_status": _message_review_gate(mm)}
                                 if _message_review_gate(mm)
@@ -19251,6 +19322,35 @@ def _message_failure(message: dict) -> dict | None:
     if failure.get("output_committed") is True:
         out["output_committed"] = True
     return out or None
+
+
+def _message_cancelled(message: dict) -> dict | None:
+    """The stopped-marker identity stored on one message, projected safely.
+
+    Same allowlist as `_message_failure`: two ids already published on the
+    live surfaces and a reason from a closed vocabulary. Nothing else from the
+    metadata blob reaches the client.
+    """
+    raw = message.get("metadata")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+    cancelled = raw.get("cancelled")
+    if not isinstance(cancelled, dict):
+        return None
+    reason = cancelled.get("reason")
+    if reason not in CANCEL_REASONS:
+        return None
+    out: dict = {"reason": reason}
+    for key in ("request_id", "execution_id"):
+        value = cancelled.get(key)
+        if isinstance(value, str) and value:
+            out[key] = value
+    return out
 
 
 def _message_review_gate(message: dict) -> dict | None:
