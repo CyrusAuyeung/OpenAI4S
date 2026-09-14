@@ -507,6 +507,9 @@ def run_confined_probe(
     child environment and the OS boundary a kernel cell gets. Raises under
     ``OPENAI4S_KERNEL_SANDBOX=enforce`` when the boundary cannot be built,
     rather than degrading to an unconfined launch.
+
+    The child runs in its own empty temp workspace, not the caller's working
+    directory, which ``python -c`` would otherwise put first on ``sys.path``.
     """
     workspace = tempfile.mkdtemp(prefix="openai4s-probe-")
     sandbox = None
@@ -521,12 +524,20 @@ def run_confined_probe(
         # A foreign interpreter runs its own `.pth` files and `sitecustomize`
         # before the probe code, and `stdin` here is the daemon's, so without
         # this it would hold the operator's controlling terminal.
+        #
+        # `cwd` is the probe's own empty workspace, never the daemon's launch
+        # directory. `python -c` without `-I` puts the working directory first
+        # on `sys.path`, and the launch directory can be a CLI kernel's
+        # writable workspace: a `json.py` or `platform.py` there answered for
+        # the stdlib inside the probe. Bubblewrap already `--chdir`s into the
+        # workspace; Seatbelt and the degraded `auto` launch did not.
         return subprocess.run(
             argv,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
             env=env,
+            cwd=workspace,
             start_new_session=True,
             pass_fds=getattr(sandbox, "popen_pass_fds", lambda: ())(),
         )

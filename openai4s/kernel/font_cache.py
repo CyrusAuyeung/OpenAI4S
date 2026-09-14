@@ -16,11 +16,15 @@ only ever produced by a *builder* the host runs for that purpose:
   probe path as the package freeze (``preinstall.run_confined_probe``: the
   scrubbed child environment and the OS sandbox), on a fixed program that
   imports matplotlib's font manager into a fresh empty cache directory. It
-  resolves matplotlib exactly as that interpreter's kernels do (no ``-I``: a
-  user-site install must be found, or the list would never be built for it).
-  No Cell code, no workspace, and no other kernel's files are involved, so its
-  output carries exactly the trust of the environment itself -- which every
-  kernel on that interpreter already executes.
+  resolves matplotlib as that interpreter's kernels do (no ``-I``: a user-site
+  install must be found, or the list would never be built for it) with one
+  deliberate difference: the working-directory entry ``python -c`` puts first
+  on ``sys.path`` is dropped before any other import, and the probe runs in
+  its own empty directory anyway. Otherwise a ``json.py`` in the daemon's
+  launch directory -- which a CLI kernel's workspace can be -- would decide
+  what the builder prints. No Cell code runs, and what remains on its import
+  path is what every kernel on that interpreter already imports from before
+  its first Cell, so its output carries the trust of the environment itself.
 * The host validates what it prints (name, size, JSON shape, version agreeing
   with the name) and writes it under ``<data_dir>/cache/matplotlib-fonts``,
   keyed by interpreter path. Kernels cannot write there: an enforced sandbox
@@ -78,8 +82,15 @@ RETRY_FAILED_BUILD_AFTER_S = 600.0
 _MAX_FINGERPRINT_DIRS = 4096
 _MAX_FINGERPRINT_DEPTH = 4
 
+# `python -c` puts the working directory ('') first on `sys.path`, ahead of
+# the stdlib. The confined probe runs in its own empty directory, but the
+# program does not rely on its runner for that: before any import that is not
+# already loaded at startup (`sys` is built in), it drops that entry, so a
+# `json.py` or a `matplotlib/` wherever the child was started cannot answer.
 _BUILDER = (
-    "import json, os, shutil, sys, tempfile\n"
+    "import sys\n"
+    "sys.path[:] = [entry for entry in sys.path if entry not in ('', '.')]\n"
+    "import json, os, shutil, tempfile\n"
     "cache = tempfile.mkdtemp(prefix='openai4s-fontlist-')\n"
     "os.environ['MPLCONFIGDIR'] = cache\n"
     "try:\n"

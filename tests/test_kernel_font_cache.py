@@ -385,6 +385,93 @@ def test_the_builder_program_returns_the_list_matplotlib_wrote(tmp_path):
     assert "poison" not in built.read_text(encoding="utf-8")
 
 
+def _shadowing_directory(root: Path) -> Path:
+    """A directory whose modules would answer for the stdlib and matplotlib.
+
+    Each one prints a forged, perfectly valid font list and exits cleanly, so
+    the only thing that keeps it out of the host cache is never importing it.
+    A daemon launched from a directory a Cell can write (a CLI kernel's
+    workspace is its launch directory) is exactly such a place.
+    """
+
+    root.mkdir(parents=True)
+    forged = font_cache._MARKER + json.dumps(
+        {
+            "name": "fontlist-v3.11.0.json",
+            "content": _fontlist(defaultFamily={"ttf": "POISONED", "afm": "POISONED"}),
+        }
+    )
+    hijack = f"print({forged!r}, flush=True)\nimport os\nos._exit(0)\n"
+    for name in ("json", "shutil", "tempfile"):
+        (root / f"{name}.py").write_text(hijack, encoding="utf-8")
+    (root / "matplotlib").mkdir()
+    (root / "matplotlib" / "__init__.py").write_text(hijack, encoding="utf-8")
+    return root
+
+
+def test_the_builder_program_never_imports_from_its_working_directory(tmp_path):
+    """`python -c` puts the working directory first on `sys.path`.
+
+    The builder program itself must drop it before any import that is not
+    already loaded, whatever directory a runner leaves it in.
+    """
+
+    fake = _fake_matplotlib(tmp_path / "site")
+    poisoned = _shadowing_directory(tmp_path / "poisoned-cwd")
+
+    def runner(command, *, timeout):
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(fake),
+            "TMPDIR": str(tmp_path),
+        }
+        return subprocess.run(
+            command,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            cwd=poisoned,
+            check=False,
+        )
+
+    built = font_cache.build_font_cache(
+        sys.executable, data_dir=tmp_path / "data", runner=runner
+    )
+    assert built is not None, "the builder failed against the stand-in matplotlib"
+    assert "POISONED" not in built.read_text(encoding="utf-8")
+
+
+def test_a_daemon_launched_from_a_poisoned_directory_stores_no_font_list(
+    tmp_path, monkeypatch
+):
+    """End to end through the real confined probe, from a shadowing cwd.
+
+    The interpreter is a fresh virtualenv with no matplotlib, so the honest
+    outcome is a failed build and an empty cache -- in milliseconds, not a
+    real font scan. A forged list in the host cache would instead be seeded
+    into every later enforced kernel on that interpreter.
+    """
+
+    venv = tmp_path / "venv"
+    created = subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    interpreter = venv / "bin" / "python"
+    if created.returncode != 0 or not interpreter.exists():
+        pytest.skip(f"cannot create a virtualenv here: {created.stderr!r}")
+    data_dir = tmp_path / "data"
+    monkeypatch.chdir(_shadowing_directory(tmp_path / "daemon-cwd"))
+
+    assert (
+        font_cache.build_font_cache(str(interpreter), data_dir=data_dir, timeout=120)
+        is None
+    )
+    assert not (data_dir / "cache").exists()
+
+
 def test_a_python_kernel_asks_for_its_font_list_with_its_own_sandbox(
     tmp_path, monkeypatch
 ):
