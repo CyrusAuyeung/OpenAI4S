@@ -17,6 +17,7 @@ import errno
 import getpass
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -902,7 +903,15 @@ def cmd_status(args) -> int:
                 )
             )
             return 0
-        print(f"daemon: running (pid {pid}) at {_url(cfg, endpoint=endpoint)}")
+        # The plain origin, never the `?token=` bootstrap URL: `status` is a
+        # health check whose output ends up in CI and support logs, and the
+        # release pipeline itself treats that URL as a credential. The URL a
+        # person opens is one explicit command away.
+        print(
+            f"daemon: running (pid {pid}) at "
+            f"{_url(cfg, with_token=False, endpoint=endpoint)}"
+        )
+        print("  open     : run `openai4s url` for the sign-in URL")
         print(f"  model    : {health.get('model')}")
         # The loopback health response is intentionally a minimal public
         # projection.  The CLI already owns the local configuration, so it can
@@ -939,6 +948,30 @@ def _wait_pid_exit(
     return not _pid_alive(pid)
 
 
+#: How long `openai4s stop` waits, in total, for the daemon to exit before it
+#: reports failure (or, with ``--force``, escalates to SIGKILL). The first
+#: stretch is the shared SIGTERM grace, ``TERM_GRACE_S``; a daemon tearing down
+#: a first-kernel bootstrap or several live kernels was measured at 8-9s, and
+#: returning 2 at the 5s grace sent scripts toward ``--force`` for a shutdown
+#: that was about to finish by itself.
+STOP_TIMEOUT_S = 30.0
+_STOP_POLL_INTERVAL_S = 0.1
+
+
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
+    return seconds
+
+
+def _poll_attempts(seconds: float) -> int:
+    return max(1, round(seconds / _STOP_POLL_INTERVAL_S))
+
+
 def cmd_stop(args) -> int:
     cfg = get_config()
     pid = _read_pid(cfg)
@@ -946,29 +979,50 @@ def cmd_stop(args) -> int:
         print("daemon: not running")
         _clear_state(cfg)
         return 1
+    timeout = getattr(args, "timeout", None) or STOP_TIMEOUT_S
+    force = getattr(args, "force", False)
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass  # exited between the aliveness check and the signal
-    stopped = _wait_pid_exit(pid)
-    if not stopped and getattr(args, "force", False):
+    grace = min(timeout, TERM_GRACE_S)
+    stopped = _wait_pid_exit(
+        pid, attempts=_poll_attempts(grace), interval=_STOP_POLL_INTERVAL_S
+    )
+    remaining = timeout - grace
+    if not stopped and remaining > 0:
+        # Past the SIGTERM grace a live daemon is usually still tearing down
+        # (a cell's interrupt, kernel workers, the store). Say so and keep
+        # polling instead of calling a shutdown in progress a failure.
+        print(
+            f"daemon (pid {pid}) is shutting down… waiting up to "
+            f"{remaining:g}s more",
+            file=sys.stderr,
+            flush=True,
+        )
+        stopped = _wait_pid_exit(
+            pid, attempts=_poll_attempts(remaining), interval=_STOP_POLL_INTERVAL_S
+        )
+    if not stopped and force:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         stopped = _wait_pid_exit(pid)
     if not stopped:
-        # An in-flight cell can hold shutdown past the grace period. The state
+        # An in-flight cell can hold shutdown past the timeout. The state
         # files must outlive the process they describe: clearing them here left
         # a live daemon on a bound port that `status` and a second `stop` both
         # called "not running", and the next `serve` crashed into.
         hint = (
             "it ignored SIGKILL"
-            if getattr(args, "force", False)
-            else "retry `openai4s stop`, or `openai4s stop --force` to SIGKILL it"
+            if force
+            else "retry `openai4s stop`, `openai4s stop --timeout <seconds>` to "
+            "wait longer, or `openai4s stop --force` to SIGKILL it"
         )
         print(
-            f"error: daemon (pid {pid}) is still shutting down — {hint}",
+            f"error: daemon (pid {pid}) is still shutting down after "
+            f"{timeout:g}s — {hint}",
             file=sys.stderr,
         )
         return 2
@@ -980,6 +1034,28 @@ def cmd_stop(args) -> int:
 def cmd_url(args) -> int:
     print(_url(cfg := get_config(), endpoint=_live_endpoint(cfg)))
     return 0
+
+
+#: `openai4s run` exit status for a run that ended without a completion.
+#: Only ``stop_reason == "submitted"`` is a completion; ``max_turns``,
+#: ``no_progress``, ``cancelled`` and any reason the CLI does not know all map
+#: here, so an unknown terminal fails closed. Not 2, which already means a
+#: refusal (usage error, environment readiness, a newer database schema).
+RUN_NOT_COMPLETED_EXIT = 3
+
+_RUN_EXIT_STATUS_HELP = """\
+exit status:
+  0  the run completed (stop_reason "submitted")
+  1  an unhandled error (a Python traceback on stderr)
+  2  refused: a usage error, the standard environment is not ready, or the
+     database schema is newer than this build
+  3  the run ended without completing: stop_reason max_turns, no_progress,
+     cancelled, or any other value
+
+--json prints the full result, stop_reason included, for exit 0 and 3 alike.
+With --auto the status still follows stop_reason alone; read
+auto_mode.terminal for the review verdict.
+"""
 
 
 def cmd_run(args) -> int:
@@ -1040,7 +1116,12 @@ def cmd_run(args) -> int:
                     f"  - {item.get('severity')} {item.get('category')}: "
                     f"{str(item.get('claim_ref'))[:80]}"
                 )
-    return 0
+    # The result above is printed for every terminal; the status is the verdict.
+    # A wrapper checking `$?` read max_turns and no_progress as success while
+    # the Action Ledger recorded the same run as failed.
+    if result.get("stop_reason") == "submitted":
+        return 0
+    return RUN_NOT_COMPLETED_EXIT
 
 
 # --------------------------------------------------------------------------- #
@@ -2128,12 +2209,27 @@ def build_parser() -> argparse.ArgumentParser:
     pstop.add_argument(
         "--force",
         action="store_true",
-        help="escalate to SIGKILL if the daemon does not exit in time",
+        help="escalate to SIGKILL if the daemon does not exit within --timeout",
+    )
+    pstop.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=STOP_TIMEOUT_S,
+        metavar="SECONDS",
+        help=(
+            "how long to wait for the daemon to exit before reporting failure "
+            "(exit 2) or, with --force, sending SIGKILL (default: %(default)gs)"
+        ),
     )
     pstop.set_defaults(fn=cmd_stop)
     sub.add_parser("url", help="print the web UI url").set_defaults(fn=cmd_url)
 
-    pr = sub.add_parser("run", help="run one Code-as-Action task in-process")
+    pr = sub.add_parser(
+        "run",
+        help="run one Code-as-Action task in-process",
+        epilog=_RUN_EXIT_STATUS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     pr.add_argument("task", help="the task description")
     pr.add_argument("--json", action="store_true", help="emit full JSON result")
     pr.add_argument("-v", "--verbose", action="store_true", help="stream turns")

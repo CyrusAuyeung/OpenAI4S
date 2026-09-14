@@ -517,6 +517,142 @@ def test_flag_off_run_preserves_agent_execution_without_readiness_probe(
     assert "final: done" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "stop_reason", ["max_turns", "no_progress", "cancelled", "a_future_reason", None]
+)
+@pytest.mark.parametrize("as_json", [True, False])
+def test_run_that_did_not_complete_exits_non_zero_with_its_result_intact(
+    tmp_path, monkeypatch, capsys, stop_reason, as_json
+):
+    """Only ``submitted`` is a completion, and the exit status must say so.
+
+    Every Agent terminal used to fall through to ``return 0``, so a script
+    checking ``$?`` read a run that hit ``max_turns`` or tripped the progress
+    circuit as a success while the Action Ledger recorded it as failed. The
+    code is not 2 -- that already means a refusal (readiness, a future schema,
+    a usage error) -- and an unknown stop reason fails closed.
+    """
+    from openai4s import agent as agent_module
+    from openai4s.config import Config, LLMConfig
+
+    module = _cli_module()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+    )
+
+    class Agent:
+        def __init__(self, *, cfg, verbose, task_mode=None):
+            del cfg, verbose, task_mode
+
+        def run(self, task):
+            del task
+            return {
+                "stop_reason": stop_reason,
+                "submitted_output": None,
+                "final_message": "",
+            }
+
+    monkeypatch.setattr(module, "get_config", lambda: cfg)
+    monkeypatch.setattr(agent_module, "Agent", Agent)
+
+    status = module.cmd_run(
+        SimpleNamespace(task="never completes", json=as_json, verbose=False)
+    )
+
+    assert status == 3
+    assert getattr(module, "RUN_NOT_COMPLETED_EXIT", None) == status
+    out = capsys.readouterr().out
+    if as_json:
+        assert json.loads(out)["stop_reason"] == stop_reason
+    else:
+        assert f"=== stop_reason: {stop_reason} ===" in out
+
+
+def _scripted_cli_run(tmp_path, monkeypatch, replies, *, max_turns):
+    """Drive the real ``main(["run", ...])`` and real Agent on a scripted chat."""
+    import openai4s.agent.loop as loop_mod
+    from openai4s.config import Config, LLMConfig
+
+    module = _cli_module()
+    cfg = Config(
+        data_dir=tmp_path,
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+        max_turns=max_turns,
+    )
+    pending = list(replies)
+
+    def chat(messages, cfg, **kwargs):
+        del messages, cfg, kwargs
+        return {
+            "content": pending.pop(0) if pending else "Still thinking.",
+            "reasoning": None,
+            "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+            "finish_reason": "stop",
+            "raw": {},
+        }
+
+    monkeypatch.setattr(module, "get_config", lambda: cfg)
+    monkeypatch.setattr(loop_mod, "chat", chat)
+    return module, cfg
+
+
+def _only_frame_row(cfg):
+    import sqlite3
+
+    with sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True) as db:
+        rows = db.execute(
+            "SELECT status, input_tokens, output_tokens FROM frames"
+        ).fetchall()
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_real_cli_run_hitting_max_turns_exits_3_and_closes_its_frame_failed(
+    tmp_path, monkeypatch, capsys
+):
+    module, cfg = _scripted_cli_run(
+        tmp_path, monkeypatch, ["Still thinking."] * 4, max_turns=2
+    )
+
+    status = module.main(["run", "--json", "loop until the turn cap"])
+
+    assert status == 3
+    assert json.loads(capsys.readouterr().out)["stop_reason"] == "max_turns"
+    assert _only_frame_row(cfg) == ("failed", 22, 6)
+
+
+def test_real_cli_run_that_submits_exits_0_and_closes_its_frame_done(
+    tmp_path, monkeypatch, capsys
+):
+    module, cfg = _scripted_cli_run(
+        tmp_path,
+        monkeypatch,
+        ["```python\nhost.submit_output({'summary': 'ok'}, ['Computed it'])\n```"],
+        max_turns=3,
+    )
+
+    status = module.main(["run", "--json", "submit once"])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out)["stop_reason"] == "submitted"
+    assert _only_frame_row(cfg) == ("done", 11, 3)
+
+
+def test_run_help_documents_the_exit_status_table(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        _cli_module().main(["run", "--help"])
+    assert stopped.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "exit status:" in text
+    for fragment in (
+        '0 the run completed (stop_reason "submitted")',
+        "2 refused",
+        "3 the run ended without completing",
+    ):
+        assert fragment in text
+
+
 def test_daemon_health_ignores_environment_proxies_for_a_wsl_nat_host(monkeypatch):
     module = _cli_module()
     config = SimpleNamespace(host="172.25.100.5", port=8760)
@@ -844,6 +980,50 @@ def test_status_probes_and_reports_the_live_recorded_endpoint(
     output = capsys.readouterr().out
     assert "at http://172.25.100.5:9123/" in output
     assert "127.0.0.1:8760" not in output
+
+
+def test_status_never_prints_the_access_token_and_points_at_url(
+    tmp_path, monkeypatch, capsys
+):
+    """`status` is a health question, and its output lands in CI and support logs.
+
+    It printed `http://host:port/?token=<the full access token>` with no flag,
+    while the release pipeline treats that very bootstrap URL as a credential
+    that must not reach a log. The tokenized URL is what `openai4s url` is for.
+    """
+    from openai4s.server import local_auth
+
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="127.0.0.1", port=9222)
+    token = local_auth.load_or_mint(tmp_path)
+    assert token and local_auth.read_token(tmp_path) == token
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read():
+            return b'{"status":"ok","model":"demo"}'
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+    monkeypatch.setattr(module, "_open_daemon", lambda *_a, **_k: Response())
+
+    assert module.cmd_status(SimpleNamespace()) == 0
+    output = capsys.readouterr().out
+    assert token not in output
+    assert "token=" not in output
+    assert "daemon: running (pid 4321) at http://127.0.0.1:9222/\n" in output
+    assert "openai4s url" in output
+
+    # The command that exists to hand a person the working URL still does.
+    assert module.main(["url"]) == 0
+    assert capsys.readouterr().out.strip() == (f"http://127.0.0.1:9222/?token={token}")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="SIGINT dispositions are POSIX")
