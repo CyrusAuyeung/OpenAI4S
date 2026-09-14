@@ -19,6 +19,10 @@ anything. It keeps that copy if the migration fails, and **deletes it once the
 migration succeeds**. After a normal upgrade, no copy of the 0.2.x database is
 left.
 
+If the migration fails, the database is rolled back and stays at schema 27, the
+copy is kept, and the command stops with one `error:` line that names where the
+copy is. `openai4s serve` and `openai4s run` then exit with status 2.
+
 If you might want to go back to 0.2.x, make your own copy first:
 
 1. Stop OpenAI4S: run `openai4s stop` or quit the app. Check with
@@ -95,7 +99,15 @@ and every daemon requires its access token, including one bound to
 
 * **The workbench is new.** The Preact/TypeScript workbench is the default UI.
   `OPENAI4S_WEBUI=legacy` still serves the old `app.js` UI, which receives no new
-  features.
+  features. Artifact links that 0.2.x wrote into chat messages
+  (`/api/artifacts/<id>`) open only in the default workbench, which rewrites
+  them to `/api/v1`. The legacy UI uses them as written, and the server answers
+  them with 404.
+* **Artifacts made by 0.2.x.** Their environment provenance now shows a Python
+  kernel whose package list is unknown. 0.2.x recorded a Python kernel by its
+  mode, `repl`, and did not read its packages. 0.3.0 corrects that label when it
+  reads the record; it does not re-measure the environment or invent a package
+  list.
 * **`openai4s run` exit status.** The command exits `0` only when the run
   submitted a result. A run that stops for any other reason, such as the turn
   limit, no progress or cancellation, exits non-zero. The `--json` output still

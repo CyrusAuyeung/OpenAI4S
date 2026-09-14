@@ -271,10 +271,14 @@ class OnboardingService:
 
         Answered from the database on every read rather than backfilled once,
         so there is no migration to get wrong and a GET still writes nothing.
-        Two kinds of evidence count -- a stored model configuration, or a
-        session that has held a message. An environment key alone does not:
-        with no history and no stored configuration, that is exactly what a
-        fresh install started from a `.env` looks like.
+        Two kinds of evidence count -- a stored model configuration, or
+        history: a session that has held a message, or a Cell that was
+        executed. The second history matters because a Notebook REPL cell
+        writes an execution record and never a message, so an install used
+        only through the Notebook would otherwise read as a first run. A
+        session that was created and never run is not history. Nor is an
+        environment key alone: with no history and no stored configuration,
+        that is exactly what a fresh install started from a `.env` looks like.
         """
         if any(self._stored(key) for key in self._CONFIGURATION_SETTINGS):
             return True
@@ -284,13 +288,16 @@ class OnboardingService:
             profiles = []
         if any(not profile.get("deleted_at") for profile in profiles):
             return True
-        has_history = getattr(self.store, "has_message_history", None)
-        if not callable(has_history):
-            return False
-        try:
-            return bool(has_history())
-        except Exception:  # noqa: BLE001 - unreadable history is no evidence
-            return False
+        for probe in ("has_message_history", "has_execution_history"):
+            has_history = getattr(self.store, probe, None)
+            if not callable(has_history):
+                continue
+            try:
+                if has_history():
+                    return True
+            except Exception:  # noqa: BLE001 - unreadable history is no evidence
+                continue
+        return False
 
     def _stored(self, key: str) -> str:
         return str(self.store.get_setting(key) or "").strip()

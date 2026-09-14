@@ -267,6 +267,31 @@ def test_the_document_records_the_versioned_root(doc):
     assert "no legacy alias" in doc or "legacy alias" in doc
 
 
+def test_the_document_spells_no_route_under_the_removed_unversioned_root(doc):
+    """UPG3-05. §1 says any path under `/api/` that is not `/api/v1/` is a 404,
+    while the raw-bytes table and several notes still spelled routes as
+    `GET /api/frames/{fid}/artifacts.zip` and §2 said its paths were "under
+    `/api`". A script written from the table got a 404 on 0.3.0.
+
+    Prose that names the removed root in order to say it is gone does not
+    spell a method, so a method-qualified path is the thing to forbid."""
+    import re
+
+    unversioned = sorted(
+        set(
+            re.findall(
+                r"`(?:GET|POST|PUT|PATCH|DELETE) /api/(?!v1/)[^`]*`",
+                doc,
+            )
+        )
+    )
+    assert not unversioned, f"routes spelled under the removed root: {unversioned}"
+    # "not under `/api`" (/health, /preview) is true and stays.
+    assert not re.search(
+        r"(?<!not )under `/api`(?!/v1)", doc, re.IGNORECASE
+    ), "a section still says its paths are under the un-versioned root"
+
+
 def test_the_resume_cursor_is_documented(doc):
     """A client cannot implement resume from the code; it has to be written
     down or the contract is only nominally versioned."""

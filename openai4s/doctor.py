@@ -436,6 +436,28 @@ def _data_dir(cfg: Any) -> Check:
             remedy,
             facts,
         )
+    db_path = getattr(cfg, "db_path", None)
+    if db_path is not None:
+        from openai4s.storage.migrations import FutureSchemaError, preflight_schema
+
+        # The refusal `serve` and `run` print, read the same read-only way and
+        # before anything is prepared: a writable directory holding a database
+        # this release will not open is not usable.
+        try:
+            preflight_schema(Path(db_path))
+        except FutureSchemaError as e:
+            return Check(
+                "data",
+                FAIL,
+                f"the database at {db_path} is from a newer release: {e}",
+                "Run the OpenAI4S release that upgraded this data directory, or "
+                "point OPENAI4S_DATA_DIR at one this release created.",
+                {
+                    **facts,
+                    "schema_version": e.actual_version,
+                    "supported_schema_version": e.supported_version,
+                },
+            )
     prepare = getattr(cfg, "ensure_dirs", None)
     if callable(prepare):
         try:

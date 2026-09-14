@@ -911,6 +911,18 @@ class FrameRepository:
             row = self._connection.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
         return row is not None
 
+    def has_execution_history(self) -> bool:
+        """Whether any Cell on this install has ever been executed.
+
+        A Notebook REPL cell is recorded here and never as a message, so this
+        is the history an install used only through the Notebook has.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM execution_log LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def cell_count(self, root_frame_id: str) -> int:
         with self._lock:
             row = self._connection.execute(

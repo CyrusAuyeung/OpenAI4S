@@ -254,6 +254,55 @@ def test_an_upgraded_install_with_session_history_is_not_a_first_run(tmp_path):
     assert runner.store.get_setting("onboarding_complete") in (None, "")
 
 
+def test_an_upgraded_install_used_only_through_the_notebook_is_not_a_first_run(
+    tmp_path,
+):
+    """UPG3-02. 0.2.0, configured through the environment, used only through
+    the Notebook REPL (`OPENAI4S_NOTEBOOK_REPL=1`).
+
+    A REPL cell writes a frame, an execution record and its artifacts, and
+    never a message -- so this install matched none of the evidence and got
+    the blocking wizard over its own cells. The execution record is written
+    through the same Store call the REPL execute route uses."""
+    runner, call = _first_boot(tmp_path)
+    project = runner.store.create_project(name="Work", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    frame = runner.store.new_frame(kind="turn", project_id=project, status="ready")
+    runner.store.log_cell(
+        frame_id=frame,
+        root_frame_id=frame,
+        project_id=project,
+        code="with open('mine.txt', 'w') as f:\n    f.write('upg3-02')",
+        result={"id": "cell-repl-only", "stdout": "", "files_written": ["mine.txt"]},
+        language="python",
+        origin="user",
+        cell_index=1,
+    )
+    assert not runner.store.has_message_history()
+    for key in OnboardingService._CONFIGURATION_SETTINGS:
+        assert runner.store.get_setting(key) in (None, ""), key
+    assert runner.store.get_setting("onboarding_complete") in (None, "")
+
+    body = call("GET", "/onboarding")["body"]
+    assert body["complete"] is True, body
+    assert runner.store.get_setting("onboarding_complete") in (None, "")
+
+
+def test_a_session_created_but_never_run_is_still_a_first_run(tmp_path):
+    """The negative control for the notebook evidence: opening a session is not
+    using the install. Only an executed cell counts, so a fresh install whose
+    user clicked "new session" before configuring a model keeps the wizard."""
+    runner, call = _first_boot(tmp_path)
+    project = runner.store.create_project(name="Work", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    runner.store.new_frame(kind="turn", project_id=project, status="ready")
+
+    body = call("GET", "/onboarding")["body"]
+    assert body["complete"] is False, body
+
+
 def test_an_upgraded_install_configured_in_customize_is_not_a_first_run(tmp_path):
     """0.2.0, configured through Customize -> Models, before any session ran."""
     runner, call = _first_boot(tmp_path)

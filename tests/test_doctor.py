@@ -223,6 +223,40 @@ def test_an_unusable_data_path_is_reported_rather_than_raised(
     assert as_file.read_text() == "not a directory"
 
 
+def test_a_database_from_a_newer_release_fails_the_data_check(
+    monkeypatch, capsys, tmp_path
+):
+    """UPG3-06. `serve` and `run` refuse a data directory whose database schema
+    is newer than this release (`future_schema`, exit 2). `doctor` only checked
+    that the directory was writable, so the command a user runs after that
+    refusal printed "[ok] data usable" and exited 0 -- naming nothing. The
+    check must fail the same way, and like the refusal it must not touch the
+    database it is diagnosing."""
+    import sqlite3
+
+    import openai4s.config as config_mod
+    from openai4s.storage.migrations import SCHEMA_VERSION
+
+    cli = importlib.import_module("openai4s.cli.main")
+    data_dir = tmp_path / "from-a-newer-release"
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(config_mod, "_CONFIG", None, raising=False)
+    cfg = Config(data_dir=data_dir)
+    cfg.ensure_dirs()
+    with sqlite3.connect(cfg.db_path) as db:
+        db.execute("CREATE TABLE sentinel(value TEXT)")
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    before = cfg.db_path.read_bytes()
+
+    assert cli.main(["doctor", "--json"]) == 2
+    data = _by_name(json.loads(capsys.readouterr().out))["data"]
+    assert data["status"] == doctor.FAIL
+    assert "future_schema" in data["detail"]
+    assert str(SCHEMA_VERSION + 1) in data["detail"]
+    assert data["remedy"], "a failed check must say what to do"
+    assert cfg.db_path.read_bytes() == before
+
+
 def test_an_unwritable_data_directory_is_reported_as_fail(cfg, tmp_path):
     """The other half: the path is a directory, and nothing may write to it."""
     locked = tmp_path / "locked"
