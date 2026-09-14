@@ -125,9 +125,10 @@ and every daemon requires its access token, including one bound to
   are printed on stdout.
 * **`openai4s stop` waits longer.** 0.2.x waited about 5s for the daemon to
   exit before it reported failure or, with `--force`, sent SIGKILL. 0.3.0 waits
-  up to `--timeout`, 30s by default, first, and prints a `shutting down…` line
-  while it waits. A script that relied on the short wait can pass
-  `--timeout 5` (with `--force` for the old SIGKILL).
+  up to `--timeout`, 30s by default, first. A daemon still running after the
+  first 5s gets a `shutting down…` line on stderr while the wait goes on; one
+  that exits sooner prints only `daemon stopped`. A script that relied on the
+  short wait can pass `--timeout 5` (with `--force` for the old SIGKILL).
 * **Container image.** The image runs Python 3.14; the 0.2.0 image ran 3.12. If
   you extended the image or installed packages into a running container,
   rebuild or reinstall them for 3.14.

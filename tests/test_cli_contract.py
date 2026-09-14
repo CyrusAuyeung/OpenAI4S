@@ -937,6 +937,22 @@ def test_the_upgrade_guide_names_the_longer_stop_wait():
         assert "30" in window, name
         assert "--force" in window, name
 
+    # UPG5-06. `cmd_stop` prints `shutting down…` only once the SIGTERM grace
+    # has passed with the daemon still alive; an idle daemon stops in well
+    # under a second and prints only "daemon stopped". "While it waits" read
+    # as a line every stop prints.
+    grace = f"{module.TERM_GRACE_S:g}"
+    english = " ".join((_REPO / "docs" / "upgrading.md").read_text("utf-8").split())
+    chinese = " ".join((_REPO / "docs" / "upgrading_zh.md").read_text("utf-8").split())
+    stop_en = english[english.index("* **`openai4s stop`") :][:700]
+    stop_zh = chinese[chinese.index("* **`openai4s stop`") :][:400]
+    assert "prints a `shutting down…` line while it waits" not in stop_en
+    assert f"still running after the first {grace}s" in stop_en
+    assert "`daemon stopped`" in stop_en
+    assert "等待期间打印一行" not in stop_zh
+    assert f"过了最初 {grace} 秒仍未退出" in stop_zh
+    assert "`daemon stopped`" in stop_zh
+
 
 def test_daemon_health_ignores_environment_proxies_for_a_wsl_nat_host(monkeypatch):
     module = _cli_module()
