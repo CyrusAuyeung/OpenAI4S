@@ -628,3 +628,34 @@ def test_the_bundle_leaves_a_database_that_needs_recovery_closed(cfg, monkeypatc
     archived = archive_safe({"security": security})["security"]
     assert archived["schema"]["code"] == "interrupted_write"
     assert archived["secret_store"] == {"status": "skipped"}
+
+
+def test_the_bundle_does_not_open_a_database_whose_version_it_could_not_read(
+    cfg, monkeypatch
+):
+    """Busy past SQLite's timeout (an older daemon mid-commit) is an
+    OperationalError, not a corrupt file: the read-write open that followed it
+    could get the lock and run the upgrade. The failure is recorded instead."""
+    import sqlite3
+
+    import openai4s.storage.migrations as migrations
+    from openai4s.store import Store
+
+    Store(cfg.db_path).close()
+
+    def busy(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(migrations, "preflight_schema", busy)
+    opened = []
+    monkeypatch.setattr(
+        "openai4s.store.get_store", lambda path: opened.append(path) or None
+    )
+
+    security = security_posture(cfg)
+    assert opened == []
+    assert security["schema"] == {
+        "status": "unavailable",
+        "error_type": "OperationalError",
+    }
+    assert security["secret_store"] == security["schema"]

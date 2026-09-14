@@ -101,8 +101,8 @@ def unopened_database(cfg: Any) -> dict[str, Any] | None:
     already at this release's schema -- or none yet, which opening creates
     rather than upgrades -- is opened. A version that cannot be read without a
     read-write open (a hot journal) is left closed too: the open that recovers
-    it would also upgrade it if it is older. A newer schema's refusal is
-    returned under ``error`` for the caller to report.
+    it would also upgrade it if it is older. So is one that could not be read
+    at all; that refusal is returned under ``error`` for the caller to report.
     """
     db_path = getattr(cfg, "db_path", None)
     if db_path is None:
@@ -124,9 +124,12 @@ def unopened_database(cfg: Any) -> dict[str, Any] | None:
             "supported_schema_version": e.supported_version,
             "error": e,
         }
-    except Exception:  # noqa: BLE001 - unreadable is the data check's finding
-        # A file SQLite cannot read cannot be upgraded by opening it either.
-        return None
+    except Exception as e:  # noqa: BLE001 - unreadable is the data check's finding
+        # Not only a corrupt file, which no open could upgrade: SQLITE_BUSY
+        # past the timeout (an older daemon mid-commit) is an OperationalError
+        # too, and the read-write open that followed it could get the lock and
+        # run the upgrade.
+        return {"reason": "unreadable", "error": e}
     if version is None:
         return {"reason": "interrupted_write"}
     if version < migrations.SCHEMA_VERSION:
@@ -639,6 +642,10 @@ def _connectors(cfg: Any) -> Check:
     if unopened is not None:
         # The data check reports why; opening it here would be the upgrade.
         facts["connector_store_not_read"] = unopened["reason"]
+        if unopened["reason"] == "unreadable":
+            # Not a state the data check explains away: the read itself failed.
+            store_error = str(unopened["error"])
+            facts["connector_store_error"] = store_error
     else:
         try:
             from openai4s.store import get_store
@@ -670,8 +677,8 @@ def _connectors(cfg: Any) -> Check:
             "connectors",
             WARN,
             f"{len(facts['science_databases'])} science databases are built in, "
-            f"but the database could not be opened to read the configured "
-            f"connectors: {store_error}",
+            f"but the configured connectors could not be read from the "
+            f"database: {store_error}",
             "Resolve the database error above; `openai4s serve` and `openai4s "
             "run` cannot open it either.",
             facts,

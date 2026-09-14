@@ -425,6 +425,41 @@ def test_a_database_that_needs_recovery_is_not_opened_by_doctor(cfg, monkeypatch
     assert opened == []
 
 
+def test_a_database_whose_version_could_not_be_read_is_not_opened_by_doctor(
+    cfg, monkeypatch
+):
+    """The guard failed open on everything but a newer schema or a read-only
+    refusal. SQLITE_BUSY past the timeout -- an older daemon mid-commit -- is
+    an OperationalError, and the model and connectors checks then opened the
+    database read-write, which upgrades an older one once it gets the lock."""
+    import sqlite3
+
+    import openai4s.storage.migrations as migrations
+    from openai4s.store import Store
+
+    Store(cfg.db_path).close()
+
+    def busy(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(migrations, "preflight_schema", busy)
+    opened = []
+    monkeypatch.setattr(
+        "openai4s.store.get_store", lambda path: opened.append(path) or None
+    )
+
+    result = doctor.report(cfg)
+    checks = _by_name(result)
+    assert opened == []
+    assert checks["data"]["status"] == doctor.FAIL
+    assert "database is locked" in checks["data"]["detail"]
+    connectors = checks["connectors"]
+    assert connectors["facts"]["connector_store_not_read"] == "unreadable"
+    assert connectors["status"] == doctor.WARN
+    assert "database is locked" in connectors["detail"]
+    assert result["status"] == doctor.FAIL
+
+
 def test_the_upgrade_guide_says_doctor_does_not_migrate_and_fails_after_a_failed_one():
     """The guide says which commands upgrade the database. Both halves must
     keep doctor out of that list and say what it reports instead."""
