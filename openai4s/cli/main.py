@@ -692,14 +692,17 @@ def _cmd_serve_detached(args, cfg) -> int:
         except ValueError:
             pass
     deadline = time.monotonic() + ready_timeout
+    exited: int | None = None
     while time.monotonic() < deadline:
-        if process.poll() is not None:
+        exited = process.poll()
+        if exited is not None:
             break
         if _read_pid(cfg) == process.pid and _health_ready(cfg):
             # Re-check both identities after the request.  Another daemon on
             # the same address can answer /health, and a child that loses the
             # bind race can exit while that request is in flight.
-            if process.poll() is not None or _read_pid(cfg) != process.pid:
+            exited = process.poll()
+            if exited is not None or _read_pid(cfg) != process.pid:
                 break
             app_url = _url(cfg)
             print(f"daemon started (pid {process.pid}) at {app_url}")
@@ -717,30 +720,86 @@ def _cmd_serve_detached(args, cfg) -> int:
         time.sleep(0.25)
 
     _cleanup_failed_detached_child(process)
-    # Only inspect this child's bounded log segment, and only render the
-    # numeric schema diagnostic. Never echo arbitrary startup output.
+    # Only inspect this child's bounded log segment, and only render lines
+    # rebuilt from values this process owns (numbers, its config, its paths).
+    # Never echo arbitrary startup output.
     try:
         with log_path.open("rb") as log:
             log.seek(log_start)
             startup = log.read(65536).decode("utf-8", errors="replace")
-        future = re.search(
-            r"\[future_schema\] database schema (\d{1,10}) exceeds supported schema (\d{1,10});",
-            startup,
-        )
-        if future:
-            print(
-                f"error: {FutureSchemaError(int(future[1]), int(future[2]))}",
-                file=sys.stderr,
-            )
-            return 2
     except OSError:
-        pass
+        startup = ""
+    refusal = _detached_startup_refusal(startup, cfg, log_path)
+    if refusal is not None:
+        message, status = refusal
+        print(message, file=sys.stderr)
+        return status
+    if exited is not None:
+        # The child is gone, so no wait ran out: say that, and keep a refusal's
+        # status. Anything else a failed start exits with maps to 1.
+        how = (
+            f"was terminated by signal {-exited}"
+            if exited < 0
+            else f"exited with status {exited}"
+        )
+        print(
+            f"error: detached daemon {how} before it became ready; "
+            f"inspect {log_path}",
+            file=sys.stderr,
+        )
+        return 2 if exited == 2 else 1
     print(
         f"error: detached daemon did not become ready within {ready_timeout:.0f}s "
         f"(OPENAI4S_DETACHED_READY_TIMEOUT overrides); inspect {log_path}",
         file=sys.stderr,
     )
     return 1
+
+
+def _detached_startup_refusal(
+    startup: str, cfg, log_path: Path
+) -> tuple[str, int] | None:
+    """The one-line diagnosis a detached child printed, rebuilt, or None.
+
+    The foreground `serve` ends a refused start with one `error:` line and its
+    exit status; the detached parent's caller should get the same line rather
+    than a pointer to a log. Each shape is matched on its fixed words and
+    re-rendered from what it carries that is safe to repeat -- version numbers,
+    and paths this process computes itself -- so no free text from the log (a
+    SQLite message, a path the log claims) reaches the terminal.
+    """
+    future = re.search(
+        r"\[future_schema\] database schema (\d{1,10}) exceeds supported schema (\d{1,10});",
+        startup,
+    )
+    if future:
+        return (f"error: {FutureSchemaError(int(future[1]), int(future[2]))}", 2)
+    failed = re.search(
+        r"^error: migration to version (\d{1,10}) failed at step (\d{1,10}): "
+        r"[^\n]{0,4096}?\. The database was rolled back and remains at version "
+        r"(\d{1,10}); re-running is safe\.",
+        startup,
+        re.MULTILINE,
+    )
+    if failed:
+        target, step, kept = (int(value) for value in failed.groups())
+        db_path = Path(cfg.db_path)
+        # The name `backup_database` gives the copy; named only if it is there.
+        backup = db_path.with_name(f"{db_path.name}.v{kept}.bak")
+        return (
+            f"error: migration to version {target} failed at step {step}. The "
+            f"database was rolled back and remains at version {kept}; re-running "
+            f"is safe."
+            + (f" A pre-upgrade backup is at {backup}." if backup.exists() else "")
+            + f" The reason is in {log_path}.",
+            2,
+        )
+    lines = set(startup.splitlines())
+    for code in (errno.EADDRINUSE, errno.EACCES, errno.EADDRNOTAVAIL):
+        bind = _bind_failure_message(OSError(code, os.strerror(code)), cfg)
+        if bind is not None and bind in lines:
+            return (bind, 1)
+    return None
 
 
 def cmd_serve(args) -> int:

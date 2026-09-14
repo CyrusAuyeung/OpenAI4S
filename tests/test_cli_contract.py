@@ -995,7 +995,9 @@ def test_detached_serve_does_not_accept_an_unrelated_healthy_daemon(
     assert module._cmd_serve_detached(SimpleNamespace(no_open=True), config) == 1
     output = capsys.readouterr()
     assert "daemon started" not in output.out
-    assert "did not become ready" in output.err
+    # The child exited while the unrelated daemon answered: that is what is
+    # reported, not a readiness wait that never ran out.
+    assert "exited with status 98 before it became ready" in output.err
 
 
 def test_detached_cleanup_escalates_to_kill_and_reaps():
@@ -1398,6 +1400,199 @@ def test_real_detached_child_rejects_future_schema_with_explicit_parent_error(
     error = capsys.readouterr().err
     assert "future_schema" in error and "did not become ready" not in error
     assert cfg.db_path.read_bytes() == before
+    assert not cfg.pidfile.exists() and not cfg.statefile.exists()
+
+
+def _detached_child_that_exits(module, monkeypatch, *, output: str, status: int):
+    """A detached child that writes ``output`` to its log and has exited."""
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return status
+
+        def terminate(self):
+            raise AssertionError("an exited child must not be signalled")
+
+    def spawn(_command, **kwargs):
+        kwargs["stdout"].write(output.encode())
+        return Process()
+
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+
+def test_detached_child_failed_upgrade_is_reported_in_one_line_naming_the_backup(
+    tmp_path, monkeypatch, capsys
+):
+    """LR4-1 / UPG5-04. The foreground `serve` answers a failed upgrade with
+    one `error:` line naming the kept backup and exit 2. The detached parent
+    recognised only `future_schema`, so the same child -- dead after a second
+    -- was reported as "did not become ready within 60s" with exit 1."""
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    (cfg.logs_dir / "app.out").write_text("old log text must not be returned\n")
+    backup = cfg.db_path.with_name("openai4s.db.v27.bak")
+    backup.write_bytes(b"kept")
+    _detached_child_that_exits(
+        module,
+        monkeypatch,
+        status=2,
+        output=(
+            "some startup notice\n"
+            "error: migration to version 32 failed at step 32: there is already "
+            "a table named ix_artifacts_project_created. The database was rolled "
+            "back and remains at version 27; re-running is safe. A pre-upgrade "
+            "backup is at /somewhere/else/openai4s.db.v27.bak.\n"
+            "private diagnostic tail\n"
+        ),
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 2
+
+    err = capsys.readouterr().err
+    errors = [line for line in err.splitlines() if line.startswith("error:")]
+    assert len(errors) == 1, err
+    assert errors[0].startswith("error: migration to version 32 failed at step 32")
+    assert "rolled back and remains at version 27" in errors[0]
+    assert str(backup) in errors[0]
+    assert str(cfg.logs_dir / "app.out") in errors[0]
+    assert "did not become ready" not in err
+    # Built from the numbers, never echoed: not the SQLite detail, not a path
+    # the log claims, not the rest of the log.
+    assert "already a table" not in err and "/somewhere/else" not in err
+    assert "private diagnostic" not in err and "old log" not in err
+
+
+def test_detached_child_failed_upgrade_names_no_backup_that_does_not_exist(
+    tmp_path, monkeypatch, capsys
+):
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    _detached_child_that_exits(
+        module,
+        monkeypatch,
+        status=2,
+        output=(
+            "error: migration to version 32 failed at step 30: disk I/O error. "
+            "The database was rolled back and remains at version 29; re-running "
+            "is safe.\n"
+        ),
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 2
+
+    err = capsys.readouterr().err
+    assert "error: migration to version 32 failed at step 30" in err
+    assert "backup" not in err
+
+
+def test_detached_child_that_cannot_bind_is_reported_with_its_own_line(
+    tmp_path, monkeypatch, capsys
+):
+    import errno
+
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    line = module._bind_failure_message(OSError(errno.EADDRINUSE, "in use"), cfg)
+    _detached_child_that_exits(
+        module, monkeypatch, status=1, output=f"{line}\nprivate diagnostic tail\n"
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 1
+
+    err = capsys.readouterr().err
+    assert line in err
+    assert "did not become ready" not in err and "private diagnostic" not in err
+
+
+@pytest.mark.parametrize(("status", "expected"), [(1, 1), (2, 2), (-9, 1)])
+def test_detached_child_that_exits_early_is_not_reported_as_a_timeout(
+    tmp_path, monkeypatch, capsys, status, expected
+):
+    """An unrecognised early exit names the exit and the log, never a wait
+    that did not happen; a refusal's status 2 stays 2."""
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    _detached_child_that_exits(
+        module, monkeypatch, status=status, output="private diagnostic tail\n"
+    )
+
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == expected
+
+    err = capsys.readouterr().err
+    assert "within 60s" not in err and "did not become ready" not in err
+    assert "before it became ready" in err
+    assert str(cfg.logs_dir / "app.out") in err
+    assert "private diagnostic" not in err
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _v31_database_whose_upgrade_fails_in_any_process(db_path: Path) -> None:
+    """A real v31 database that step 32 cannot upgrade in *any* process: the
+    name its index needs is taken by a table, so no monkeypatch is involved
+    and a spawned child fails the same way."""
+    import sqlite3
+
+    from openai4s.store import Store
+
+    Store(db_path).close()
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("DROP INDEX IF EXISTS ix_artifacts_project_created")
+        conn.execute("CREATE TABLE ix_artifacts_project_created(x)")
+        conn.execute("DELETE FROM schema_migrations WHERE version>=32")
+        conn.execute("PRAGMA user_version = 31")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="detached sessions require POSIX")
+def test_real_detached_child_failed_upgrade_names_the_backup_and_exits_2(
+    tmp_path, monkeypatch, capsys
+):
+    import sqlite3
+    import time
+
+    from openai4s.config import Config
+
+    module = _cli_module()
+    cfg = Config(data_dir=tmp_path)
+    cfg.port = _free_port()
+    cfg.ensure_dirs()
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI4S_NO_OPEN", "1")
+    monkeypatch.setenv("OPENAI4S_DETACHED_READY_TIMEOUT", "30")
+    _v31_database_whose_upgrade_fails_in_any_process(cfg.db_path)
+
+    started = time.monotonic()
+    assert module._cmd_serve_detached(SimpleNamespace(no_open=True), cfg) == 2
+    assert time.monotonic() - started < 30
+
+    err = capsys.readouterr().err
+    backup = cfg.db_path.with_name("openai4s.db.v31.bak")
+    assert backup.exists()
+    assert "error: migration to version" in err and str(backup) in err
+    assert "did not become ready" not in err and "already a table" not in err
+    with sqlite3.connect(str(cfg.db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 31
     assert not cfg.pidfile.exists() and not cfg.statefile.exists()
 
 
