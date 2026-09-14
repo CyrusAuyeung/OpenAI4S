@@ -37,7 +37,7 @@ vi.mock("./use-timer-lease", () => ({ useAlive: () => mocks.alive }));
 vi.mock("./vendors/volcengine", () => ({ VolcenginePanel: () => null }));
 vi.mock("../../features/customize/actions", () => ({ custTab: () => undefined }));
 
-import { ModelsTab } from "./ModelsTab";
+import { ModelsTab, profileKeyLabel } from "./ModelsTab";
 
 type Node = { type?: unknown; props?: Record<string, unknown> & { children?: unknown } };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -147,5 +147,18 @@ describe("ModelsTab active configuration", () => {
     });
     expect(tagged(tree, "data-live-model")).toHaveLength(0);
     expect(content(tree)).not.toContain("versions.load.err");
+  });
+});
+
+describe("profile key label", () => {
+  it("names an environment credential instead of reporting no key", () => {
+    expect(profileKeyLabel({ has_api_key: false, credential_source: "environment" })).toMatch(/environment/i);
+    expect(profileKeyLabel({ has_api_key: true, credential_source: "profile" })).toBe("cust.models.hasKey");
+    expect(profileKeyLabel({ has_api_key: false, credential_source: "local", base_url: "http://10.0.0.5:8000/v1" })).toBe(
+      "cust.models.local.keyless",
+    );
+    expect(profileKeyLabel({ has_api_key: false, credential_source: "missing" })).toBe("cust.models.noKey");
+    // An older daemon sends no `credential_source`: the loopback rule still applies.
+    expect(profileKeyLabel({ has_api_key: false, base_url: "http://127.0.0.1:11434/v1" })).toBe("cust.models.local.keyless");
   });
 });

@@ -38,15 +38,31 @@ const COPY = {
   en: {
     liveSource: "In use now · from the daemon's environment or saved settings, not a saved profile",
     liveNoProfiles: "No saved profiles. The active model above comes from the environment or saved settings.",
+    envKey: "🔑 Key from environment",
   },
   zh: {
     liveSource: "当前在用 · 来自守护进程的环境变量或已保存的设置，不是已保存的配置档",
     liveNoProfiles: "还没有已保存的配置档。上方正在使用的模型来自环境变量或已保存的设置。",
+    envKey: "🔑 密钥来自环境变量",
   },
 } as const;
 
 function copy(key: keyof (typeof COPY)["en"]): string {
   return (LANG === "zh" ? COPY.zh : COPY.en)[key];
+}
+
+/**
+ * The key half of a profile row. `has_api_key` is only "holds a key of its
+ * own", so a profile dispatched under the daemon's environment key for the same
+ * provider read "No key" beside a `ready` card; `credential_source` says which.
+ */
+export function profileKeyLabel(p: Record<string, unknown>): string {
+  if (p.has_api_key) return t("cust.models.hasKey");
+  if (p.credential_source === "environment") return copy("envKey");
+  if (p.credential_source === "local" || loopbackModelBase(p.base_url)) {
+    return t("cust.models.local.keyless");
+  }
+  return t("cust.models.noKey");
 }
 
 type LiveModel = { provider: string; model: string; baseUrl: string; hasKey: boolean };
@@ -459,13 +475,7 @@ function ProfileRow({
   const bits: string[] = [];
   if (p.provider) bits.push(protocolLabelOf(protocols, p.provider));
   if (p.model) bits.push(asString(p.model));
-  bits.push(
-    p.has_api_key
-      ? t("cust.models.hasKey")
-      : loopbackModelBase(p.base_url)
-        ? t("cust.models.local.keyless")
-        : t("cust.models.noKey"),
-  );
+  bits.push(profileKeyLabel(p));
   return (
     <div class="cust-row prof-row">
       <div class="info">

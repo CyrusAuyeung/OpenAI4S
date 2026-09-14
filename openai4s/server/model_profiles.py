@@ -696,6 +696,12 @@ class ModelProfileService:
             "base_url": profile.get("base_url") or "",
             "model": profile.get("model") or "",
             "has_api_key": bool(self.resolve_key(profile)),
+            # Where the credential this profile is dispatched under comes from:
+            # `profile`, `environment` (the same provider's key in the daemon's
+            # environment), `local` (keyless local endpoint), `revoked` or
+            # `missing`. `has_api_key` alone made an environment-keyed profile
+            # read "No key" beside a `ready` card. Never the key itself.
+            "credential_source": self.credential(profile).source,
             # Local-only readiness. Never a network call: see `readiness`.
             "readiness": self.readiness(profile),
             # The number a session binds to. Surfaced so a client can show

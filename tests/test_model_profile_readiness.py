@@ -300,3 +300,31 @@ def test_the_daemons_key_counts_only_for_the_daemons_own_provider(
     assert service.credential(rows[ark["id"]]).source == "environment"
     assert claude["readiness"]["state"] == "needs_key", claude["readiness"]
     assert service.credential(rows[claude["id"]]).api_key == ""
+
+
+def test_a_listed_profile_says_where_its_credential_comes_from(tmp_path, monkeypatch):
+    """`has_api_key` answers "does this profile hold a key", and must keep doing
+    so -- the edit form reads it to say whether a key is saved. A profile running
+    on the environment's key therefore listed as "No key" beside a `ready` card.
+    `credential_source` is the other half: never the key, only its origin."""
+    monkeypatch.setenv("OPENAI4S_CLAUDE_API_KEY", "environment-key-for-claude")
+    store, service = _service(tmp_path)
+    env = service.create({"name": "env", "provider": "claude", "model": "m"})
+    own = service.create(
+        {"name": "own", "provider": "claude", "model": "m", "api_key": "sk-own-key"}
+    )
+    local = service.create(
+        {
+            "name": "local",
+            "provider": "chatgpt",
+            "model": "llama3",
+            "base_url": "http://127.0.0.1:11434/v1",
+        }
+    )
+    none = service.create({"name": "none", "provider": "gemini", "model": "m"})
+
+    assert (env["has_api_key"], env["credential_source"]) == (False, "environment")
+    assert (own["has_api_key"], own["credential_source"]) == (True, "profile")
+    assert (local["has_api_key"], local["credential_source"]) == (False, "local")
+    assert (none["has_api_key"], none["credential_source"]) == (False, "missing")
+    assert "environment-key-for-claude" not in repr([env, own, local, none])

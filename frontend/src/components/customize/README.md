@@ -16,7 +16,7 @@ F-19 Customize modal. Nine tab components, a nested editor overlay, and `vendors
 | [`DiagnosticsTab.test.tsx`](DiagnosticsTab.test.tsx) | Page load is a single status GET; checks and bundle wait for a click. |
 | [`MemoryTab.tsx`](MemoryTab.tsx) | Memory enable / add / edit / delete with explicit scope. |
 | [`ModelsTab.tsx`](ModelsTab.tsx) | Profiles, local scan, probe, capability-receipt badges. With no active profile it shows the live `GET /config/llm` model (environment or saved settings) as the active row. |
-| [`ModelsTab.test.tsx`](ModelsTab.test.tsx) | An `.env`-configured install with no profiles shows its active model instead of "No models configured yet"; no extra row when a profile is active; an unreadable config does not hide profiles. |
+| [`ModelsTab.test.tsx`](ModelsTab.test.tsx) | An `.env`-configured install with no profiles shows its active model instead of "No models configured yet"; no extra row when a profile is active; an unreadable config does not hide profiles; a profile on the environment key is labelled so, not "No key". |
 | [`NestedEditor.tsx`](NestedEditor.tsx) | Skill / specialist / connector / job-output overlay. |
 | [`SkillImport.test.tsx`](SkillImport.test.tsx) | Import review shows requirements, network mode, and readiness before enable. |
 | [`NetworkTab.tsx`](NetworkTab.tsx) | Doubao card, allowlist, Tavily backup, telemetry drain. |
