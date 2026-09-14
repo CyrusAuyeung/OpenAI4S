@@ -789,3 +789,197 @@ def test_the_rebind_route_does_not_re_pin_a_profile_nothing_can_dispatch(api):
     assert rebound["code"] == 409, rebound
     assert rebound["body"].get("code") == "model_profile_needs_key", rebound
     assert not (runner.store.get_frame(frame) or {}).get("model_profile_id")
+
+
+# --- a session the workbench created, whose profile was then deleted --------
+#
+# The workbench sends `model: <the composer's model name>` on `POST /frames`, so
+# every session it creates records `frames.model`. Delete tombstones a profile
+# and keeps the pin, the next send refuses with `model_revision_unavailable`,
+# and the rebind route unpins and binds again. With `frames.model` set and
+# history present that second bind took the legacy backfill branch, whose
+# model-string match counted the tombstone: 409 `model_profile_needs_key` for a
+# profile that can never be keyed, or `model_revision_ambiguous` for good when
+# the replacement names the same model. The prompt that led there says "re-bind
+# it to the active configuration", and nothing on that path looked at it.
+
+
+def _profile(call, name, provider, model, api_key=None):
+    body = {"name": name, "provider": provider, "model": model}
+    if api_key is not None:
+        body["api_key"] = api_key
+    created = call("POST", "/model-profiles", body)
+    assert created["code"] == 201, created
+    return created["body"]["id"]
+
+
+def _workbench_session(runner, call, model):
+    """A session created the way the workbench creates one, then sent to once."""
+    project = runner.store.create_project(name="p", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    created = call("POST", "/frames", {"project_id": project, "model": model})
+    assert created["code"] == 200, created
+    frame = created["body"]["id"]
+    assert (runner.store.get_frame(frame) or {}).get("model") == model
+    runner.bind_model_revision(frame)
+    runner.store.add_message(root_frame_id=frame, role="user", content="hello")
+    return frame
+
+
+def _refused_send(call, frame):
+    refused = call("POST", f"/frames/{frame}/message", {"request": "x", "wait": False})
+    assert refused["code"] == 409, refused
+    return refused["body"].get("code")
+
+
+@pytest.mark.stubbed_backend
+def test_a_workbench_session_whose_profile_was_deleted_rebinds_to_the_active_one(
+    api, monkeypatch
+):
+    runner, call = api
+    seen = _dispatch_spy(runner, monkeypatch)
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == deleted
+
+    assert call("DELETE", f"/model-profiles/{deleted}")["code"] in (200, 204)
+    replacement = _profile(call, "B", "openai_responses", "gpt-4.1", "sk-b")
+    call("POST", f"/model-profiles/{replacement}/activate")
+    assert _refused_send(call, frame) == "model_revision_unavailable"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == replacement
+
+    accepted, result = _send(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen and seen[-1].model == "gpt-4.1" and seen[-1].api_key == "sk-b"
+
+
+def test_a_replacement_naming_the_same_model_is_not_ambiguous_with_its_tombstone(
+    api,
+):
+    """Recreating a deleted profile under the same model is the obvious repair,
+    and it made the session ask "which one" forever: the tombstone still matched
+    by model string, so there were always two."""
+    runner, call = api
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    call("DELETE", f"/model-profiles/{deleted}")
+    replacement = _profile(call, "A again", "openai_responses", "gpt-4o", "sk-a2")
+    call("POST", f"/model-profiles/{replacement}/activate")
+    assert _refused_send(call, frame) == "model_revision_unavailable"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == replacement
+
+
+def test_a_refused_rebind_keeps_the_sessions_record(api):
+    """The rebind checks the configuration it is about to pin before it drops
+    the old pin. It used to unpin first, so a refusal still erased the audit
+    answer to "what did this session run under"."""
+    runner, call = api
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    call("DELETE", f"/model-profiles/{deleted}")
+    keyless = _profile(call, "no-key", "claude", "claude-sonnet-4-5")
+    call("POST", f"/model-profiles/{keyless}/activate")
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 409, rebound
+    assert rebound["body"].get("code") == "model_profile_needs_key", rebound
+    assert "'no-key'" in rebound["body"]["error"], rebound
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == deleted
+
+
+def test_the_rebind_route_answers_an_ambiguous_legacy_session(api):
+    """`model_revision_ambiguous` is offered the same rebind, and the rebind ran
+    the same ambiguous backfill again: asked, confirmed, asked again."""
+    runner, call = api
+    _profile(call, "east", "openai_responses", "gpt-4o", "sk-east")
+    west = _profile(call, "west", "chatgpt", "gpt-4o", "sk-west")
+    call("POST", f"/model-profiles/{west}/activate")
+    project = runner.store.create_project(name="p", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    frame = runner.create_session(project)
+    runner.store.update_frame(frame, model="gpt-4o")
+    runner.store.add_message(root_frame_id=frame, role="user", content="hello")
+    assert _refused_send(call, frame) == "model_revision_ambiguous"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == west
+    assert runner.bind_model_revision(frame)["model_profile_id"] == west
+
+
+def test_a_legacy_session_matching_only_a_tombstone_stays_unbound(api):
+    """A deleted profile is not a configuration a session can continue under,
+    so it is not a backfill candidate: zero live matches is the honest unbound
+    state, not a demand for a key nothing can accept."""
+    runner, call = api
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("DELETE", f"/model-profiles/{deleted}")
+    project = runner.store.create_project(name="p", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    frame = runner.create_session(project)
+    runner.store.update_frame(frame, model="gpt-4o")
+    runner.store.add_message(root_frame_id=frame, role="user", content="hello")
+
+    binding = runner.bind_model_revision(frame)
+    assert binding["bound"] is False and binding["model_profile_id"] == "", binding
+
+
+def test_a_legacy_backfill_is_not_ambiguous_between_a_tombstone_and_a_live_profile(
+    api,
+):
+    """The send-path half of the same match: one live profile names the
+    recorded model, so that is the backfill -- the deleted one beside it is
+    history, not a second candidate."""
+    runner, call = api
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("DELETE", f"/model-profiles/{deleted}")
+    live = _profile(call, "A again", "openai_responses", "gpt-4o", "sk-a2")
+    project = runner.store.create_project(name="p", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    frame = runner.create_session(project)
+    runner.store.update_frame(frame, model="gpt-4o")
+    runner.store.add_message(root_frame_id=frame, role="user", content="hello")
+
+    binding = runner.bind_model_revision(frame)
+    assert binding.get("backfilled") is True, binding
+    assert binding["model_profile_id"] == live, binding
+
+
+def test_a_legacy_backfill_refuses_a_match_nothing_can_dispatch(api):
+    """The backfill branch's own credential check. A legacy session's unique
+    match with no usable key used to be pinned and then refused at dispatch; it
+    is now refused before the pin, and the advice fits this branch -- the
+    backfill follows the recorded model, not the active profile, so "activate
+    another profile" would not help."""
+    runner, call = api
+    keyless = _profile(call, "legacy", "claude", "claude-sonnet-4-5")
+    active = _profile(call, "other", "openai_responses", "gpt-4o", "sk-other")
+    call("POST", f"/model-profiles/{active}/activate")
+    project = runner.store.create_project(name="p", description="", context="")
+    if isinstance(project, dict):
+        project = project["project_id"]
+    frame = runner.create_session(project)
+    runner.store.update_frame(frame, model="claude-sonnet-4-5")
+    runner.store.add_message(root_frame_id=frame, role="user", content="hello")
+
+    refused = call("POST", f"/frames/{frame}/message", {"request": "x", "wait": False})
+    assert refused["code"] == 409, refused
+    assert refused["body"].get("code") == "model_profile_needs_key", refused
+    assert "'legacy'" in refused["body"]["error"], refused
+    assert "activate another profile" not in refused["body"]["error"], refused
+    assert not (runner.store.get_frame(frame) or {}).get("model_profile_id")
+    assert keyless

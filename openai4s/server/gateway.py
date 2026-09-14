@@ -9372,14 +9372,19 @@ class SessionRunner:
         # recorded is a model string, so that is what there is to match on.
         recorded = str(frame.get("model") or "").strip()
         if recorded and self.store.message_count(root_frame_id) > 0:
+            # Live profiles only. A tombstone keeps its model string for history,
+            # and counting it made a deleted profile "the" match -- refused for a
+            # key it can never be given -- or made its same-model replacement
+            # "ambiguous" with it, for good.
             matches = [
                 item
                 for item in profiles
-                if str(item.get("model") or "").strip() == recorded
+                if not item.get("deleted_at")
+                and str(item.get("model") or "").strip() == recorded
             ]
             if len(matches) == 1:
                 target = matches[0]
-                self._require_profile_credential(target)
+                self._require_profile_credential(target, follows_active=False)
                 revision = int(target.get("revision") or 0) or 1
                 self.store.update_frame(
                     root_frame_id,
@@ -9419,13 +9424,45 @@ class SessionRunner:
             # there when the user wants to name one.
             return {"model_profile_id": "", "model_profile_revision": 0, "bound": False}
 
+        return self._bind_active_profile(root_frame_id, profiles)
+
+    def rebind_model_revision(self, root_frame_id: str) -> dict:
+        """`POST /frames/{id}/model-binding`: re-pin to the active configuration.
+
+        What the rebind prompt asks the user to confirm -- "re-bind it to the
+        active configuration" -- and so what this does. The route used to unpin
+        and then run `bind_model_revision`, which, for any session with a
+        recorded model and history (every session the workbench creates), took
+        the legacy backfill instead: a model-string match that ignored the
+        active profile the user had just been told it would use. A deleted
+        profile matched there too, so the answer was a key refusal nothing
+        could satisfy, or `model_revision_ambiguous` again right after the user
+        confirmed the prompt that `model_revision_ambiguous` opens.
+
+        The target is checked before the old pin is dropped, so a refused
+        rebind leaves the session's record of what it ran under untouched.
+        """
+        profiles = self.store.list_model_profiles()
+        active = self._active_profile(profiles)
+        if active is not None:
+            self._require_profile_credential(active)
+        self.store.unpin_model(root_frame_id)
+        return self._bind_active_profile(root_frame_id, profiles)
+
+    def _active_profile(self, profiles: list[dict]) -> dict | None:
         active_id = str(self.store.get_setting("active_model_profile") or "")
-        active = next((item for item in profiles if item.get("id") == active_id), None)
+        if not active_id:
+            return None
+        return next((item for item in profiles if item.get("id") == active_id), None)
+
+    def _bind_active_profile(self, root_frame_id: str, profiles: list[dict]) -> dict:
+        active = self._active_profile(profiles)
         if active is None:
             # Nothing to bind to. Deliberately not an error: an install driven
             # entirely by .env has no profiles at all, and refusing to run would
             # break a configuration this project documents as supported.
             return {"model_profile_id": "", "model_profile_revision": 0, "bound": False}
+        active_id = str(active.get("id") or "")
 
         # Checked BEFORE the pin is written. This branch used to pin the active
         # profile with no credential check at all, so a profile nothing could
@@ -9462,12 +9499,18 @@ class SessionRunner:
             self.store, self.cfg, providers=lambda: PROVIDERS
         ).credential(profile, configuration)
 
-    def _require_profile_credential(self, profile: dict) -> None:
+    def _require_profile_credential(
+        self, profile: dict, *, follows_active: bool = True
+    ) -> None:
         """Refuse to pin a profile that no request could be dispatched under.
 
         Its own code, not `model_revision_unavailable`: that one is answered by
         rebinding, and rebinding an unbound session lands on this same active
         profile. What is missing is a credential, and that is what it says.
+
+        `follows_active=False` is the legacy backfill, which binds the profile
+        the session's recorded model names whatever is active -- so "activate
+        another profile" is advice that would not change the answer.
         """
         credential = self._profile_credential(profile)
         if credential.usable:
@@ -9489,6 +9532,10 @@ class SessionRunner:
                 f"model profile {name!r} has no API key: add one in Customize -> "
                 f"Models, set {variable} for the daemon, or activate another "
                 "profile"
+                if follows_active
+                else f"model profile {name!r}, which this session's recorded "
+                "model matches, has no API key: add one in Customize -> Models "
+                f"or set {variable} for the daemon"
             )
         raise GatewayError(409, message, "model_profile_needs_key")
 
@@ -15593,10 +15640,13 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 # though this route protects itself — which would invite moving
                 # it above the real gate some day. Verified by a test that
                 # drives a quarantined session and expects 423.
+                #
+                # It binds the ACTIVE configuration, which is what its prompt
+                # says, and not the legacy backfill a plain unpin-and-bind fell
+                # into for any session carrying a recorded model.
                 frame_id = m.group(1)
-                store.unpin_model(frame_id)
                 self._json(
-                    {"ok": True, "binding": runner.bind_model_revision(frame_id)}
+                    {"ok": True, "binding": runner.rebind_model_revision(frame_id)}
                 )
                 return
             m = re.fullmatch(r"/model-profiles/([^/]+)/probe", sub)

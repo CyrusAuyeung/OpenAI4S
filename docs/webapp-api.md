@@ -415,9 +415,17 @@ profile says today.
   for a local endpoint. A brokered key that no longer resolves is refused rather
   than replaced by an environment key.
 - `409 model_revision_ambiguous` — a legacy session whose recorded model
-  matches more than one profile. Backfill happens only on a **unique** match;
+  matches more than one live profile. Backfill happens only on a **unique** match;
   an ambiguous one stays unbound and asks, because picking either would be a
-  guess presented as a fact.
+  guess presented as a fact. A deleted (tombstoned) profile is never a
+  candidate: it is history, not a configuration to continue under.
+- `POST /frames/{id}/model-binding` answers both `model_revision_unavailable`
+  and `model_revision_ambiguous` by re-pinning the session to the **active**
+  profile — what the client's confirmation prompt says — and never through the
+  legacy backfill. The active profile's credential is checked before the old pin
+  is dropped, so a refused rebind (`409 model_profile_needs_key`) leaves the
+  session's record untouched. With no active profile the session is left
+  unbound and runs on the global configuration.
 - An install with no profiles at all (driven by `.env`) binds nothing and runs.
   An absent profile is an absent binding, not an error.
 
