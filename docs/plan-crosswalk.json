@@ -241,11 +241,11 @@
       "integrated": "P0-1",
       "plan_conclusion": "纳入",
       "status": "closed",
-      "status_note": "local auth required on loopback; the DNS-rebinding Host allowlist verified on the wire against a real server, ahead of both the Origin guard and the token gate. The exit matrix itself was added later: an unauthenticated WebSocket upgrade, a sweep of every routable path from contract.http_routes(), and a cookie replayed against a handler that did not issue it -- three legs this row previously claimed without evidence.",
+      "status_note": "local auth required on loopback, and on every bind with no opt-out since 0.3.0 (the loopback-only OPENAI4S_REQUIRE_TOKEN=0 hatch granted for one minor release by D1 is removed, and a daemon started with it is driven over the wire and still refuses an anonymous caller); the DNS-rebinding Host allowlist verified on the wire against a real server, ahead of both the Origin guard and the token gate. The exit matrix itself was added later: an unauthenticated WebSocket upgrade, a sweep of every routable path from contract.http_routes(), and a cookie replayed against a handler that did not issue it -- three legs this row previously claimed without evidence.",
       "tests": "tests/test_auth_exit_matrix.py,tests/test_gateway_host_allowlist.py,tests/test_token_query_bootstrap.py",
       "browser_evidence": "",
       "external_evidence": "",
-      "evidence_digest": "ad0077f1e614e75ab80285555d9a81619f1a076815825b33efcd6be33a06df6a"
+      "evidence_digest": "560630deeda39e96420a673b9772a3d48d0721567283183d9275f3f509663198"
     },
     {
       "source": "R3",

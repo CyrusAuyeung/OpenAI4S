@@ -8,9 +8,9 @@
 #
 #   * It binds 0.0.0.0 *inside the container's own network namespace*, which is
 #     the only address a published port can reach. That is not the same as
-#     exposing the daemon on a network: what you publish the port to is. A
-#     non-loopback bind also makes the access token mandatory and unremovable
-#     (gateway.py: `_needs_token = (not _loopback) or ...`), so the token — not
+#     exposing the daemon on a network: what you publish the port to is. The
+#     access token is mandatory and unremovable on every bind (gateway.py
+#     `make_handler`: `local_auth.load_or_mint`), so the token — not
 #     the Host-header allowlist, which a wildcard bind necessarily turns off —
 #     is the control standing between a caller and endpoints that execute code.
 #

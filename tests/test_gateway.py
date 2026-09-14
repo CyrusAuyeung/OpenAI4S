@@ -66,7 +66,6 @@ def test_a_fresh_boot_starts_no_kernel_and_executes_no_cell(tmp_path, monkeypatc
     because the defect was in the wiring, not in `_seed_demo_session`.
     """
     monkeypatch.delenv("OPENAI4S_SEED_DEMO", raising=False)
-    monkeypatch.setenv("OPENAI4S_REQUIRE_TOKEN", "0")
     cfg = _cfg(tmp_path)
     cfg.port = 0  # ask the OS for a free port; do not fight a live daemon
 
@@ -571,7 +570,6 @@ def test_server_close_drops_datapro_connection_bound_to_old_secret_store(
     shared = mcp_client.MCPManager()
     monkeypatch.setattr(shared, "_connect", lambda config: _Connection(config))
     monkeypatch.setattr(mcp_client, "_MANAGER", shared)
-    monkeypatch.setenv("OPENAI4S_REQUIRE_TOKEN", "0")
 
     monkeypatch.setattr(
         gateway_mod.ThreadingHTTPServer, "server_close", lambda _server: None
@@ -5433,14 +5431,10 @@ def test_a_sandbox_grant_is_minted_scoped_and_spendable(
         runner.close()
 
 
-@pytest.mark.parametrize(
-    "reason", ["blank_scope", "unsupported_host", "wildcard_bind", "no_secret"]
-)
+@pytest.mark.parametrize("reason", ["blank_scope", "unsupported_host", "wildcard_bind"])
 def test_sandbox_grant_unavailable_is_an_honest_inert_fallback(
     tmp_path, monkeypatch, reason
 ):
-    if reason == "no_secret":
-        monkeypatch.setenv("OPENAI4S_REQUIRE_TOKEN", "0")
     cfg, runner, store, fid, st = _runner_frame(tmp_path)
     if reason == "wildcard_bind":
         cfg.host = "0.0.0.0"
@@ -6599,9 +6593,10 @@ def test_the_loopback_gate_is_required_by_default(tmp_path, monkeypatch):
     the machine. The Host and Origin guards cover the browser; they do not
     cover a local process.
 
-    `OPENAI4S_REQUIRE_TOKEN=0` is the escape hatch, and it lives for one minor
-    release. Same variable that used to opt *in*, sense reversed, so a script
-    setting it to 1 keeps working and simply asks for what is now the default.
+    `OPENAI4S_REQUIRE_TOKEN=0` was the escape hatch, granted for exactly one
+    minor release (D1). v0.2.0 was that release; from 0.3.0 the variable is
+    ignored, so a daemon started with it still mints its token. Setting it to 1
+    keeps working and simply asks for what is the only behaviour.
     """
     from openai4s.server import local_auth
 
@@ -6611,15 +6606,17 @@ def test_the_loopback_gate_is_required_by_default(tmp_path, monkeypatch):
     gateway_mod.make_handler(cfg, _Hub(), runner)
     assert local_auth.read_token(cfg.data_dir), "loopback did not require a token"
 
-    # The legacy opt-out, honoured on loopback.
+    # The retired opt-out, ignored on loopback...
     monkeypatch.setenv("OPENAI4S_REQUIRE_TOKEN", "0")
     relaxed = _cfg(tmp_path / "relaxed")
     relaxed_runner = gateway_mod.SessionRunner(relaxed, _Hub())
     gateway_mod.make_handler(relaxed, _Hub(), relaxed_runner)
-    assert local_auth.read_token(relaxed.data_dir) is None
+    assert local_auth.read_token(
+        relaxed.data_dir
+    ), "OPENAI4S_REQUIRE_TOKEN=0 still turned the loopback gate off"
 
-    # ...and ignored off loopback. A bind anything can route to has no
-    # configuration under which it should answer without a credential.
+    # ...and off loopback. A bind anything can route to has no configuration
+    # under which it should answer without a credential.
     exposed = Config(
         data_dir=tmp_path / "exposed",
         host="0.0.0.0",

@@ -119,7 +119,8 @@ async function runEngine(engineName) {
     // kind worth catching — so the fix is to stop creating the abort.
     const bootstrapped = await authenticate(page, baseUrl);
     if (!bootstrapped) {
-      // No token file: the daemon runs with the gate off, so nothing navigated.
+      // No readable token file, so nothing navigated. The gate cannot be off
+      // (0.3.0), so the checks below report the resulting 401s.
       await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
     }
 

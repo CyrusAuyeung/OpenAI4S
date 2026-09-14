@@ -624,11 +624,12 @@ mutation carrying `?token=` is refused outright, cookie or no cookie: a URL
 with a credential in it is a credential you can paste into chat, and one that
 still works is one nobody notices they leaked.
 
-`OPENAI4S_REQUIRE_TOKEN=0` turns the gate off on loopback, until the version
-named by `gateway.LEGACY_TOKEN_OPT_OUT_REMOVED_IN`. Weigh it against what the daemon exposes: `kernel/execute`,
-`compute/jobs` and `host.bash` all execute code, and "local" includes every
-other process on the machine. The Host and Origin guards stop a malicious web
-page; they do nothing about a local process.
+There is no way to turn the gate off. `OPENAI4S_REQUIRE_TOKEN=0` did that on
+loopback for exactly one minor release (decision D1, v0.2.x) and is ignored from
+0.3.0. The reason is what the daemon exposes: `kernel/execute`, `compute/jobs`
+and `host.bash` all execute code, and "local" includes every other process on
+the machine. The Host and Origin guards stop a malicious web page; they do
+nothing about a local process.
 
 ## Web sharing
 

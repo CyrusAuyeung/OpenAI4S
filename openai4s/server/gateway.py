@@ -396,23 +396,6 @@ _API_ROOT = contract.API_ROOT
 #: never with any part of the token.
 _UNAUTHENTICATED_PATHS = frozenset({"/health", _API_ROOT + "/auth/status"})
 
-#: The release by which `OPENAI4S_REQUIRE_TOKEN=0` must be gone.
-#:
-#: "Kept for one minor release" was written in a comment below and restated in
-#: three docs, and none of the four said *which* release or would ever notice
-#: the deadline passing. The variable turns off the only credential check in
-#: front of `kernel/execute`, `compute/jobs` and `host.bash`, so an escape hatch
-#: that quietly becomes permanent is the entire cost of the decision arriving
-#: without the deadline it was granted on. `tests/test_auth_exit_matrix.py`
-#: fails once `openai4s.__version__` reaches this, which puts the decision in
-#: front of a person instead of leaving it to nobody's memory.
-#:
-#: The original deadline was 0.2.0. Bumping the package to 0.2.0 for the first
-#: multi-platform desktop ship would have failed that test; the opt-out itself
-#: is unchanged, and the deadline moved to 0.3.0 so a person still has to
-#: decide rather than the hatch becoming permanent by inattention.
-LEGACY_TOKEN_OPT_OUT_REMOVED_IN = "0.3.0"
-
 
 def _wants_html(headers) -> bool:
     """Is this a person in a browser, or a script?
@@ -13356,65 +13339,47 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
     from openai4s.jobs import JobManager
 
     _jobs_mgr = JobManager(cfg.data_dir / "compute-jobs")
-    # M2: the daemon exposes unauthenticated code-exec endpoints (kernel/execute,
-    # compute/jobs, host.bash). On loopback that's fine (single-user local tool);
-    # if bound to a non-loopback address (or OPENAI4S_REQUIRE_TOKEN=1) we gate
-    # every request behind a one-time token (first `?token=` sets a cookie).
+    # M2: the daemon exposes code-exec endpoints (kernel/execute, compute/jobs,
+    # host.bash), so every request is gated behind the access token (the first
+    # `?token=` on `/` sets a cookie), on every bind.
     import secrets as _secrets
 
-    _loopback = cfg.host in ("127.0.0.1", "localhost", "::1")
-    # Required by default (decision D1). It used to be opt-in on loopback, on
+    # Required on every bind (decision D1). It used to be opt-in on loopback, on
     # the reasoning that a single-user local tool needs no gate -- but the
     # daemon exposes unauthenticated code execution (kernel/execute,
     # compute/jobs, host.bash), and "local" includes every other process on the
     # machine and every web page the user visits. The Host and Origin guards
     # cover the browser; they do not cover a local process.
     #
-    # `OPENAI4S_REQUIRE_TOKEN=0` is the escape hatch, and it lives until
-    # `LEGACY_TOKEN_OPT_OUT_REMOVED_IN` above -- a version rather than "one
-    # minor release", because the second is not a date anything can check. It
-    # is the same variable that used to opt *in*, with its sense reversed: a
-    # script setting it to 1 keeps working and simply asks for what is now the
-    # default.
+    # There is no opt-out. `OPENAI4S_REQUIRE_TOKEN=0` turned the gate off on
+    # loopback for exactly one minor release (D1, docs/v03-decisions.md); v0.2.0
+    # was that release, and from 0.3.0 the variable is ignored whatever its
+    # value -- `tests/test_auth_exit_matrix.py` drives a daemon started with it
+    # and asserts the gate over the wire.
     #
-    # It is honoured on loopback only. A non-loopback bind is reachable by
-    # anything that can route to it, and there is no configuration under which
-    # that should answer without a credential.
-    _legacy_opt_out = os.environ.get("OPENAI4S_REQUIRE_TOKEN", "").strip().casefold()
-    _needs_token = (not _loopback) or _legacy_opt_out not in ("0", "false", "no")
     # Persisted, not per-boot. A token minted into a closure changed on every
     # restart, which invalidated every cookie already issued -- tolerable for a
     # gate that is off by default, not for one that is on. It also has to be
     # readable by the CLI, which must present a credential once the gate is
     # required and cannot import the web server to find out what it is.
-    _auth_token = local_auth.load_or_mint(cfg.data_dir) if _needs_token else None
+    _auth_token = local_auth.load_or_mint(cfg.data_dir)
     # stderr and flushed, like every other startup notice here. On plain
     # `print` this went to stdout, which is block-buffered whenever it is not a
     # TTY -- so under nohup, systemd, Docker or any redirect to a log file, the
     # one line a user needs in order to open their own daemon sat in a buffer
     # and did not appear. It showed up in a terminal, which is exactly why it
     # survived: the configuration that hides it is the one nobody develops in.
-    if _auth_token:
-        # Rendered, not echoed. A wildcard bind names interfaces rather than an
-        # address, so `http://0.0.0.0:8760/` is a URL nothing dials -- and a
-        # container has no other way to be reachable, which makes the one line
-        # an operator needs the one line that was wrong for them.
-        _reachable = "localhost" if cfg.host in ("0.0.0.0", "::", "") else cfg.host
-        print(
-            f"[openai4s] access token required.\n"
-            f"  open: http://{_reachable}:{cfg.port}/?token={_auth_token}",
-            file=sys.stderr,
-            flush=True,
-        )
-    elif _loopback:
-        print(
-            "[openai4s] WARNING: OPENAI4S_REQUIRE_TOKEN=0 — this daemon answers "
-            "without a credential, and it can execute code. Any other process "
-            "on this machine can drive it. This opt-out is removed in the next "
-            "minor release.",
-            file=sys.stderr,
-            flush=True,
-        )
+    # Rendered, not echoed. A wildcard bind names interfaces rather than an
+    # address, so `http://0.0.0.0:8760/` is a URL nothing dials -- and a
+    # container has no other way to be reachable, which makes the one line
+    # an operator needs the one line that was wrong for them.
+    _reachable = "localhost" if cfg.host in ("0.0.0.0", "::", "") else cfg.host
+    print(
+        f"[openai4s] access token required.\n"
+        f"  open: http://{_reachable}:{cfg.port}/?token={_auth_token}",
+        file=sys.stderr,
+        flush=True,
+    )
     # honour persisted network toggle on boot
     if store.get_setting("network_enabled") == "0":
         os.environ["OPENAI4S_ALLOW_NETWORK"] = "0"
@@ -13575,8 +13540,6 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             """
             if _team_auth is not None:
                 return self._team_identity_from_request() is not None
-            if not _auth_token:
-                return True
             from http.cookies import SimpleCookie
 
             jar = SimpleCookie(self.headers.get("Cookie", "") or "")
@@ -14380,8 +14343,8 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 if _team_auth is not None:
                     if not self._team_admit(method, path):
                         return
-                # M2: token gate (only active when bound non-loopback / opt-in).
-                elif _auth_token and path not in _UNAUTHENTICATED_PATHS:
+                # M2: token gate, on every bind.
+                elif path not in _UNAUTHENTICATED_PATHS:
                     from http.cookies import SimpleCookie
 
                     jar = SimpleCookie(self.headers.get("Cookie", "") or "")
@@ -14863,11 +14826,6 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
             other shape is 404 with no detail -- a probe of this origin must
             not learn whether an id exists.
             """
-            if not _auth_token:
-                # Nothing signs grants, so none can be honoured. This is the
-                # posture where the app never offers a sandboxed preview.
-                self._json({"error": "not found"}, 404)
-                return
             if self._presents_session_cookie():
                 # A legitimate spend is the cross-site subframe load, on which
                 # a SameSite=Strict cookie is never sent. A request that does
@@ -15505,7 +15463,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                         or cfg.llm.provider,
                         "has_api_key": bool(runner.effective_api_key()),
                         "shared_api_key": False,
-                        "auth_mode": "token" if _auth_token else "none",
+                        "auth_mode": "token",
                     }
                 )
                 return
@@ -15578,8 +15536,8 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 self._json(
                     {
                         "authenticated": self._is_authenticated(),
-                        "auth_mode": "token" if _auth_token else "none",
-                        "token_header": _TOKEN_HEADER if _auth_token else None,
+                        "auth_mode": "token",
+                        "token_header": _TOKEN_HEADER,
                     }
                 )
                 return
@@ -17825,12 +17783,12 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     return
                 self._team_guard_served_artifact(artifact)
                 if (
-                    not _auth_token
-                    or not _app_origins()
+                    not _app_origins()
                     or not str(artifact.get("root_frame_id") or "").strip()
                 ):
-                    # No signing secret, so no sandboxed preview exists to
-                    # grant. The client falls back to the inert preview.
+                    # No sandbox origin for this bind, or no frame to scope the
+                    # grant to, so no sandboxed preview exists to grant. The
+                    # client falls back to the inert preview.
                     self._json({"error": "sandbox preview unavailable"}, 409)
                     return
                 version_id = (

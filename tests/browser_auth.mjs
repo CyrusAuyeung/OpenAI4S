@@ -23,10 +23,10 @@ export function daemonToken() {
   try {
     return fs.readFileSync(path.join(dataDir, "access-token"), "utf8").trim() || null;
   } catch {
-    // No token file means the daemon runs with the gate off
-    // (OPENAI4S_REQUIRE_TOKEN=0). That is a supported configuration for one
-    // more minor release, so it is not an error here -- the navigation below
-    // simply carries no token and the daemon does not ask for one.
+    // No readable token file. The gate cannot be turned off (the
+    // OPENAI4S_REQUIRE_TOKEN=0 opt-out was removed in 0.3.0), so this is a
+    // daemon under another data dir or account: callers navigate without a
+    // token and the first gated request fails with a 401 that names it.
     return null;
   }
 }
