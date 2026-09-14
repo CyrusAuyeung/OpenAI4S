@@ -13,6 +13,8 @@ instead, and gateway re-exports it so existing importers keep working.
 from __future__ import annotations
 
 import os
+import sys
+import traceback
 from typing import Any
 
 from openai4s.observability import correlation_id, fingerprint, log_event
@@ -53,6 +55,46 @@ class GatewayError(Exception):
         self.code = code
         self.message = message
         self.error_code = error_code
+
+
+def expected_refusal(error: BaseException) -> str | None:
+    """One loggable line when ``error`` is an expected refusal, else None.
+
+    A 4xx ``GatewayError`` is the daemon saying no on purpose (a dangling
+    model pin, a missing project), and a missing LLM credential is a setup
+    step the user has not done. Neither is a crash. Both carry author-written
+    text only: the GatewayError message is the one the client is sent, and the
+    credential error names environment variables, never a value.
+    """
+    if isinstance(error, GatewayError):
+        try:
+            status = int(error.code)
+        except (TypeError, ValueError):
+            return None
+        if 400 <= status < 500:
+            code = error.error_code or error_code_for(status)
+            return f"{status} {code}: {error.message}"
+        return None
+    from openai4s.llm.models import MissingCredentialError
+
+    if isinstance(error, MissingCredentialError):
+        return f"llm_credential_missing: {error}"
+    return None
+
+
+def log_turn_failure(error: BaseException, *, surface: str) -> None:
+    """Log a caught failure: one line for an expected refusal, else a traceback.
+
+    Replaces a bare ``traceback.print_exc()`` at the job/turn catch-alls. A
+    credential-less daemon printed a full traceback for every turn, and a
+    dangling model pin two per request -- which buried any real server error
+    in the log an operator (or CI's "show daemon log" step) reads.
+    """
+    line = expected_refusal(error)
+    if line is None:
+        traceback.print_exception(type(error), error, error.__traceback__)
+        return
+    print(f"[openai4s] {surface}: refused: {line}", file=sys.stderr, flush=True)
 
 
 def gateway_error_payload(error: GatewayError) -> dict:
@@ -409,7 +451,9 @@ __all__ = [
     "INTERNAL_ERROR_MESSAGE",
     "GatewayError",
     "error_code_for",
+    "expected_refusal",
     "gateway_error_payload",
+    "log_turn_failure",
     "public_exception",
     "public_failure",
     "DIAGNOSTIC_DETAIL",

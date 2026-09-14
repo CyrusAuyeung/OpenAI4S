@@ -16,3 +16,24 @@
 .history-load-status p {
   margin: 6px 0;
 }
+
+/* The marker that ends a stopped turn, live and on reopen (messages/stopped.ts). */
+.msg-stopped {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: var(--col);
+  margin: 8px auto 2px;
+  color: var(--text-400);
+  font-size: 12.5px;
+}
+
+.msg-stopped .ic {
+  display: inline-flex;
+  flex: none;
+}
+
+.activity.stopped .a-head .ic {
+  color: var(--text-400);
+}

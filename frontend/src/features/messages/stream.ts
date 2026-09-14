@@ -30,6 +30,7 @@ import {
 } from "./identity";
 import { cancelFrame, scheduleFrame } from "./raf";
 import { down } from "./scroll";
+import { appendLiveStoppedMarker, cancelledIdentity } from "./stopped";
 
 export const TOOL_LABELS: Record<string, string> = {
   run_python: "toolLabel.runPython",
@@ -317,6 +318,14 @@ export function feed(
       }
     }
   } else {
+    // The stopped marker is rendered as a marker, not appended as prose, so
+    // live matches the reopened transcript and follows the UI language.
+    const stopped = event ? cancelledIdentity(event.cancelled) : null;
+    if (stopped) {
+      appendLiveStoppedMarker(st, stopped);
+      down();
+      return;
+    }
     st.text += chunk;
     st.full += chunk;
     st.md.classList.add("cursor");

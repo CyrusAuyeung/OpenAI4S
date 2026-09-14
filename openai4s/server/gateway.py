@@ -148,7 +148,12 @@ from openai4s.server.completion_gate import (
     CompletionGateService,
     message_review_metadata,
 )
-from openai4s.server.completions import completion_message, response_language
+from openai4s.server.completions import (
+    CANCEL_REASONS,
+    cancellation_marker,
+    completion_message,
+    response_language,
+)
 from openai4s.server.delivery import (
     CompletionDeliveryService,
     DeliveryValidationError,
@@ -159,6 +164,7 @@ from openai4s.server.errors import (
     GatewayError,
     error_code_for,
     gateway_error_payload,
+    log_turn_failure,
     public_exception,
     public_failure,
     record_diagnostic,
@@ -7154,8 +7160,9 @@ class SessionRunner:
                 "send_message": runner.send_message,
                 "delegation_stats": runner.delegation_stats,
             }
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
+        except Exception as error:  # noqa: BLE001
+            # A 409 for a dangling model pin is a refusal, not a crash.
+            log_turn_failure(error, surface="web:delegation_wiring")
 
     def _resolve_env(self, st: SessionState):
         """The Environment this session's kernel should run in. Sets st.env_name
@@ -8354,7 +8361,7 @@ class SessionRunner:
                         # twice.
                         raise
                     except Exception as e:  # noqa: BLE001
-                        traceback.print_exc()
+                        log_turn_failure(e, surface="web:message")
                         emit = self.hub.emitter(root_frame_id)
                         message = job.project(e, "web:message")
                         self._persist_outer_failure(root_frame_id, job, message)
@@ -9605,6 +9612,11 @@ class SessionRunner:
         turn.
         """
 
+        # The live stream concatenates text chunks into one markdown block, and
+        # model prose often ends without a newline -- so the completion text
+        # rendered as "...gradient.Printed ...". Stored rows are separate and
+        # unaffected; only the wire chunk gets the paragraph break.
+        separator = _completion_separator(assistant_visible)
         if self.stage1_trusted_delivery and produced_artifacts:
             try:
                 delivery_service = self.completion_delivery
@@ -9696,7 +9708,7 @@ class SessionRunner:
                         "type": "text_chunk",
                         "frame_id": root_frame_id,
                         "block_type": "text",
-                        "chunk": final_text + "\n",
+                        "chunk": separator + final_text + "\n",
                         "delivery_id": delivery_id,
                         "message_id": message_id,
                     }
@@ -9727,7 +9739,7 @@ class SessionRunner:
                     "type": "text_chunk",
                     "frame_id": root_frame_id,
                     "block_type": "text",
-                    "chunk": final_text + "\n",
+                    "chunk": separator + final_text + "\n",
                 }
             )
         return {
@@ -10027,6 +10039,8 @@ class SessionRunner:
             # and the retry veto if it read one. The id above is not in here,
             # because it exists whether or not anything was raised.
             failure_meta: dict[str, object] = {}
+            # Set once this turn's stopped marker is durable and streamed.
+            cancel_identity: dict[str, object] | None = None
             loop_reason: str | None = None
             try:
                 st.dispatcher.last_output = None
@@ -10158,7 +10172,7 @@ class SessionRunner:
                         "chunk": "\n\n" + err_text + "\n",
                     }
                 )
-                traceback.print_exc()
+                log_turn_failure(e, surface="web:turn")
             if st.guardian_blocked_reason:
                 status = "blocked_by_guardian"
             elif st.cancel.is_set():
@@ -10387,7 +10401,11 @@ class SessionRunner:
                                     "type": "text_chunk",
                                     "frame_id": root_frame_id,
                                     "block_type": "text",
-                                    "chunk": str(candidate_final["text"]) + "\n",
+                                    "chunk": (
+                                        _completion_separator(assistant_visible)
+                                        + str(candidate_final["text"])
+                                        + "\n"
+                                    ),
                                     "provisional": True,
                                     "review_status": "candidate",
                                     "turn_id": str(action_ledger.turn_id),
@@ -10667,8 +10685,14 @@ class SessionRunner:
                     "Blocked · Guardian. The denied action was not executed; "
                     "a fresh continuation is required."
                 )
-            elif status == "cancelled" and not had_prose:
-                tail = "_已取消。_"
+            elif status == "cancelled":
+                # Whether or not prose streamed. A Web Cell turn always has the
+                # in-progress narration ("... am running it now"), so gating
+                # this on "no prose" left every turn stopped mid-Cell reopening
+                # with only a claim that the cell was still running.
+                cancel_identity = self._close_cancelled_turn(
+                    st, emit, turn_identity, user_text
+                )
             elif status == "completed" and loop_reason != "submitted" and not had_prose:
                 tail = "_(no textual response)_"
             if tail:
@@ -10737,6 +10761,10 @@ class SessionRunner:
                     status = "blocked_by_guardian"
                 elif st.cancel.is_set():
                     status = "cancelled"
+                    if cancel_identity is None:
+                        cancel_identity = self._close_cancelled_turn(
+                            st, emit, turn_identity, user_text
+                        )
             if (
                 (not gated)
                 and self.cfg.roadmap_features.stage3_scientific_review_shadow
@@ -10826,6 +10854,7 @@ class SessionRunner:
                 # The stream is the surface the user is watching, and it is the
                 # one that said only "failed".
                 **turn_identity,
+                **({"cancelled": dict(cancel_identity)} if cancel_identity else {}),
                 **(
                     {
                         "review_status": gate_metadata.get("review_status"),
@@ -10837,6 +10866,51 @@ class SessionRunner:
             }
         )
         return response
+
+    def _close_cancelled_turn(
+        self,
+        st: SessionState,
+        emit: Callable[[dict], None],
+        turn_identity: Mapping[str, object],
+        user_text: str,
+    ) -> dict[str, object]:
+        """Persist and stream the stopped marker that ends a cancelled turn.
+
+        One row, one chunk, one identity: the REST reopen, the live stream and
+        the terminal ``frame_update`` carry the same ``cancelled`` object, so a
+        client renders the same marker whichever surface it read. The content
+        is in the request's language, the reason says whose stop it was.
+        """
+
+        identity: dict[str, object] = {
+            **{
+                key: value
+                for key, value in turn_identity.items()
+                if key in ("request_id", "execution_id")
+            },
+            "reason": "auto_budget" if st.auto_budget_terminal_reason else "user",
+        }
+        marker = cancellation_marker(
+            str(identity["reason"]), response_language(user_text)
+        )
+        self.store.add_message(
+            root_frame_id=st.root_frame_id,
+            branch_id=st.branch_id,
+            role="assistant",
+            content=marker,
+            frame_id=st.root_frame_id,
+            metadata={"cancelled": dict(identity)},
+        )
+        emit(
+            {
+                "type": "text_chunk",
+                "frame_id": st.root_frame_id,
+                "block_type": "text",
+                "chunk": "\n\n" + marker + "\n",
+                "cancelled": dict(identity),
+            }
+        )
+        return identity
 
     def _resolve_mentions(self, st: SessionState, text: str) -> tuple[str, list[dict]]:
         """Append the content of any @-referenced artifact to the prompt.
@@ -12279,7 +12353,7 @@ class SessionRunner:
                         outcome["handled"] = e
                         raise
                     except Exception as e:  # noqa: BLE001
-                        traceback.print_exc()
+                        log_turn_failure(e, surface="web:plan")
                         message = job.project(e, "web:plan")
                         self._persist_outer_failure(root_frame_id, job, message)
                         emit = self.hub.emitter(root_frame_id)
@@ -12429,9 +12503,25 @@ class SessionRunner:
             self.executions.mark_finalizing(
                 execution, reason="persisting notebook cell"
             )
-            emit(
-                {"type": "frame_update", "frame_id": root_frame_id, "status": "success"}
-            )
+            # An interrupted cell is not a success, whether the stop came
+            # through the coordinator or as a kernel interrupt; the Notebook
+            # already said "interrupted" for the same cell.
+            if execution.cancellation.is_set() or r.get("interrupted"):
+                emit(
+                    {
+                        "type": "frame_update",
+                        "frame_id": root_frame_id,
+                        "status": "cancelled",
+                    }
+                )
+            else:
+                emit(
+                    {
+                        "type": "frame_update",
+                        "frame_id": root_frame_id,
+                        "status": "success",
+                    }
+                )
             return {
                 "status": (
                     "cancelled" if execution.cancellation.is_set() else "completed"
@@ -12524,7 +12614,7 @@ class SessionRunner:
                     }
                 )
             except Exception as error:  # noqa: BLE001 - job owns its failure
-                traceback.print_exc()
+                log_turn_failure(error, surface="web:repl")
                 # A *kernel* error is not this path: a traceback from the
                 # user's own cell arrives as a normal result and is the whole
                 # point of a REPL. This clause only fires when the machinery
@@ -15405,7 +15495,7 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 return
             if artifact_index_routes.handle(self, method, sub, q, store):
                 return
-            # ---- identity / meta (no-auth local mode) ----
+            # ---- identity / meta (local identity; behind the token gate) ----
             if sub == "/me":
                 self._json(
                     {
@@ -16055,7 +16145,18 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                     return
                 if method == "POST":
                     b = self._body()
-                    pid = b.get("project_id") or "default"
+                    # Required, not defaulted. The old fallback named a
+                    # `default` project nothing ever creates, so a client that
+                    # omitted the field was told "project not found" about a
+                    # project it never named.
+                    pid = b.get("project_id")
+                    if not isinstance(pid, str) or not pid.strip():
+                        raise GatewayError(
+                            400,
+                            "POST /frames requires project_id; create one with "
+                            "POST /projects or list them with GET /projects",
+                            "project_id_required",
+                        )
                     fid = runner.create_session(
                         pid,
                         model=b.get("model"),
@@ -16157,6 +16258,14 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                             **(
                                 {"failure": _message_failure(mm)}
                                 if _message_failure(mm)
+                                else {}
+                            ),
+                            # Absent unless this row is a cancelled turn's
+                            # stopped marker; the same identity the live
+                            # chunk and terminal frame_update carried.
+                            **(
+                                {"cancelled": _message_cancelled(mm)}
+                                if _message_cancelled(mm)
                                 else {}
                             ),
                             **(
@@ -19393,6 +19502,19 @@ def _project_json(p: dict) -> dict:
     }
 
 
+def _completion_separator(assistant_visible: list) -> str:
+    """The paragraph break a completion chunk needs on the live stream.
+
+    Clients append consecutive text chunks to one markdown block until a tool
+    header or step card starts a new one, so a completion text streamed right
+    after visible prose must open its own paragraph. An extra blank line after
+    a block boundary renders as nothing.
+    """
+    if any(str(block.get("text") or "").strip() for block in assistant_visible):
+        return "\n\n"
+    return ""
+
+
 def _message_failure(message: dict) -> dict | None:
     """The failure identity stored on one message, projected safely.
 
@@ -19428,6 +19550,35 @@ def _message_failure(message: dict) -> dict | None:
     if failure.get("output_committed") is True:
         out["output_committed"] = True
     return out or None
+
+
+def _message_cancelled(message: dict) -> dict | None:
+    """The stopped-marker identity stored on one message, projected safely.
+
+    Same allowlist as `_message_failure`: two ids already published on the
+    live surfaces and a reason from a closed vocabulary. Nothing else from the
+    metadata blob reaches the client.
+    """
+    raw = message.get("metadata")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+    cancelled = raw.get("cancelled")
+    if not isinstance(cancelled, dict):
+        return None
+    reason = cancelled.get("reason")
+    if reason not in CANCEL_REASONS:
+        return None
+    out: dict = {"reason": reason}
+    for key in ("request_id", "execution_id"):
+        value = cancelled.get(key)
+        if isinstance(value, str) and value:
+            out[key] = value
+    return out
 
 
 def _message_review_gate(message: dict) -> dict | None:
@@ -19755,9 +19906,24 @@ def _format_annotations_block(annos: list) -> str:
 class _GatewayHTTPServer(ThreadingHTTPServer):
     """HTTP server whose resource close also closes every SessionRunner slot."""
 
+    #: A peer that went away mid-request. Browsers close keep-alive sockets
+    #: and tabs all the time; the stdlib printed "Exception occurred during
+    #: processing of request" plus a full traceback for each, which reads as a
+    #: crash in every upgrade and CI log.
+    _CLIENT_DISCONNECTS = (
+        ConnectionResetError,
+        BrokenPipeError,
+        ConnectionAbortedError,
+    )
+
     def __init__(self, *args, runner: SessionRunner, **kwargs) -> None:
         self.runner = runner
         super().__init__(*args, **kwargs)
+
+    def handle_error(self, request, client_address) -> None:
+        if isinstance(sys.exc_info()[1], self._CLIENT_DISCONNECTS):
+            return
+        super().handle_error(request, client_address)
 
     def server_close(self) -> None:
         try:

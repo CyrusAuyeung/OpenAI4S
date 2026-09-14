@@ -546,3 +546,54 @@ def test_an_alternation_is_sampled_rather_than_stripped():
     route = "/frames/([^/]+)/(?:action-timeline|context|recovery(?:/actions)?)"
     assert concrete_path(route) == "/frames/probe-id/action-timeline"
     assert re.fullmatch(route, concrete_path(route))
+
+
+def _doc_row(doc: str, route: str) -> str:
+    return next(line for line in doc.splitlines() if line.startswith(f"| `{route}` |"))
+
+
+def test_identity_rows_describe_the_token_gate_the_handler_serves(doc, tmp_path):
+    """§2's `/me` and `/auth/status` rows must describe the default daemon.
+
+    They still described the pre-gate handlers -- `/me` with a hardcoded
+    `"auth_mode":"none"` and `/auth/status` as `{"authenticated":true,
+    "auth_mode":"none"}` "(always)" -- while §1 and the live daemon said
+    `token`. A client author reading the table would conclude the default
+    daemon has no gate. Pinned against the real handler over a socket, so the
+    row and the response cannot drift apart again.
+    """
+    import json as _json
+
+    from tests.test_team_auth_routes import _body_json, _get, _TeamDaemon
+
+    me_row = _doc_row(doc, "GET /me")
+    status_row = _doc_row(doc, "GET /auth/status")
+    for row in (me_row, status_row):
+        assert '"auth_mode":"none"}' not in row
+        assert "(always)" not in row
+        assert '"token"' in row
+    assert "token_header" in status_row
+
+    node = _TeamDaemon(tmp_path / "home", team_mode=False)
+    try:
+        status, raw = _get(node.port, "/api/v1/auth/status")
+        assert status == 200
+        anonymous = _body_json(raw)
+        assert anonymous["authenticated"] is False
+        assert anonymous["auth_mode"] == "token"
+        status, raw = _get(node.port, "/api/v1/auth/status", token=node.token)
+        signed_in = _body_json(raw)
+        assert signed_in["authenticated"] is True
+        for key in signed_in:
+            assert key in status_row, (key, status_row)
+        assert node.token not in _json.dumps(signed_in)
+
+        assert _get(node.port, "/api/v1/me")[0] == 401
+        status, raw = _get(node.port, "/api/v1/me", token=node.token)
+        assert status == 200
+        me = _body_json(raw)
+        assert me["auth_mode"] == "token"
+        for key in me:
+            assert key in me_row, (key, me_row)
+    finally:
+        node.close()

@@ -4251,11 +4251,12 @@ def test_plan_restore_and_delete_artifact_created_shapes(tmp_path):
 def test_frame_update_status_literal_vocabulary(tmp_path):
     """Source-level lock on the frame_update status vocabulary documented in
     docs/webapp-api.md §3. Literal statuses in gateway.py emit sites are
-    exactly {processing, titled, failed, success, updated}; the
-    run_message terminal site emits a VARIABLE status ∈ {completed, failed,
-    cancelled} (asserted behaviorally by the structured-submit and max-turn
-    tests above). If this fails, a status was added/removed — update
-    docs/webapp-api.md.
+    exactly {processing, titled, failed, success, cancelled, updated} --
+    `cancelled` is the REPL site's interrupted cell, which used to report
+    `success`; the run_message terminal site emits a VARIABLE status ∈
+    {completed, failed, cancelled} (asserted behaviorally by the
+    structured-submit and max-turn tests above). If this fails, a status was
+    added/removed — update docs/webapp-api.md.
 
     The *vocabulary* is what docs/webapp-api.md promises, so the vocabulary is
     what is locked. This used to also require at least seven emit sites, which
@@ -4282,6 +4283,7 @@ def test_frame_update_status_literal_vocabulary(tmp_path):
         "titled",
         "failed",
         "success",
+        "cancelled",
         "updated",
     }
 
