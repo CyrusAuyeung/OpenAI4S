@@ -988,3 +988,333 @@ def test_a_legacy_backfill_refuses_a_match_nothing_can_dispatch(api):
     assert "activate another profile" not in refused["body"]["error"], refused
     assert not (runner.store.get_frame(frame) or {}).get("model_profile_id")
     assert keyless
+
+
+# --------------------------------------------------------------------------
+# a pinned revision only gets the key the profile holds for its endpoint
+# --------------------------------------------------------------------------
+#
+# The key is shared across revisions by design (`REVISIONED_FIELDS` excludes
+# it), and `edit()` stores a replacement on the same profile while provider or
+# base_url moves. The credential rule returned that key before it looked at the
+# revision being dispatched, so a session pinned to endpoint A sent the key an
+# admin had just entered for endpoint B -- or for another protocol -- to A on
+# every later turn. A third-party proxy received the real OpenAI key.
+
+
+def _send_this(runner, call, frame, text):
+    """`_send`, waiting on the job this request was accepted as -- not the
+    session's first one, which a second send would otherwise find first."""
+    accepted = call(
+        "POST", f"/frames/{frame}/message", {"request": text, "wait": False}
+    )
+    result = None
+    if accepted["code"] == 202:
+        result = runner._jobs[accepted["body"]["job_id"]].wait_result()
+    return accepted, result
+
+
+def _keyed_workbench_session(runner, call, monkeypatch, *, provider, base_url, key):
+    seen = _dispatch_spy(runner, monkeypatch)
+    body = {"name": "work", "provider": provider, "model": "gpt-x", "api_key": key}
+    if base_url:
+        body["base_url"] = base_url
+    created = call("POST", "/model-profiles", body)
+    assert created["code"] == 201, created
+    profile_id = created["body"]["id"]
+    call("POST", f"/model-profiles/{profile_id}/activate")
+    frame, project = _session(runner)
+    accepted, result = _send_this(runner, call, frame, "first")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    pinned = runner.store.get_frame(frame) or {}
+    assert pinned.get("model_profile_id") == profile_id
+    assert int(pinned.get("model_profile_revision") or 0) == 1
+    seen.clear()
+    return seen, frame, project, profile_id
+
+
+@pytest.mark.stubbed_backend
+def test_a_key_entered_for_a_new_endpoint_never_reaches_a_pinned_old_one(
+    api, monkeypatch
+):
+    runner, call = api
+    monkeypatch.setenv("OPENAI_API_KEY", _ENV_KEY)
+    monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", _ENV_KEY)
+    seen, frame, project, profile_id = _keyed_workbench_session(
+        runner,
+        call,
+        monkeypatch,
+        provider="chatgpt",
+        base_url="https://llm-proxy.example.org/v1",
+        key="sk-proxy-OLD",
+    )
+    edited = call(
+        "PATCH",
+        f"/model-profiles/{profile_id}",
+        {"base_url": "https://api.openai.com/v1", "api_key": "sk-REAL-NEW"},
+    )
+    assert edited["code"] == 200 and edited["body"]["revision"] == 2, edited
+
+    refused = call(
+        "POST", f"/frames/{frame}/message", {"request": "again", "wait": False}
+    )
+    assert refused["code"] == 409, refused
+    assert refused["body"].get("code") == "model_revision_unavailable", refused
+    assert "different provider or endpoint" in refused["body"]["error"], refused
+    assert not seen, f"dispatched {seen[-1].base_url} with ...{seen[-1].api_key[-4:]}"
+    # The dispatch half on its own -- what a turn queued before the edit reads --
+    # and without borrowing the same provider's environment key instead.
+    with pytest.raises(GatewayError) as dispatch:
+        runner._llm_cfg(runner._state(frame, project))
+    assert dispatch.value.code == 409
+    assert dispatch.value.error_code == "model_revision_unavailable"
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_revision") == 1
+
+    # Rebinding is the way forward, and it lands on the configuration the new
+    # key was entered for.
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_revision"] == 2, rebound
+    accepted, result = _send_this(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen[-1].base_url == "https://api.openai.com/v1"
+    assert seen[-1].api_key == "sk-REAL-NEW"
+
+
+def test_a_key_entered_for_another_protocol_never_reaches_a_pinned_session(api):
+    runner, call = api
+    created = call(
+        "POST",
+        "/model-profiles",
+        {"name": "work", "provider": "chatgpt", "model": "gpt-x", "api_key": "sk-OLD"},
+    )
+    profile_id = created["body"]["id"]
+    call("POST", f"/model-profiles/{profile_id}/activate")
+    frame, project = _session(runner)
+    assert runner.bind_model_revision(frame)["model_profile_revision"] == 1
+    edited = call(
+        "PATCH",
+        f"/model-profiles/{profile_id}",
+        {"provider": "claude", "model": "claude-x", "api_key": "sk-ant-NEW"},
+    )
+    assert edited["body"]["revision"] == 2, edited
+
+    with pytest.raises(GatewayError) as bound:
+        runner.bind_model_revision(frame)
+    assert bound.value.error_code == "model_revision_unavailable"
+    with pytest.raises(GatewayError) as dispatch:
+        runner._llm_cfg(runner._state(frame, project))
+    assert dispatch.value.error_code == "model_revision_unavailable"
+
+
+@pytest.mark.stubbed_backend
+def test_an_environment_key_is_not_sent_to_an_endpoint_the_profile_left(
+    api, monkeypatch
+):
+    """The same disclosure through the inherited branch: a profile keyed by
+    `OPENAI4S_CHATGPT_API_KEY` moves off a proxy, and a session pinned to the
+    proxy revision must not go on sending the daemon's key there."""
+    runner, call = api
+    monkeypatch.setenv("OPENAI4S_CHATGPT_API_KEY", _ENV_KEY)
+    seen = _dispatch_spy(runner, monkeypatch)
+    created = call(
+        "POST",
+        "/model-profiles",
+        {
+            "name": "env-keyed",
+            "provider": "chatgpt",
+            "base_url": "https://llm-proxy.example.org/v1",
+            "model": "gpt-x",
+        },
+    )
+    assert created["body"]["credential_source"] == "environment", created
+    profile_id = created["body"]["id"]
+    call("POST", f"/model-profiles/{profile_id}/activate")
+    frame, project = _session(runner)
+    accepted, result = _send_this(runner, call, frame, "first")
+    assert accepted["code"] == 202 and result.get("status") == "completed", result
+    assert seen[-1].base_url == "https://llm-proxy.example.org/v1"
+    seen.clear()
+
+    call("PATCH", f"/model-profiles/{profile_id}", {"base_url": ""})
+    refused = call("POST", f"/frames/{frame}/message", {"request": "x", "wait": False})
+    assert refused["code"] == 409, refused
+    assert refused["body"].get("code") == "model_revision_unavailable", refused
+    assert not seen, f"dispatched {seen[-1].base_url} under the environment key"
+    with pytest.raises(GatewayError):
+        runner._llm_cfg(runner._state(frame, project))
+
+
+@pytest.mark.stubbed_backend
+def test_a_rotated_key_on_the_same_endpoint_still_reaches_the_pinned_session(
+    api, monkeypatch
+):
+    """The guard against over-refusal: a rotation, a model-only edit, or a new
+    spelling of the same default endpoint leaves the pinned revision's provider
+    and endpoint where the key belongs."""
+    runner, call = api
+    seen, frame, _project, profile_id = _keyed_workbench_session(
+        runner, call, monkeypatch, provider="chatgpt", base_url="", key="sk-OLD"
+    )
+    call("PATCH", f"/model-profiles/{profile_id}", {"api_key": "sk-ROTATED"})
+    moved = call(
+        "PATCH",
+        f"/model-profiles/{profile_id}",
+        {"model": "gpt-y", "base_url": "https://api.openai.com/v1/"},
+    )
+    assert moved["body"]["revision"] == 2, moved
+
+    accepted, result = _send_this(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen[-1].model == "gpt-x", "the pinned revision's model"
+    assert seen[-1].api_key == "sk-ROTATED"
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_revision") == 1
+
+
+_ENV_PROXY = "https://llm-proxy.example.org/v1"
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    "variable", ["OPENAI4S_CHATGPT_BASE_URL", "OPENAI4S_LLM_BASE_URL"]
+)
+def test_an_empty_base_url_is_the_endpoint_the_environment_names(
+    api, monkeypatch, variable
+):
+    """`base_url: ""` is not "the protocol's default". Dispatch resolves it
+    through `OPENAI4S_<P>_BASE_URL` -> `OPENAI4S_LLM_BASE_URL` -> default, the
+    layer `LLMConfig` documents. Judged against the static default instead, a
+    revision pinned to `""` -- really the proxy the environment names -- matched
+    one that spelled out the official endpoint, and the key entered for that
+    endpoint went to the proxy."""
+    runner, call = api
+    monkeypatch.setenv(variable, _ENV_PROXY)
+    seen, frame, project, profile_id = _keyed_workbench_session(
+        runner, call, monkeypatch, provider="chatgpt", base_url="", key="sk-proxy-OLD"
+    )
+    # The premise: the pinned revision really is dispatched to the proxy.
+    assert runner._llm_cfg(runner._state(frame, project)).base_url == _ENV_PROXY
+    edited = call(
+        "PATCH",
+        f"/model-profiles/{profile_id}",
+        {"base_url": "https://api.openai.com/v1", "api_key": "sk-REAL-NEW"},
+    )
+    assert edited["code"] == 200 and edited["body"]["revision"] == 2, edited
+
+    refused = call(
+        "POST", f"/frames/{frame}/message", {"request": "again", "wait": False}
+    )
+    assert refused["code"] == 409, refused
+    assert refused["body"].get("code") == "model_revision_unavailable", refused
+    assert not seen, f"dispatched {seen[-1].base_url} with ...{seen[-1].api_key[-4:]}"
+    with pytest.raises(GatewayError) as dispatch:
+        runner._llm_cfg(runner._state(frame, project))
+    assert dispatch.value.error_code == "model_revision_unavailable"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_revision"] == 2, rebound
+    accepted, result = _send_this(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen[-1].base_url == "https://api.openai.com/v1"
+    assert seen[-1].api_key == "sk-REAL-NEW"
+
+
+@pytest.mark.stubbed_backend
+def test_a_rotation_under_an_environment_endpoint_still_reaches_the_pinned_session(
+    api, monkeypatch
+):
+    """The over-refusal guard for the same layer: both revisions leave
+    `base_url` empty, so both reach the endpoint the environment names, and a
+    rotated key or a model-only edit keeps the pinned session sendable."""
+    runner, call = api
+    monkeypatch.setenv("OPENAI4S_CHATGPT_BASE_URL", _ENV_PROXY)
+    seen, frame, _project, profile_id = _keyed_workbench_session(
+        runner, call, monkeypatch, provider="chatgpt", base_url="", key="sk-OLD"
+    )
+    call("PATCH", f"/model-profiles/{profile_id}", {"api_key": "sk-ROTATED"})
+    moved = call("PATCH", f"/model-profiles/{profile_id}", {"model": "gpt-y"})
+    assert moved["body"]["revision"] == 2, moved
+
+    accepted, result = _send_this(runner, call, frame, "continue")
+    assert accepted["code"] == 202, accepted
+    assert result and result.get("status") == "completed", result
+    assert seen[-1].base_url == _ENV_PROXY
+    assert seen[-1].model == "gpt-x", "the pinned revision's model"
+    assert seen[-1].api_key == "sk-ROTATED"
+
+
+# --------------------------------------------------------------------------
+# a rebind with nothing active must not report a success the send refuses
+# --------------------------------------------------------------------------
+
+
+def test_a_rebind_with_no_active_profile_is_not_a_success_the_next_send_refuses(api):
+    """Delete the active profile while two live profiles name the session's
+    model: the rebind answered 200 `{bound: false}`, the client said
+    "re-bound", and the next send was `model_revision_ambiguous` again --
+    offering the same rebind, forever."""
+    runner, call = api
+    _profile(call, "east", "openai_responses", "gpt-4o", "sk-east")
+    _profile(call, "west", "chatgpt", "gpt-4o", "sk-west")
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    assert call("DELETE", f"/model-profiles/{deleted}")["code"] in (200, 204)
+    assert not runner.store.get_setting("active_model_profile")
+    assert _refused_send(call, frame) == "model_revision_unavailable"
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 409, rebound
+    assert rebound["body"].get("code") == "model_profile_needs_active", rebound
+    assert "activate" in rebound["body"]["error"], rebound
+    # Refused before the old pin was dropped.
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == deleted
+
+    # Activating one is the way out, and the rebind then binds it.
+    west = next(
+        item["id"]
+        for item in call("GET", "/model-profiles")["body"]["profiles"]
+        if item["name"] == "west"
+    )
+    call("POST", f"/model-profiles/{west}/activate")
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == west
+    assert runner.bind_model_revision(frame)["model_profile_id"] == west
+
+
+def test_a_rebind_with_no_active_profile_reports_the_binding_the_send_will_use(api):
+    """When the unpinned session can proceed, the answer names what it proceeds
+    under: unbound on the global configuration, or its unique live match."""
+    runner, call = api
+    deleted = _profile(call, "A", "openai_responses", "gpt-4o", "sk-a")
+    call("POST", f"/model-profiles/{deleted}/activate")
+    frame = _workbench_session(runner, call, "gpt-4o")
+    call("DELETE", f"/model-profiles/{deleted}")
+
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["bound"] is False, rebound
+    assert runner.bind_model_revision(frame)["bound"] is False
+
+    frame = _workbench_session(runner, call, "gpt-4.1")
+    runner.store.update_frame(frame, model_profile_id=deleted, model_profile_revision=1)
+    match = _profile(call, "B", "openai_responses", "gpt-4.1", "sk-b")
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 200, rebound
+    assert rebound["body"]["binding"]["bound"] is True, rebound
+    assert rebound["body"]["binding"]["model_profile_id"] == match, rebound
+    assert rebound["body"]["binding"].get("backfilled") is True, rebound
+
+    frame = _workbench_session(runner, call, "claude-sonnet-4-5")
+    runner.store.update_frame(frame, model_profile_id=deleted, model_profile_revision=1)
+    _profile(call, "keyless", "claude", "claude-sonnet-4-5")
+    rebound = call("POST", f"/frames/{frame}/model-binding", {})
+    assert rebound["code"] == 409, rebound
+    assert rebound["body"].get("code") == "model_profile_needs_active", rebound
+    assert (runner.store.get_frame(frame) or {}).get("model_profile_id") == deleted

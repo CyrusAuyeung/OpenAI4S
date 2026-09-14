@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { LANG, t } from "../../i18n";
-import { publicText } from "../../features/scrub/scrub";
+import { publicModelId, publicText } from "../../features/scrub/scrub";
 import { api, apiErrorText } from "../../features/customize/api";
 import { custTab } from "../../features/customize/actions";
 import { defaultModel } from "../../stores/customize";
@@ -67,12 +67,17 @@ export function profileKeyLabel(p: Record<string, unknown>): string {
 
 type LiveModel = { provider: string; model: string; baseUrl: string; hasKey: boolean };
 
-/** What `GET /config/llm` says the daemon runs on. Never carries key material. */
+/**
+ * What `GET /config/llm` says the daemon runs on. Never carries key material.
+ * The model id and protocol go through `publicModelId`, not `publicText`: the
+ * generic credential regex rendered `ark-code-latest` as "[redacted]" (the
+ * hazard `features/customize/models.ts` `entryText` already names).
+ */
 function readLiveModel(raw: unknown): LiveModel | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
-  const model = publicText(asString(row.model), 200).trim();
-  const provider = publicText(asString(row.provider), 64).trim();
+  const model = publicModelId(asString(row.model), 200);
+  const provider = publicModelId(asString(row.provider), 64);
   if (!model) return null;
   return {
     provider,

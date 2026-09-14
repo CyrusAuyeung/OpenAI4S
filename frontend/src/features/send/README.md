@@ -14,6 +14,7 @@ F-11 send chain and live cards. Composer `send()`, turn tickets, step / plan / p
 | [`candidate.ts`](candidate.ts) | Review gate three-state timing: `markCandidateReady` → `applyCandidateResolution` → `applyFinalReviewStatus`. |
 | [`candidate.test.ts`](candidate.test.ts) | Three-state sequence, no verified demotion, durable-receipt rule. |
 | [`first-send.test.ts`](first-send.test.ts) | The first message of a fresh session dispatches only after the shared creation has opened the conversation, so `openConversation`'s reset cannot land mid-turn; the ticket and the running state survive. |
+| [`refused-send.test.ts`](refused-send.test.ts) | A send the server refuses before admission (409 `model_profile_needs_key` / `model_revision_unavailable` / `model_profile_needs_active`) keeps its text in the composer, removes the optimistic bubble, and leaves the server's reason as the hint rather than "This turn failed"; a rebind's confirmation says what it actually bound (`rebindDoneText`). |
 | [`environment.ts`](environment.ts) | Standard-profile readiness banner used by `send()` / `turnDone`. |
 | [`handlers.ts`](handlers.ts) | WS types for cards / candidate / step / plan / permission; `handleFrameUpdateTurn`. |
 | [`host.ts`](host.ts) | `isReady` window lookups (`callLane` / `hostFn`); cancel-button visibility. |

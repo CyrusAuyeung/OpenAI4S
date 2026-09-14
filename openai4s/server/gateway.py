@@ -176,6 +176,9 @@ from openai4s.server.execution_coordinator import (
 from openai4s.server.execution_views import ExecutionViewService
 from openai4s.server.global_views import GlobalResearchViewService
 from openai4s.server.model_discovery import LocalModelDiscoveryService
+from openai4s.server.model_profiles import (
+    CREDENTIAL_SCOPE_MISMATCH as _CREDENTIAL_SCOPE_MISMATCH,
+)
 from openai4s.server.model_profiles import ModelProfileError, ModelProfileService
 from openai4s.server.model_profiles import clean_api_key as _clean_api_key
 from openai4s.server.model_profiles import migrate_provider_alias
@@ -8991,13 +8994,7 @@ class SessionRunner:
                 # A revoked key, or none for this provider. Falling through to
                 # the active profile here is the substitution this method exists
                 # to stop.
-                raise GatewayError(
-                    409,
-                    "this session is pinned to a model profile whose credential "
-                    "is not available; add its API key in Customize -> Models or "
-                    "rebind the session to continue",
-                    "model_revision_unavailable",
-                )
+                raise self._unusable_pin_error(credential.source)
             from dataclasses import replace
 
             pinned = replace(
@@ -9362,14 +9359,9 @@ class SessionRunner:
             # this a revoked key passed the bind and was only discovered at
             # dispatch, where the old code answered by silently using the active
             # profile instead.
-            if not self._profile_credential(profile, recorded).usable:
-                raise GatewayError(
-                    409,
-                    "this session is pinned to a model profile whose credential "
-                    "is not available; add its API key in Customize -> Models or "
-                    "choose another configuration to continue",
-                    "model_revision_unavailable",
-                )
+            credential = self._profile_credential(profile, recorded)
+            if not credential.usable:
+                raise self._unusable_pin_error(credential.source)
             return {
                 "model_profile_id": bound_id,
                 "model_profile_revision": int(bound_revision or 0),
@@ -9380,18 +9372,9 @@ class SessionRunner:
         # some configuration, and D2 says to recover that rather than to adopt
         # whatever happens to be active now. The only thing a pre-upgrade frame
         # recorded is a model string, so that is what there is to match on.
-        recorded = str(frame.get("model") or "").strip()
-        if recorded and self.store.message_count(root_frame_id) > 0:
-            # Live profiles only. A tombstone keeps its model string for history,
-            # and counting it made a deleted profile "the" match -- refused for a
-            # key it can never be given -- or made its same-model replacement
-            # "ambiguous" with it, for good.
-            matches = [
-                item
-                for item in profiles
-                if not item.get("deleted_at")
-                and str(item.get("model") or "").strip() == recorded
-            ]
+        legacy = self._legacy_model_matches(root_frame_id, frame, profiles)
+        if legacy is not None:
+            recorded, matches = legacy
             if len(matches) == 1:
                 target = matches[0]
                 self._require_profile_credential(target, follows_active=False)
@@ -9436,6 +9419,28 @@ class SessionRunner:
 
         return self._bind_active_profile(root_frame_id, profiles)
 
+    def _legacy_model_matches(
+        self, root_frame_id: str, frame: dict, profiles: list[dict]
+    ) -> tuple[str, list[dict]] | None:
+        """The legacy backfill's candidates, or None when it does not apply.
+
+        One copy for the send path and for the no-active rebind, which has to
+        know what that send is about to decide before it drops a pin.
+        """
+        recorded = str(frame.get("model") or "").strip()
+        if not recorded or self.store.message_count(root_frame_id) <= 0:
+            return None
+        # Live profiles only. A tombstone keeps its model string for history,
+        # and counting it made a deleted profile "the" match -- refused for a
+        # key it can never be given -- or made its same-model replacement
+        # "ambiguous" with it, for good.
+        return recorded, [
+            item
+            for item in profiles
+            if not item.get("deleted_at")
+            and str(item.get("model") or "").strip() == recorded
+        ]
+
     def rebind_model_revision(self, root_frame_id: str) -> dict:
         """`POST /frames/{id}/model-binding`: re-pin to the active configuration.
 
@@ -9451,13 +9456,48 @@ class SessionRunner:
 
         The target is checked before the old pin is dropped, so a refused
         rebind leaves the session's record of what it ran under untouched.
+
+        With no active profile there is nothing to re-pin to, and an unpinned
+        session is bound by its next send exactly as `bind_model_revision`
+        decides. So this is that decision, taken now: unbound on the global
+        configuration, or backfilled to the one live profile its recorded model
+        names -- and the answer says which. When that send would be refused
+        again (several live matches, or a unique one no credential resolves
+        for) it answers 409 `model_profile_needs_active` before the pin is
+        dropped. It used to answer 200 `{bound: false}`, the client said
+        "re-bound", and the next send was `model_revision_ambiguous` again --
+        offering the same rebind, with no way out that it named.
         """
         profiles = self.store.list_model_profiles()
         active = self._active_profile(profiles)
         if active is not None:
             self._require_profile_credential(active)
+            self.store.unpin_model(root_frame_id)
+            return self._bind_active_profile(root_frame_id, profiles)
+        frame = self.store.get_frame(root_frame_id) or {}
+        legacy = self._legacy_model_matches(root_frame_id, frame, profiles)
+        if legacy is not None:
+            recorded, matches = legacy
+            if len(matches) > 1:
+                raise GatewayError(
+                    409,
+                    f"no model profile is active and more than one matches "
+                    f"{recorded!r}; activate the one this session continues under "
+                    "in Customize -> Models, then send again",
+                    "model_profile_needs_active",
+                )
+            if len(matches) == 1 and not self._profile_credential(matches[0]).usable:
+                name = str(matches[0].get("name") or matches[0].get("id") or "")
+                raise GatewayError(
+                    409,
+                    f"no model profile is active and {name!r}, which this "
+                    "session's recorded model matches, has no usable API key; "
+                    "activate a profile in Customize -> Models (or add that "
+                    "profile's key), then send again",
+                    "model_profile_needs_active",
+                )
         self.store.unpin_model(root_frame_id)
-        return self._bind_active_profile(root_frame_id, profiles)
+        return self.bind_model_revision(root_frame_id)
 
     def _active_profile(self, profiles: list[dict]) -> dict | None:
         active_id = str(self.store.get_setting("active_model_profile") or "")
@@ -9503,6 +9543,30 @@ class SessionRunner:
             "model_profile_revision": revision,
             "bound": True,
         }
+
+    @staticmethod
+    def _unusable_pin_error(source: str) -> GatewayError:
+        """The 409 for a pinned revision no credential may be dispatched under.
+
+        One sentence for the bind and the dispatch, which used to carry two
+        spellings of it. A scope mismatch gets its own: "add its API key" is
+        advice that cannot help when the key the profile holds belongs to the
+        provider or endpoint the profile names now, not the pinned one.
+        """
+        if source == _CREDENTIAL_SCOPE_MISMATCH:
+            message = (
+                "this session is pinned to an earlier configuration of its model "
+                "profile, and the profile now names a different provider or "
+                "endpoint; its credential is not sent to the old one. Rebind the "
+                "session to continue"
+            )
+        else:
+            message = (
+                "this session is pinned to a model profile whose credential is "
+                "not available; add its API key in Customize -> Models or rebind "
+                "the session to continue"
+            )
+        return GatewayError(409, message, "model_revision_unavailable")
 
     def _profile_credential(self, profile: dict, configuration: dict | None = None):
         return ModelProfileService(

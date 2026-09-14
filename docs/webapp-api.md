@@ -402,7 +402,14 @@ profile says today.
 - `409 model_revision_unavailable` — the session is pinned to a revision that
   no longer exists, or whose credential no longer resolves. Resolving to the
   nearest one would be the silent follow-latest behaviour this replaces,
-  wearing a number.
+  wearing a number. A pinned revision whose provider or effective endpoint is
+  not the one the profile names now is refused the same way (an empty
+  `base_url` is resolved the way dispatch resolves it:
+  `OPENAI4S_<PROVIDER>_BASE_URL`, then `OPENAI4S_LLM_BASE_URL`, then the
+  protocol's default): the profile's key is shared across revisions and
+  belongs to its current configuration, so it is never sent to an older
+  revision's endpoint — nor is an environment key substituted for it. A
+  model-only revision keeps provider and endpoint and still dispatches.
 - `409 model_profile_needs_key` — the profile a send would pin (the active one,
   or a legacy session's unique match) has no usable credential, so it is not
   pinned at all. Rebinding would land on the same profile; the answer is a key.
@@ -426,8 +433,14 @@ profile says today.
   profile — what the client's confirmation prompt says — and never through the
   legacy backfill. The active profile's credential is checked before the old pin
   is dropped, so a refused rebind (`409 model_profile_needs_key`) leaves the
-  session's record untouched. With no active profile the session is left
-  unbound and runs on the global configuration.
+  session's record untouched. With no active profile the rebind takes the
+  decision the next send would: the session is left unbound on the global
+  configuration, or backfilled to the one live profile its recorded model names,
+  and `binding` says which (`bound`, `backfilled`). When that send would be
+  refused again — several live profiles match, or the unique match has no
+  usable credential — it answers `409 model_profile_needs_active` ("activate a
+  profile in Customize → Models") before dropping the old pin, rather than a
+  `200` the next send contradicts.
 - An install with no profiles at all (driven by `.env`) binds nothing and runs.
   An absent profile is an absent binding, not an error.
 
