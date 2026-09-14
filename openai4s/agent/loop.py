@@ -765,6 +765,18 @@ class Agent:
         )
         return result
 
+    def close_unrun_frame(self, status: str = "failed") -> None:
+        """Close the turn frame this Agent opened for a run that never starts.
+
+        ``__post_init__`` opens the root frame and only ``run`` closes it, so a
+        caller that refuses after construction (the CLI's code-mode preflight)
+        would leave the row ``processing`` forever. A frame this Agent did not
+        open -- a delegated child's, an embedder's -- is never written.
+        """
+
+        if self._owns_frame:
+            self._persist_frame_status(status)
+
     def _persist_frame_status(self, status: str) -> None:
         store = getattr(self.dispatcher, "store", None)
         if store is None or not self.frame_id:

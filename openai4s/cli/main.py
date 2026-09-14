@@ -1119,8 +1119,18 @@ def cmd_run(args) -> int:
     if mode in EVIDENCE_REQUIRED_MODES:
         # Before the first model call: an explicit code mode that can never
         # obtain its test receipt would otherwise spend every turn it has.
-        refusal = agent.code_mode_preflight_refusal()
+        # The Agent has already opened its turn frame and only `run` closes
+        # it, so a refusal here closes it too -- or it stays `processing`.
+        try:
+            refusal = agent.code_mode_preflight_refusal()
+        except KeyboardInterrupt:
+            agent.close_unrun_frame("cancelled")
+            raise
+        except BaseException:
+            agent.close_unrun_frame("failed")
+            raise
         if refusal is not None:
+            agent.close_unrun_frame("failed")
             return _run_refusal(
                 args,
                 {"error": refusal, "code": "code_mode_test_runner_unauthorized"},
