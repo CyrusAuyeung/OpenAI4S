@@ -291,6 +291,19 @@ openai4s jupyter export ./kernel-specs  # pure-stdlib KernelSpec export
 openai4s jupyter install                # install user KernelSpecs
 ```
 
+`openai4s run` exits with a status a script can branch on:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | The run completed (`stop_reason` is `submitted`). |
+| 1 | An unhandled error; a Python traceback is on stderr. |
+| 2 | Refused before or at the first Code Cell: a usage error, the standard environment is not ready, or the database schema is newer than this build. |
+| 3 | The run ended without completing: `stop_reason` is `max_turns`, `no_progress`, `cancelled`, or any other value. |
+
+`--json` prints the full result, `stop_reason` included, for exit 0 and 3
+alike. With `--auto` the status still follows `stop_reason` alone; the review
+verdict is `auto_mode.terminal`.
+
 `openai4s init` stores the selected provider/model/base URL in the normal
 OpenAI4S settings database. Interactive API-key input is hidden; automation may
 pipe one line to `openai4s init --api-key-stdin --non-interactive`. An API key

@@ -982,6 +982,28 @@ def cmd_url(args) -> int:
     return 0
 
 
+#: `openai4s run` exit status for a run that ended without a completion.
+#: Only ``stop_reason == "submitted"`` is a completion; ``max_turns``,
+#: ``no_progress``, ``cancelled`` and any reason the CLI does not know all map
+#: here, so an unknown terminal fails closed. Not 2, which already means a
+#: refusal (usage error, environment readiness, a newer database schema).
+RUN_NOT_COMPLETED_EXIT = 3
+
+_RUN_EXIT_STATUS_HELP = """\
+exit status:
+  0  the run completed (stop_reason "submitted")
+  1  an unhandled error (a Python traceback on stderr)
+  2  refused: a usage error, the standard environment is not ready, or the
+     database schema is newer than this build
+  3  the run ended without completing: stop_reason max_turns, no_progress,
+     cancelled, or any other value
+
+--json prints the full result, stop_reason included, for exit 0 and 3 alike.
+With --auto the status still follows stop_reason alone; read
+auto_mode.terminal for the review verdict.
+"""
+
+
 def cmd_run(args) -> int:
     from openai4s.agent import Agent
     from openai4s.agent.loop import enable_auto_run_environment, review_cli_result
@@ -1040,7 +1062,12 @@ def cmd_run(args) -> int:
                     f"  - {item.get('severity')} {item.get('category')}: "
                     f"{str(item.get('claim_ref'))[:80]}"
                 )
-    return 0
+    # The result above is printed for every terminal; the status is the verdict.
+    # A wrapper checking `$?` read max_turns and no_progress as success while
+    # the Action Ledger recorded the same run as failed.
+    if result.get("stop_reason") == "submitted":
+        return 0
+    return RUN_NOT_COMPLETED_EXIT
 
 
 # --------------------------------------------------------------------------- #
@@ -2133,7 +2160,12 @@ def build_parser() -> argparse.ArgumentParser:
     pstop.set_defaults(fn=cmd_stop)
     sub.add_parser("url", help="print the web UI url").set_defaults(fn=cmd_url)
 
-    pr = sub.add_parser("run", help="run one Code-as-Action task in-process")
+    pr = sub.add_parser(
+        "run",
+        help="run one Code-as-Action task in-process",
+        epilog=_RUN_EXIT_STATUS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     pr.add_argument("task", help="the task description")
     pr.add_argument("--json", action="store_true", help="emit full JSON result")
     pr.add_argument("-v", "--verbose", action="store_true", help="stream turns")
