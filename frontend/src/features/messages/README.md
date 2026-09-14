@@ -25,8 +25,8 @@ F-10 message stream. Framed history paint (40 rows per rAF + one fragment), dual
 | [`list.ts`](list.ts) | `renderStored`, `insertMessageByTime`, framed batch paint. |
 | [`list.test.ts`](list.test.ts) | 640 rows → 16 frames of 40; insert-by-time skips `#msgs-earlier`. |
 | [`messages.css`](messages.css) | `.md-sealed` / `.md-tail { display: contents }`; the stopped-turn marker and stopped card (muted glyph, neutral bar); running and ended cards (neutral glyph and bar, the running glyph spins unless reduced motion is preferred) and failed cards (error glyph colour and bar). |
-| [`open.ts`](open.ts) | `openConversation` / `recoverConversation`: generation-scoped read results, GET-only retries, confirmed-history retention and atomic framed paint. |
-| [`open.test.ts`](open.test.ts) | Generation-scoped history failures, GET-only recovery, REST/WS races and retained older pages. |
+| [`open.ts`](open.ts) | `openConversation` / `recoverConversation`: generation-scoped read results, GET-only retries, confirmed-history retention and atomic framed paint. The per-session reset keys on `openedFrameId` (the frame whose state is on screen), not only on `currentId`, so a new session published before it is opened, or opened after Home, starts with an empty Notebook. |
+| [`open.test.ts`](open.test.ts) | Generation-scoped history failures, GET-only recovery, REST/WS races and retained older pages; a new session's Notebook holds only its own cells (adopted from an open session, after Home, with a late read of the previous session). |
 | [`raf.ts`](raf.ts) | Shared `requestAnimationFrame` / setTimeout fallback. |
 | [`scroll.ts`](scroll.ts) | `down` / `updateJumpPill` on one rAF; throttled scroll listener. |
 | [`stopped.ts`](stopped.ts) | The stopped-turn marker: a `text_chunk` or stored row carrying `cancelled` renders as one marker (feature-local copy), the still-running activity card is marked stopped through `cardState.ts` (stop glyph, and the generated "Running analysis · cell N" title becomes "Analysis · cell N"; a card whose own outcome already arrived keeps it), and a `cancelled` terminal whose chunk was missed gets the same marker. |
