@@ -127,7 +127,7 @@ describe("ModelsTab active configuration", () => {
   });
 
   it("still redacts a real key that ended up in the live row", async () => {
-    const pasted = "sk-proj-Q3vT9wXk2LmN8pRz4YbC7dFh1JsA6uEo";
+    const pasted = "sk-proj-fake-Q3vT9wXk2LmN8pRz4YbC7dFh1JsA6uEo";
     const tree = await open({
       "/model-profiles": () => response({ profiles: [], active_id: "", protocols: ["ark"] }),
       "/config/llm": () =>

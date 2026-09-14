@@ -27,9 +27,9 @@ describe("publicModelId", () => {
   });
 
   it("still redacts real key shapes, Bearer tokens and query credentials", () => {
-    expect(publicModelId("sk-proj-Q3vT9wXk2LmN8pRz4YbC7dFh1JsA6uEo")).toBe("[redacted]");
-    expect(publicModelId("sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_aa")).toBe("[redacted]");
-    expect(publicModelId("sk-0123456789abcdefghijABCDEFGHIJ")).toBe("[redacted]");
+    expect(publicModelId("sk-proj-fake-Q3vT9wXk2LmN8pRz4YbC7dFh1JsA6uEo")).toBe("[redacted]");
+    expect(publicModelId("sk-ant-api03-fake-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_aa")).toBe("[redacted]");
+    expect(publicModelId("sk-fake-0123456789abcdefghijABCDEFGHIJ")).toBe("[redacted]");
     expect(publicModelId("Bearer abc.def")).toBe("Bearer [redacted]");
     expect(publicModelId("m?api_key=secret")).toBe("m?api_key=[redacted]");
   });
