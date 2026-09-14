@@ -45,9 +45,11 @@ install is rebuilt instead. ``MAX_CACHE_AGE_S`` backstops sources neither
 check can see.
 
 Builds happen in the background and only in a process that called
-:func:`enable_background_builds` -- the daemon does, from ``run_server``. A
-one-shot CLI run or a test only ever *reads* an existing cache, so neither
-starts a font scan it would abandon at exit. Everything here is best effort: a
+:func:`enable_background_builds` -- the daemon does, from ``run_server``, which
+also calls :func:`shutdown_background_builds` as it stops, so a scan still
+running is killed rather than left behind the daemon. A one-shot CLI run or a
+test only ever *reads* an existing cache, so neither starts a font scan it
+would abandon at exit. Everything here is best effort: a
 missing, stale, or unreadable cache means the kernel builds its own list, as it
 always did, and never that the kernel fails to start.
 """
@@ -84,6 +86,9 @@ BUILD_TIMEOUT_S = 300.0
 #: How long a failed build (no matplotlib in that interpreter, a timeout) is
 #: remembered before a later kernel spawn may try again.
 RETRY_FAILED_BUILD_AFTER_S = 600.0
+#: How long daemon shutdown spends stopping in-flight builds, in all. A build is
+#: stopped, never waited out; this bounds ending it and removing its workspace.
+SHUTDOWN_TIMEOUT_S = 5.0
 
 _MAX_FINGERPRINT_DIRS = 4096
 _MAX_FINGERPRINT_DEPTH = 4
@@ -96,7 +101,11 @@ _MAX_FINGERPRINT_DEPTH = 4
 _BUILDER = (
     "import sys\n"
     "sys.path[:] = [entry for entry in sys.path if entry not in ('', '.')]\n"
-    "import json, os, shutil, tempfile\n"
+    "import json, os, shutil, signal, tempfile\n"
+    # Daemon shutdown stops a build with SIGTERM first. Leaving through
+    # SystemExit runs the `finally` below, so the list's scratch directory is
+    # removed even where TMPDIR is shared (an unconfined probe's is).
+    "signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))\n"
     "cache = tempfile.mkdtemp(prefix='openai4s-fontlist-')\n"
     "os.environ['MPLCONFIGDIR'] = cache\n"
     "try:\n"
@@ -122,6 +131,10 @@ _state_lock = threading.Lock()
 _builds_data_dir: list[Path | None] = [None]
 _inflight: set[Path] = set()
 _failed_at: dict[Path, float] = {}
+# Set, and replaced by a fresh one, by `shutdown_background_builds`: every
+# build requested before that holds the event it has to stop on.
+_stop_builds: list[threading.Event] = [threading.Event()]
+_build_threads: set[threading.Thread] = set()
 
 
 def _default_data_dir() -> Path:
@@ -263,35 +276,101 @@ def request_build(
     cache = cache_directory(interpreter, root)
     now = time.monotonic()
     with _state_lock:
+        if _builds_data_dir[0] is None:
+            return None  # shut down since the check above
         if cache in _inflight:
             return None
         failed = _failed_at.get(cache)
         if failed is not None and now - failed < RETRY_FAILED_BUILD_AFTER_S:
             return None
         _inflight.add(cache)
+        stop = _stop_builds[0]
 
     def work() -> None:
         built = None
         try:
-            built = build_font_cache(interpreter, data_dir=root, runner=runner)
+            built = build_font_cache(
+                interpreter,
+                data_dir=root,
+                runner=runner if runner is not None else _stoppable_runner(stop),
+            )
         except Exception:  # noqa: BLE001 - a background cache never raises
             built = None
         finally:
             with _state_lock:
                 _inflight.discard(cache)
-                if built is None:
-                    _failed_at[cache] = time.monotonic()
-                else:
+                _build_threads.discard(threading.current_thread())
+                if built is not None:
                     _failed_at.pop(cache, None)
+                elif not stop.is_set():
+                    # A build shutdown stopped says nothing about the interpreter.
+                    _failed_at[cache] = time.monotonic()
 
     thread = threading.Thread(target=work, name="openai4s-font-cache", daemon=True)
+    with _state_lock:
+        _build_threads.add(thread)
     try:
         thread.start()
     except RuntimeError:
         with _state_lock:
             _inflight.discard(cache)
+            _build_threads.discard(thread)
         return None
     return thread
+
+
+def _stoppable_runner(stop: threading.Event) -> Runner:
+    """The confined probe, ended by the build thread itself once ``stop`` is set."""
+
+    from openai4s.kernel.preinstall import run_confined_probe
+
+    def run(command: list[str], *, timeout: float) -> Any:
+        return run_confined_probe(command, timeout=timeout, stop=stop)
+
+    return run
+
+
+def _join_until(threads: Sequence[threading.Thread], deadline: float) -> None:
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            thread.join(remaining)
+        except RuntimeError:  # registered but not started yet
+            pass
+
+
+def shutdown_background_builds(timeout: float | None = None) -> bool:
+    """Stop this process's font-list builds; True when none is left running.
+
+    The daemon calls this as it stops (``run_server``). A builder is a
+    confined child in its own session, waited on from a daemon thread, so
+    neither the daemon's exit nor its terminal's signals reach it: it used to
+    run on after ``openai4s stop`` reported success, re-parented to PID 1 for
+    the rest of its scan (up to ``BUILD_TIMEOUT_S``), its result discarded and
+    its probe workspace never removed.
+
+    Disables further builds and signals every build requested so far to stop.
+    Each build thread then ends its own probe (``run_confined_probe``'s
+    ``stop``): one not started yet never starts; a running builder's process
+    group gets SIGTERM, then SIGKILL after a short grace, and every process it
+    started is killed, including a helper that left that group as macOS
+    ``system_profiler`` does; and the thread removes the probe workspace. Joins
+    those threads for at most ``timeout`` (``SHUTDOWN_TIMEOUT_S``) seconds; it
+    never waits for a scan.
+    """
+
+    budget = SHUTDOWN_TIMEOUT_S if timeout is None else timeout
+    deadline = time.monotonic() + max(0.0, budget)
+    with _state_lock:
+        _builds_data_dir[0] = None
+        stop = _stop_builds[0]
+        _stop_builds[0] = threading.Event()
+        threads = list(_build_threads)
+    stop.set()
+    _join_until(threads, deadline)
+    return not any(thread.is_alive() for thread in threads)
 
 
 def _validated_fontlist(name: Any, content: Any) -> bytes | None:
@@ -568,6 +647,7 @@ __all__ = [
     "BUILD_TIMEOUT_S",
     "MAX_CACHE_AGE_S",
     "MAX_FONTLIST_BYTES",
+    "SHUTDOWN_TIMEOUT_S",
     "build_font_cache",
     "cache_directory",
     "disable_background_builds",
@@ -575,4 +655,5 @@ __all__ = [
     "font_directory_fingerprint",
     "request_build",
     "seed_kernel_font_cache",
+    "shutdown_background_builds",
 ]
