@@ -1212,11 +1212,7 @@ class LocalActionExecutor:
                 if attempt is not None:
                     assert result is not None
                     result["id"] = attempt[2]
-                    durable_generation = (
-                        state.metadata.get("durable_kernel_generation_id")
-                        if action.language != "r"
-                        else None
-                    )
+                    durable_generation = self._attempt_generation(action, result, state)
                     if durable_generation:
                         attempt[0].bind_execution_attempt_generation(
                             attempt[1], str(durable_generation)
@@ -1321,6 +1317,23 @@ class LocalActionExecutor:
             attempt[1],
             terminal_state=state,
         )
+
+    def _attempt_generation(
+        self, action: CodeCell, result: dict, state: RunState
+    ) -> str | None:
+        """The durable generation that produced this Cell's result, if known."""
+        if action.language != "r":
+            python_generation = state.metadata.get("durable_kernel_generation_id")
+            return str(python_generation) if python_generation else None
+        # ``execute_r`` registers the R worker it is about to run on with this
+        # recorder, so the open R row names that worker — but only when a
+        # kernel produced the result. A spawn failure, a dead worker or a
+        # cancellation synthesizes a dict without "stdout" (the same line the
+        # evidence ledger draws below), and the recorder's R row may then still
+        # name the previous, dead worker: absent beats wrong.
+        if self.generation_recorder is None or "stdout" not in result:
+            return None
+        return self.generation_recorder.current("r")
 
     def _record_kernel_generation(self, state: RunState) -> None:
         """Publish generation continuity without inventing missing identity."""
