@@ -118,15 +118,29 @@ def test_the_configured_data_dir_is_still_denied(tmp_path, monkeypatch):
     assert any(p == str(configured / "openai4s.db") for p in paths)
 
 
-def test_the_default_instance_is_not_double_listed(tmp_path, monkeypatch):
-    """When OPENAI4S_DATA_DIR is unset the configured dir *is* ~/.openai4s, so
-    the two instance passes must de-duplicate rather than emit each rule twice."""
+@pytest.mark.parametrize("spelling", ("verbatim", "symlink"))
+def test_the_default_instance_is_not_double_listed(tmp_path, monkeypatch, spelling):
+    """When OPENAI4S_DATA_DIR *names* ~/.openai4s the configured and default
+    passes describe one instance, and each rule must be emitted once.
+
+    Both spellings reach the de-duplication: the variable set to the default
+    path itself, and to a symlink that only `resolve()` recognises as it. With
+    the variable unset only one pass runs, so that case could not tell a
+    de-duplicating list from one that does not de-duplicate at all.
+    """
     home = tmp_path / "home"
-    (home / ".openai4s").mkdir(parents=True)
+    default = home / ".openai4s"
+    default.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("OPENAI4S_DATA_DIR", raising=False)
-    paths = [path for _kind, path in sandbox._default_secret_read_denials(tmp_path)]
-    token = str((home / ".openai4s" / "access-token").resolve())
+    if spelling == "symlink":
+        alias = tmp_path / "data-dir-alias"
+        alias.symlink_to(default, target_is_directory=True)
+        monkeypatch.setenv("OPENAI4S_DATA_DIR", str(alias))
+    else:
+        monkeypatch.setenv("OPENAI4S_DATA_DIR", str(default))
+    entries = sandbox._default_secret_read_denials(str(tmp_path / "ws"))
+    paths = [path for _kind, path in entries]
+    token = str((default / "access-token").resolve())
     assert paths.count(token) == 1, "the default instance token is listed twice"
 
 
