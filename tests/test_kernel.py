@@ -61,12 +61,29 @@ def test_persistent_namespace():
         assert r["stdout"].strip() == "42"
 
 
+#: A worker's one-time cold start -- the sandbox self-test, the Host facade
+#: and provenance install on its first Cell -- is not what the thread-affinity
+#: test below measures, and on a loaded macOS runner it alone has taken 17-48
+#: seconds. It gets its own generous budget.
+_COLD_START_BUDGET_S = 120
+#: The property under test: a warm kernel answers its creating request thread.
+_WARM_EXECUTE_BUDGET_S = 15
+
+
 def test_kernel_survives_the_request_thread_that_created_it(tmp_path):
     kernel = None
     try:
         with ThreadPoolExecutor(max_workers=1) as requests:
-            kernel = requests.submit(Kernel, cwd=str(tmp_path)).result(timeout=15)
-            first = requests.submit(kernel.execute, "marker = 41").result(timeout=15)
+            kernel = requests.submit(Kernel, cwd=str(tmp_path)).result(
+                timeout=_COLD_START_BUDGET_S
+            )
+            warm = requests.submit(kernel.execute, "pass").result(
+                timeout=_COLD_START_BUDGET_S
+            )
+            assert warm["error"] is None
+            first = requests.submit(kernel.execute, "marker = 41").result(
+                timeout=_WARM_EXECUTE_BUDGET_S
+            )
             assert first["error"] is None
         # The request thread is now gone, as after a Web REPL/Agent turn. The
         # next request must see the same worker and its original namespace.
