@@ -497,8 +497,7 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
         standardProfileReadiness.value = unavailableReadinessSnapshot();
         renderEnvironmentReadinessBanner();
       }
-      restoreDraft(text);
-      w.remove();
+      settleRefusedBubble(w, text);
       if (ownsTurnTicket(turnTicketToken)) turnDone("failed");
       callLane("openCust", "compute");
       hint(t("environment.readiness.sendBlocked"), true);
@@ -510,12 +509,11 @@ export async function send(text?: string | null, opts?: { execute?: boolean }): 
     // profile with no key, a pin that cannot be honoured, nothing active to
     // rebind to. No user row and no job exist for it, so a reload would not
     // show the text: it goes back into the composer and the optimistic bubble
-    // goes. A 5xx may still have been admitted, and keeps both as before.
+    // goes -- unless the composer already holds something new, in which case
+    // the bubble is the only copy left and stays, marked not sent. A 5xx may
+    // still have been admitted, and keeps both as before.
     const notAdmitted = refused && Number(err.status) < 500;
-    if (notAdmitted) {
-      restoreDraft(text);
-      w.remove();
-    }
+    if (notAdmitted) settleRefusedBubble(w, text);
     let lasting = t("toast.sendFailed", apiErrorText(e));
     let settingsCode = err?.code;
     if (err && (err.code === "model_revision_unavailable" || err.code === "model_revision_ambiguous")) {
@@ -582,13 +580,42 @@ export function rebindDoneText(answer: unknown): string {
   return t("model.rebind.done");
 }
 
-/** Put a refused message's text back, unless something new was typed since. */
-function restoreDraft(text: string): void {
+/** Feature-local copy for a refused message the composer could not take back. */
+const NOT_SENT_COPY: Record<"en" | "zh", string> = {
+  en: "Not sent: the server refused this message and the composer already held new text, so it stays here to copy",
+  zh: "未发送：服务器拒绝了这条消息，而输入框里已有新内容，因此原文保留在这里以便复制",
+};
+
+/**
+ * Put a refused message's text back, unless something new was typed since.
+ * True when nothing of the refused text is lost: it went back into an empty
+ * composer, or there was no text to keep (an annotation-only send).
+ */
+function restoreDraft(text: string): boolean {
+  if (!text) return true;
   const box = $("#composer") as HTMLTextAreaElement | null;
-  if (!box) return;
-  if (!box.value.trim()) box.value = text;
+  if (!box) return false;
+  const restored = !box.value.trim();
+  if (restored) box.value = text;
   grow();
   renderComposerRefChips();
+  return restored;
+}
+
+/**
+ * A refusal stores nothing, so the refused text must survive somewhere the
+ * user can reach. Only a text that went back into the composer lets the
+ * optimistic bubble go; otherwise the bubble is the last copy and stays,
+ * marked not sent (the pre-existing `.msg.user.cancelled` style).
+ */
+function settleRefusedBubble(w: HTMLElement, text: string): void {
+  if (restoreDraft(text)) {
+    w.remove();
+    return;
+  }
+  w.classList.add("cancelled");
+  w.dataset.sendState = "not-sent";
+  w.title = NOT_SENT_COPY[LANG === "zh" ? "zh" : "en"];
 }
 
 type ComposerDispatch = (text: string) => unknown;

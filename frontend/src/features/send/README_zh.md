@@ -14,7 +14,7 @@ F-11 发送全链与现场卡片。作曲框 `send()`、turn ticket、步骤 / �
 | [`candidate.ts`](candidate.ts) | Review 门控三态时序：`markCandidateReady` → `applyCandidateResolution` → `applyFinalReviewStatus`。 |
 | [`candidate.test.ts`](candidate.test.ts) | 三态顺序、禁止把 verified 降级、durable 回执规则。 |
 | [`first-send.test.ts`](first-send.test.ts) | 新会话的第一条消息只在共享创建流程打开对话之后才派发，`openConversation` 的重置不会落在回合中间；票据与运行态得以保留。 |
-| [`refused-send.test.ts`](refused-send.test.ts) | 服务端在准入之前拒绝的发送（409 `model_profile_needs_key` / `model_revision_unavailable` / `model_profile_needs_active`）：文字回到输入框、移除乐观气泡，提示保留服务端给出的原因而不是「本轮失败」；改绑成功后的提示说明实际绑定了什么（`rebindDoneText`）。 |
+| [`refused-send.test.ts`](refused-send.test.ts) | 服务端在准入之前拒绝的发送（409 `model_profile_needs_key` / `model_revision_unavailable` / `model_profile_needs_active`）：文字回到输入框、移除乐观气泡（若输入框里已有新内容，则保留该气泡并标为未发送，被拒绝的文字不会丢失），提示保留服务端给出的原因而不是「本轮失败」；改绑成功后的提示说明实际绑定了什么（`rebindDoneText`）。 |
 | [`environment.ts`](environment.ts) | `send()` / `turnDone` 用的 standard-profile 就绪横幅。 |
 | [`handlers.ts`](handlers.ts) | cards / candidate / step / plan / permission 的 WS 类型；`handleFrameUpdateTurn`。 |
 | [`host.ts`](host.ts) | 用 `isReady` 查 window（`callLane` / `hostFn`）；取消按钮显隐。 |

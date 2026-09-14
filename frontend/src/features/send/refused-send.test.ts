@@ -24,6 +24,8 @@ import { rebindDoneText, send } from "./send";
 
 type FakeEl = Record<string, unknown> & {
   classList: { add: (name: string) => void; remove: () => void; toggle: () => void; contains: () => boolean };
+  /** Every class name `classList.add` was called with (contains() stays inert). */
+  added: string[];
   value: string;
   children: unknown[];
   textContent: string;
@@ -31,8 +33,15 @@ type FakeEl = Record<string, unknown> & {
 };
 
 function fakeEl(): FakeEl {
+  const added: string[] = [];
   const node: FakeEl = {
-    classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
+    classList: {
+      add: (name: string) => void added.push(name),
+      remove: () => {},
+      toggle: () => {},
+      contains: () => false,
+    },
+    added,
     value: "",
     children: [],
     dataset: {},
@@ -196,6 +205,78 @@ describe("send(): a message the server refuses before admission", () => {
     });
     await done;
     expect(nodes.composer!.value).toBe("a new draft");
+    // The refused text could not go back into the composer, so the bubble is
+    // the only place left that holds it: it stays, marked as not sent.
+    expect(userBubble()?.removed).toBe(false);
+    expect(userBubble()?.added).toContain("cancelled");
+    expect((userBubble()?.children[0] as FakeEl | undefined)?.textContent).toBe("hello");
+  });
+
+  it("keeps the refused bubble when text typed during the pre-dispatch wait stayed in the composer", async () => {
+    // A /skill token makes send() await the skills catalogue before dispatch.
+    // Text typed in that window is not the captured draft, so the composer is
+    // not cleared, and the refusal cannot put "hello /plot" back over it.
+    let catalogue: (value: unknown) => void = () => {};
+    vi.stubGlobal("fetch", (url: string) => {
+      const path = String(url).replace("/api/v1", "");
+      if (path.startsWith("/skills")) {
+        return new Promise((resolve) => {
+          catalogue = resolve;
+        });
+      }
+      return Promise.resolve({
+        ok: false,
+        status: 409,
+        text: () => Promise.resolve(JSON.stringify(refusal("model_profile_needs_key", NEEDS_KEY).body)),
+      });
+    });
+    nodes.composer!.value = "hello /plot";
+    const done = send("hello /plot");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    nodes.composer!.value = "hello /plot and more";
+    catalogue({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ skills: [] })) });
+    await done;
+    expect(nodes.composer!.value).toBe("hello /plot and more");
+    expect(userBubble()?.removed).toBe(false);
+    expect(userBubble()?.added).toContain("cancelled");
+  });
+
+  it("keeps the bubble for an environment-readiness refusal the composer cannot take back", async () => {
+    let answer: (value: unknown) => void = () => {};
+    vi.stubGlobal("fetch", (url: string) => {
+      const path = String(url).replace("/api/v1", "");
+      if (path === "/frames/frame_1/message") {
+        return new Promise((resolve) => {
+          answer = resolve;
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("{}") });
+    });
+    const done = send("hello");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    nodes.composer!.value = "a new draft";
+    answer({
+      ok: false,
+      status: 409,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ error: "environment not ready", code: "environment_not_ready", status: 409 }),
+        ),
+    });
+    await done;
+    expect(nodes.composer!.value).toBe("a new draft");
+    expect(userBubble()?.removed).toBe(false);
+    expect(userBubble()?.added).toContain("cancelled");
+  });
+
+  it("still takes the bubble away when the environment refusal's text went back", async () => {
+    routes["/frames/frame_1/message"] = {
+      status: 409,
+      body: { error: "environment not ready", code: "environment_not_ready", status: 409 },
+    };
+    await send("hello");
+    expect(nodes.composer!.value).toBe("hello");
+    expect(userBubble()?.removed).toBe(true);
   });
 });
 
