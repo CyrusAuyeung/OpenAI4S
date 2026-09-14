@@ -27,10 +27,11 @@
 # --- build stage: turn this tree into the same wheel CI builds ---------------
 #
 # Not a `pip install .` of the source tree, and not `pip install openai4s` from
-# PyPI: the published 0.1.0 predates this tree while carrying the same version
-# string, so an image built from the index would be silently older than the
-# checkout it was built in. Building the wheel here is the path
-# `.github/workflows/ci.yml`'s release-artifacts job already proves installable.
+# PyPI: the index holds whatever was last released, which between releases is
+# older than this tree even when the version strings match, so an image built
+# from the index would be silently older than the checkout it was built in.
+# Building the wheel here is the path `.github/workflows/ci.yml`'s
+# release-artifacts job already proves installable.
 # 3.14 is the shipped container interpreter. It must stay in
 # `.github/workflows/ci.yml`'s offline matrix and in
 # `scripts/release_gates.py` CHECK_SUITE_GATES; `tests/test_platform_support.py`

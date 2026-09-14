@@ -159,7 +159,7 @@
       "integrated": "P0-2",
       "plan_conclusion": "纳入",
       "status": "open",
-      "status_note": "The original three first-party research skills moved to guarded Host APIs, but the newly imported pinned bioSkills collection contains raw-network Python, shell, R, and recipe-code paths that are not covered by the Host allowlist/SSRF boundary. The merge review broadened the detection gate from two urllib files to a fingerprinted inventory of common clients including requests, Bio.Entrez, curl, and wget, but detection is not enforcement. The unified-boundary proposal remains open until those recipes are runtime-confined.",
+      "status_note": "The original three first-party research skills moved to guarded Host APIs, but the newly imported pinned bioSkills collection contains raw-network Python, shell, R, and recipe-code paths that are not covered by the Host allowlist/SSRF boundary. The merge review broadened the detection gate from two urllib files to a fingerprinted inventory of common clients including requests, Bio.Entrez, curl, and wget, but detection is not enforcement. The unified-boundary proposal remains open until those recipes are runtime-confined. Reopened at e20bd966 (2026-08-21), after this file's declared audit at audited_at. Waived for v0.3.0 only, as a declared known limitation (docs/v03-decisions.md, D12-W1, recorded 2026-09-14); the waiver does not change this status.",
       "tests": "tests/test_host_network_capability.py,tests/test_egress_surface.py,tests/test_egress.py",
       "browser_evidence": "",
       "external_evidence": ""
