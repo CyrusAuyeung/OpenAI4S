@@ -15090,10 +15090,35 @@ def make_handler(cfg: Config, hub: WSHub, runner: SessionRunner):
                 try:
                     report = verify_package(staged)
                 except EvidenceError as error:
-                    raise GatewayError(400, str(error)) from error
+                    # The staging file is this daemon's, not the caller's: an
+                    # error naming it (e.g. "tmpab12.openai4s-session.zip has
+                    # no manifest.json") discloses a host temp path.
+                    message = (
+                        str(error)
+                        .replace(str(staged), "the uploaded archive")
+                        .replace(staged.name, "the uploaded archive")
+                    )
+                    raise GatewayError(400, message) from error
                 finally:
                     staged.unlink(missing_ok=True)
-                self._json(report)
+                # The documented shape only. `verify_package` is shared with
+                # the CLI, whose report carries `path` -- over HTTP that is the
+                # deleted staging file under the daemon's TMPDIR. An allowlist
+                # also keeps any key the CLI report grows later off the wire.
+                self._json(
+                    {
+                        key: report.get(key)
+                        for key in (
+                            "ok",
+                            "format",
+                            "schema_version",
+                            "archive_sha256",
+                            "files_verified",
+                            "problems",
+                            "verifies",
+                        )
+                    }
+                )
                 return
             if sub == "/sessions/import" and method == "POST":
                 payload = self._body_bytes(limit=MAX_ARCHIVE_BYTES)

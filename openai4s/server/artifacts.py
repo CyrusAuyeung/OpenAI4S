@@ -769,6 +769,28 @@ def _write_confined_text(workspace: Path, relative: Path, content: str) -> Path:
     return target
 
 
+#: Kernel protocol modes (``Kernel.mode``) that older supervisors persisted as
+#: a Python generation's ``runtime``. They name the worker's host facade, not
+#: a language.
+_LEGACY_PYTHON_KERNEL_MODES = frozenset({"repl", "script", "analysis"})
+
+
+def _remote_generation(environment: dict[str, Any]) -> bool:
+    """Whether a generation's worker ran outside this daemon's machine.
+
+    New rows say so explicitly. Rows written before that are recognised by the
+    cluster lease key the gateway gives a remote kernel
+    (``("cluster", workload_id, epoch)``), the same test its execution-plane
+    check uses.
+    """
+    if environment.get("execution_plane") == "remote":
+        return True
+    key = environment.get("key")
+    return bool(
+        isinstance(key, (list, tuple)) and len(key) >= 1 and key[0] == "cluster"
+    )
+
+
 def _same_interpreter(interpreter: Any, has_generation: bool = False) -> bool:
     """True when the kernel ran in this very process's interpreter.
 
@@ -3798,7 +3820,26 @@ class ArtifactManager:
         environment = (generation or {}).get("environment")
         environment = environment if isinstance(environment, dict) else {}
         runtime = str(environment.get("runtime") or language or "python").lower()
+        generation_language = str(
+            (generation or {}).get("language") or language or ""
+        ).lower()
+        if runtime in _LEGACY_PYTHON_KERNEL_MODES and generation_language in {
+            "",
+            "python",
+        }:
+            # Supervisors up to 0.2.0 stored the kernel's protocol mode as
+            # the runtime, so every Web Python generation reads "repl". It is
+            # still a Python kernel; reading it as a foreign runtime recorded
+            # no packages and a false "does not apply".
+            runtime = "python"
         interpreter = environment.get("interpreter")
+        remote = _remote_generation(environment)
+        if remote:
+            # A remote worker's generation cannot name an interpreter this
+            # daemon may read: legacy rows stored the daemon's own
+            # sys.executable there (the Kernel default), and freezing it would
+            # attribute this process's packages to another machine.
+            interpreter = None
 
         snapshot: dict[str, Any] = {
             "kind": runtime,
@@ -3836,8 +3877,16 @@ class ArtifactManager:
                     f"could not read distributions from {interpreter!r}"
                     if interpreter
                     else (
-                        "this kernel generation records no interpreter, and "
-                        "the daemon's packages are not this kernel's"
+                        (
+                            "remote worker: its interpreter runs on another "
+                            "machine, and the daemon's packages are not this "
+                            "kernel's"
+                        )
+                        if remote
+                        else (
+                            "this kernel generation records no interpreter, and "
+                            "the daemon's packages are not this kernel's"
+                        )
                     )
                 )
             else:
