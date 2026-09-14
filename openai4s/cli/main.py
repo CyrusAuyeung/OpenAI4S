@@ -32,7 +32,11 @@ from pathlib import Path
 from openai4s import __version__
 from openai4s.config import get_config
 from openai4s.execution.process_group import TERM_GRACE_S
-from openai4s.storage.migrations import FutureSchemaError, preflight_schema
+from openai4s.storage.migrations import (
+    FutureSchemaError,
+    MigrationError,
+    preflight_schema,
+)
 
 
 def _statefile_payload(cfg) -> str:
@@ -724,7 +728,11 @@ def cmd_serve(args) -> int:
     # mints the access token, so the URL printed below actually opens.
     try:
         httpd = build_server(cfg)
-    except FutureSchemaError as exc:
+    except MigrationError as exc:
+        # A newer database (FutureSchemaError) or an upgrade that failed and
+        # was rolled back. Either way the message is the whole diagnosis --
+        # the versions, and for a failed upgrade where the kept backup is --
+        # so it is the one line printed, not the last line of a traceback.
         signal.signal(signal.SIGTERM, previous_sigterm)
         _clear_state(cfg, only_if_owned_by=my_pid)
         print(f"error: {exc}", file=sys.stderr)
@@ -2593,11 +2601,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
-    except FutureSchemaError as exc:
+    except MigrationError as exc:
         # Every subcommand that opens the Store (run, init, user, …) refuses a
-        # newer database the same way `serve` does: one line, exit 2, no
-        # traceback. `serve` still catches it earlier so it can clear the
-        # singleton state it already claimed.
+        # newer database, and reports an upgrade that failed and was rolled
+        # back, the same way `serve` does: one line, exit 2, no traceback. The
+        # message already names the versions and the kept backup. `serve`
+        # still catches it earlier so it can clear the singleton state it
+        # already claimed.
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

@@ -1140,6 +1140,80 @@ def test_serve_formal_open_future_schema_error_clears_only_owned_state(
     assert "future_schema" in capsys.readouterr().err
 
 
+def _older_store_whose_upgrade_fails(data_dir, monkeypatch):
+    """A real v31 database whose step-32 migration fails, as a broken upgrade
+    does: the Store rolls back, keeps the backup, and raises MigrationError."""
+    import sqlite3
+
+    from openai4s.store import Store
+
+    db = Path(data_dir) / "openai4s.db"
+    Store(db).close()
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DROP INDEX IF EXISTS ix_artifacts_project_created")
+        conn.execute("DELETE FROM schema_migrations WHERE version>=32")
+        conn.execute("PRAGMA user_version = 31")
+
+    def fail(_self, _connection):
+        raise RuntimeError("no such column: profile_id")
+
+    monkeypatch.setattr(Store, "_apply_artifact_browse_index", fail)
+    return db
+
+
+def test_serve_reports_a_failed_upgrade_in_one_line_naming_the_backup(
+    tmp_path, monkeypatch, capsys
+):
+    """UPG3-04. The refusal for a *newer* database was one line and exit 2; a
+    failed upgrade of an *older* one escaped as a ~45-line traceback whose only
+    useful sentence -- rolled back, and where the backup is -- came last."""
+    import openai4s.config as config_module
+
+    module = _cli_module()
+    cfg = config_module.Config(data_dir=tmp_path)
+    cfg.ensure_dirs()
+    db = _older_store_whose_upgrade_fails(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "get_config", lambda **_: cfg)
+    monkeypatch.setattr(module, "_acquire_singleton", lambda *_: True)
+    cleared = []
+    monkeypatch.setattr(module, "_clear_state", lambda _cfg, **kw: cleared.append(kw))
+
+    assert module.cmd_serve(SimpleNamespace(detached=False, host=None, port=None)) == 2
+
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    # Startup may print its machine-dependent package notices first; the
+    # failure itself is one line, and the last.
+    errors = [line for line in err.splitlines() if line.startswith("error:")]
+    assert len(errors) == 1, err
+    assert err.rstrip().splitlines()[-1] == errors[0]
+    assert errors[0].startswith("error: migration to version")
+    assert "rolled back and remains at version 31" in errors[0]
+    backup = db.with_name("openai4s.db.v31.bak")
+    assert backup.exists() and str(backup) in errors[0]
+    assert cleared == [{"only_if_owned_by": os.getpid()}]
+
+
+def test_run_reports_a_failed_upgrade_in_one_line_naming_the_backup(
+    tmp_path, monkeypatch, capsys
+):
+    """The same failure from `openai4s run`, through the real entry point."""
+    import openai4s.config as config_module
+
+    module = _cli_module()
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    monkeypatch.setenv("OPENAI4S_DATA_DIR", str(tmp_path))
+    config_module.Config().ensure_dirs()
+    db = _older_store_whose_upgrade_fails(tmp_path, monkeypatch)
+
+    assert module.main(["run", "say hello"]) == 2
+
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "error: migration to version" in err
+    assert str(db.with_name("openai4s.db.v31.bak")) in err
+
+
 def test_detached_child_future_schema_is_reported_without_startup_timeout(
     tmp_path, monkeypatch, capsys
 ):
