@@ -982,6 +982,50 @@ def test_status_probes_and_reports_the_live_recorded_endpoint(
     assert "127.0.0.1:8760" not in output
 
 
+def test_status_never_prints_the_access_token_and_points_at_url(
+    tmp_path, monkeypatch, capsys
+):
+    """`status` is a health question, and its output lands in CI and support logs.
+
+    It printed `http://host:port/?token=<the full access token>` with no flag,
+    while the release pipeline treats that very bootstrap URL as a credential
+    that must not reach a log. The tokenized URL is what `openai4s url` is for.
+    """
+    from openai4s.server import local_auth
+
+    module = _cli_module()
+    config = _recorded_daemon_config(tmp_path, host="127.0.0.1", port=9222)
+    token = local_auth.load_or_mint(tmp_path)
+    assert token and local_auth.read_token(tmp_path) == token
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read():
+            return b'{"status":"ok","model":"demo"}'
+
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module, "_daemon_alive", lambda _cfg, _pid: True)
+    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "daemon-start")
+    monkeypatch.setattr(module, "_open_daemon", lambda *_a, **_k: Response())
+
+    assert module.cmd_status(SimpleNamespace()) == 0
+    output = capsys.readouterr().out
+    assert token not in output
+    assert "token=" not in output
+    assert "daemon: running (pid 4321) at http://127.0.0.1:9222/\n" in output
+    assert "openai4s url" in output
+
+    # The command that exists to hand a person the working URL still does.
+    assert module.main(["url"]) == 0
+    assert capsys.readouterr().out.strip() == (f"http://127.0.0.1:9222/?token={token}")
+
+
 @pytest.mark.skipif(os.name != "posix", reason="SIGINT dispositions are POSIX")
 def test_ctrl_c_during_a_run_stops_this_agent_s_cell_and_still_exits():
     """Both halves of what a terminal Ctrl-C used to do, restored.

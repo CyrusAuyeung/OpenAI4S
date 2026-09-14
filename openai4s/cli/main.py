@@ -902,7 +902,15 @@ def cmd_status(args) -> int:
                 )
             )
             return 0
-        print(f"daemon: running (pid {pid}) at {_url(cfg, endpoint=endpoint)}")
+        # The plain origin, never the `?token=` bootstrap URL: `status` is a
+        # health check whose output ends up in CI and support logs, and the
+        # release pipeline itself treats that URL as a credential. The URL a
+        # person opens is one explicit command away.
+        print(
+            f"daemon: running (pid {pid}) at "
+            f"{_url(cfg, with_token=False, endpoint=endpoint)}"
+        )
+        print("  open     : run `openai4s url` for the sign-in URL")
         print(f"  model    : {health.get('model')}")
         # The loopback health response is intentionally a minimal public
         # projection.  The CLI already owns the local configuration, so it can

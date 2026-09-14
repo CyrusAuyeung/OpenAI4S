@@ -280,7 +280,8 @@ openai4s init      # guided first-run model configuration (headless-friendly)
 openai4s serve     # daemon + web UI (foreground; --detached to background,
                    # plus --host/--port/--no-browser; the detached parent waits
                    # up to 60s for /health, OPENAI4S_DETACHED_READY_TIMEOUT overrides)
-openai4s status    # is it up?
+openai4s status    # is it up? (plain URL, never the access token)
+openai4s url       # the sign-in URL; it carries the access token, so keep it out of logs
 openai4s stop      # stop the daemon
 openai4s run "…"   # one Code-as-Action task in-process, no daemon
 openai4s setup --profile standard          # build Python + R
