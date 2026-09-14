@@ -347,6 +347,60 @@ def test_approve_runs_execution_and_marks_completed(monkeypatch, tmp_path):
     assert "executing" in statuses and "completed" in statuses
 
 
+def test_an_english_plan_is_drafted_and_executed_in_english(monkeypatch, tmp_path):
+    """Through the real turn path: a REST `plan:true` draft in English, then
+    approval. The execution seed used to be hard-coded Chinese, and the turn
+    takes its completion headings and narrations from the seed's language."""
+    cfg = _cfg(tmp_path)
+    hub = _Hub()
+    runner = gateway_mod.SessionRunner(cfg, hub)
+    store = get_store(cfg.db_path)
+    fid = store.new_frame(kind="turn", project_id="default", status="ready")
+    draft = (
+        "Compare two synthetic groups.\n\n```json\n"
+        '{"title":"Two-group comparison","rationale":"simple","confidence":"high",'
+        '"steps":[{"id":"s1","title":"Generate data","detail":"40 values",'
+        '"deliverables":["means.json"]}]}\n```'
+    )
+    submit = "```python\nhost.submit_output({'summary': 'Done.'}, ['done'])\n```"
+    replies = {"reply": draft}
+
+    def fake_chat(messages, cfg, on_delta=None, **kw):
+        if any("Output the title only" in str(m.get("content")) for m in messages):
+            return {"content": "Two-group comparison", "usage": {}}
+        return {"content": replies["reply"], "usage": {}}
+
+    def fake_exec(st, code, origin, emit, stream=True, language="python"):
+        st.dispatcher.last_output = {
+            "output": {"summary": "Done.", "metrics": {"n": 40}},
+            "completion_bullets": ["wrote means.json"],
+        }
+        return {"result": {"stdout": "", "stderr": "", "error": None}}
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+    monkeypatch.setattr(runner, "_ensure_kernel", _fake_ensure)
+    monkeypatch.setattr(runner, "_execute_and_log", fake_exec)
+
+    drafted = runner.run_message(
+        fid, "default", "Compare two synthetic groups.", plan=True
+    )
+    assert drafted["plan_captured"] is True
+    replies["reply"] = submit
+    res = runner.run_plan_execution(fid, "default")
+    assert res["status"] == "completed"
+    assert store.get_plan_by_frame(fid)["status"] == "completed"
+
+    users = [m["content"] for m in store.list_messages(fid) if m["role"] == "user"]
+    assert len(users) == 2
+    assert users[1].startswith('Plan "Two-group comparison" is approved')
+    streamed = "".join(
+        str(e.get("chunk") or "") for e in hub.events if e["type"] == "text_chunk"
+    )
+    assert "Metrics:" in streamed
+    for chinese in ("指标", "完成内容", "已批准计划", "我已经准备好"):
+        assert chinese not in streamed
+
+
 # ------------- host.plan_update ticks a step + emits plan_progress --------- #
 def test_host_plan_update_ticks_step(tmp_path):
     cfg = _cfg(tmp_path)
