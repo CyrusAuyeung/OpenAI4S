@@ -173,6 +173,142 @@ def test_plan_mode_turn_emits_plan_ready(monkeypatch, tmp_path):
     assert any(a["filename"].startswith("plan_") for a in store.list_artifacts())
     # plan mode never executes code
     assert store.cell_count(fid) == 0
+    # ...and a captured plan says so on the turn result, with no miss event.
+    assert res["plan_captured"] is True
+    assert not [e for e in hub.events if e["type"] == "plan_not_captured"]
+
+
+# ------------- plan mode is instructed by the server, not the client ------- #
+def _agent_calls(calls):
+    """Model inputs of the agent turn, without the background title call."""
+    return [
+        messages
+        for messages in calls
+        if not any("Output the title only" in str(m.get("content")) for m in messages)
+    ]
+
+
+def _last_user_content(messages) -> str:
+    user = [m for m in messages if m.get("role") == "user"]
+    content = user[-1]["content"] if user else ""
+    return content if isinstance(content, str) else str(content)
+
+
+def _plan_turn(monkeypatch, tmp_path, request, reply):
+    cfg = _cfg(tmp_path)
+    hub = _Hub()
+    runner = gateway_mod.SessionRunner(cfg, hub)
+    store = get_store(cfg.db_path)
+    fid = store.new_frame(kind="turn", project_id="default", status="ready")
+    calls = []
+
+    def fake_chat(messages, cfg, on_delta=None, **kw):
+        calls.append([dict(m) for m in messages])
+        if on_delta:
+            on_delta(reply)
+        return {"content": reply, "usage": {}}
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+    monkeypatch.setattr(runner, "_ensure_kernel", _fake_ensure)
+    res = runner.run_message(fid, "default", request, plan=True)
+    return res, hub, store, fid, _agent_calls(calls)
+
+
+_PROSE_PLAN_WITHOUT_STEPS = (
+    "Here's a concise 3-step plan for the analysis:\n\n"
+    "**Step 1 — Generate the dataset**\nCreate 100 samples.\n\n"
+    "**Step 2 — Compute statistics**\nMean and SD.\n\n"
+    "Would you like me to execute this plan now?"
+)
+
+
+def test_plan_mode_instructs_model_server_side(monkeypatch, tmp_path):
+    """`plan:true` from a REST client carries no workbench prefix. The server
+    used to withhold tools and nothing else, so the model never saw the plan
+    format it had to produce, and whether a plan was captured depended on how
+    it happened to format prose."""
+    request = "Plan a small analysis. Keep the plan to at most 3 steps."
+    res, _hub, store, fid, agent_calls = _plan_turn(
+        monkeypatch, tmp_path, request, _PROSE_PLAN_WITHOUT_STEPS
+    )
+    assert res["status"] == "completed"
+    assert agent_calls, "the agent turn never called the model"
+    model_input = _last_user_content(agent_calls[0])
+    assert model_input.startswith(request)
+    assert "[Plan Mode]" in model_input
+    assert "```json" in model_input and '"steps"' in model_input
+    assert "Wait for user approval" in model_input
+    # The durable user row is what the user typed, not the instruction.
+    stored = [m for m in store.list_messages(fid) if m["role"] == "user"]
+    assert [m["content"] for m in stored] == [request]
+
+
+def test_plan_mode_instruction_follows_request_language(monkeypatch, tmp_path):
+    request = "为两组合成数据的比较制定一个计划，最多三步。"
+    _res, _hub, _store, _fid, agent_calls = _plan_turn(
+        monkeypatch, tmp_path, request, _PROSE_PLAN_WITHOUT_STEPS
+    )
+    model_input = _last_user_content(agent_calls[0])
+    assert "[计划模式]" in model_input and "[Plan Mode]" not in model_input
+    assert "```json" in model_input and "等待用户批准" in model_input
+
+
+def test_plan_mode_does_not_double_the_workbench_prompt(monkeypatch, tmp_path):
+    """The workbench (and the legacy app.js) already prepend a localised plan
+    prompt; the server must not stack a second one on top of it."""
+    for prefixed in (
+        "[Plan Mode] Do not execute or call any tools yet. ...\n\nTask: compare groups",
+        "[计划模式] 请先不要执行、不要调用任何工具。...\n\n任务：比较两组",
+    ):
+        _res, _hub, _store, _fid, agent_calls = _plan_turn(
+            monkeypatch, tmp_path / str(len(prefixed)), prefixed, "ok"
+        )
+        model_input = _last_user_content(agent_calls[0])
+        assert model_input.count("[Plan Mode]") + model_input.count("[计划模式]") == 1
+        assert "```json" not in model_input
+
+
+def test_plan_mode_uncaptured_plan_is_not_silent(monkeypatch, tmp_path):
+    """A plan turn whose reply yields no steps used to end `completed`, with
+    no error, no plan row and no `plan_ready` -- an API client had nothing to
+    approve and nothing telling it so."""
+    res, hub, store, fid, _calls = _plan_turn(
+        monkeypatch,
+        tmp_path,
+        "Plan a small analysis.",
+        _PROSE_PLAN_WITHOUT_STEPS,
+    )
+    assert store.get_plan_by_frame(fid) is None
+    assert res["status"] == "completed"
+    assert res["plan_captured"] is False
+    types = [e["type"] for e in hub.events]
+    assert "plan_ready" not in types
+    missed = [e for e in hub.events if e["type"] == "plan_not_captured"]
+    assert len(missed) == 1
+    assert missed[0]["frame_id"] == fid
+    assert missed[0]["request_id"] == res["request_id"]
+    assert missed[0]["reason"] == "no_plan_steps"
+    # Announced before the terminal event, so a client reading the stream in
+    # order learns it while the turn is still the current one.
+    assert types.index("plan_not_captured") < len(types) - 1
+    assert types[-1] == "frame_update"
+
+
+def test_a_normal_turn_result_carries_no_plan_field(monkeypatch, tmp_path):
+    cfg = _cfg(tmp_path)
+    hub = _Hub()
+    runner = gateway_mod.SessionRunner(cfg, hub)
+    store = get_store(cfg.db_path)
+    fid = store.new_frame(kind="turn", project_id="default", status="ready")
+
+    def fake_chat(messages, cfg, on_delta=None, **kw):
+        return {"content": "Just an answer.", "usage": {}}
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+    monkeypatch.setattr(runner, "_ensure_kernel", _fake_ensure)
+    res = runner.run_message(fid, "default", "hello")
+    assert "plan_captured" not in res
+    assert not [e for e in hub.events if e["type"] == "plan_not_captured"]
 
 
 # --------------- integration: approve → auto-execute → completed ----------- #
@@ -209,6 +345,60 @@ def test_approve_runs_execution_and_marks_completed(monkeypatch, tmp_path):
     assert store.get_plan_by_frame(fid)["status"] == "completed"
     statuses = [e["status"] for e in hub.events if e["type"] == "plan_ready"]
     assert "executing" in statuses and "completed" in statuses
+
+
+def test_an_english_plan_is_drafted_and_executed_in_english(monkeypatch, tmp_path):
+    """Through the real turn path: a REST `plan:true` draft in English, then
+    approval. The execution seed used to be hard-coded Chinese, and the turn
+    takes its completion headings and narrations from the seed's language."""
+    cfg = _cfg(tmp_path)
+    hub = _Hub()
+    runner = gateway_mod.SessionRunner(cfg, hub)
+    store = get_store(cfg.db_path)
+    fid = store.new_frame(kind="turn", project_id="default", status="ready")
+    draft = (
+        "Compare two synthetic groups.\n\n```json\n"
+        '{"title":"Two-group comparison","rationale":"simple","confidence":"high",'
+        '"steps":[{"id":"s1","title":"Generate data","detail":"40 values",'
+        '"deliverables":["means.json"]}]}\n```'
+    )
+    submit = "```python\nhost.submit_output({'summary': 'Done.'}, ['done'])\n```"
+    replies = {"reply": draft}
+
+    def fake_chat(messages, cfg, on_delta=None, **kw):
+        if any("Output the title only" in str(m.get("content")) for m in messages):
+            return {"content": "Two-group comparison", "usage": {}}
+        return {"content": replies["reply"], "usage": {}}
+
+    def fake_exec(st, code, origin, emit, stream=True, language="python"):
+        st.dispatcher.last_output = {
+            "output": {"summary": "Done.", "metrics": {"n": 40}},
+            "completion_bullets": ["wrote means.json"],
+        }
+        return {"result": {"stdout": "", "stderr": "", "error": None}}
+
+    monkeypatch.setattr(gateway_mod, "chat", fake_chat)
+    monkeypatch.setattr(runner, "_ensure_kernel", _fake_ensure)
+    monkeypatch.setattr(runner, "_execute_and_log", fake_exec)
+
+    drafted = runner.run_message(
+        fid, "default", "Compare two synthetic groups.", plan=True
+    )
+    assert drafted["plan_captured"] is True
+    replies["reply"] = submit
+    res = runner.run_plan_execution(fid, "default")
+    assert res["status"] == "completed"
+    assert store.get_plan_by_frame(fid)["status"] == "completed"
+
+    users = [m["content"] for m in store.list_messages(fid) if m["role"] == "user"]
+    assert len(users) == 2
+    assert users[1].startswith('Plan "Two-group comparison" is approved')
+    streamed = "".join(
+        str(e.get("chunk") or "") for e in hub.events if e["type"] == "text_chunk"
+    )
+    assert "Metrics:" in streamed
+    for chinese in ("指标", "完成内容", "已批准计划", "我已经准备好"):
+        assert chinese not in streamed
 
 
 # ------------- host.plan_update ticks a step + emits plan_progress --------- #
