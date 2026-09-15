@@ -9,7 +9,7 @@ $ast.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
     $node.Name -in @('Select-Distro', 'Get-WslBootstrapArgs', 'ConvertTo-NativeArgument', 'Start-Bootstrap',
-                     'Show-RunningBuild', 'Assert-AppPage')
+                     'Show-RunningBuild', 'Assert-AppPage', 'Invoke-WslCaptureNative', 'Get-WslArkCliPath')
 }, $false) | ForEach-Object { Invoke-Expression $_.Extent.Text }
 function Stop-WithGuidance([string]$Message, $Lines) { throw $Message }
 function Test-DistroHasInstall($Name) { return $Name -eq 'Ubuntu-existing' }
@@ -83,5 +83,61 @@ function Invoke-WebRequest {
 Assert-AppPage 'http://172.20.0.2:8760/?token=synthetic'
 if ($null -ne $script:proxyDuringCall) { throw 'the page check went through the system proxy' }
 if ([System.Net.WebRequest]::DefaultWebProxy -ne $script:sentinel) { throw 'the system proxy was not restored' }
+
+# Exercise actual native UTF-8 bytes under an OEM console encoding. This runs
+# in Windows CI without WSL and catches the failure a mocked string cannot.
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('openai4s-native-' + [Guid]::NewGuid().ToString('N'))
+$savedPath = $env:PATH
+$savedEncoding = [Console]::OutputEncoding
+$savedArkCli = $env:OPENAI4S_ARKCLI_PATH
+try {
+    New-Item -ItemType Directory -Path $testRoot | Out-Null
+    Add-Type -OutputAssembly (Join-Path $testRoot 'wsl.exe') -OutputType ConsoleApplication -TypeDefinition @'
+using System;
+using System.Text;
+public class WslFixture {
+    public static int Main(string[] args) {
+        byte[] bytes = Encoding.UTF8.GetBytes("/mnt/c/Users/\u4e2d\u6587 folder\n");
+        Console.OpenStandardOutput().Write(bytes, 0, bytes.Length);
+        byte[] warning = Encoding.UTF8.GetBytes("wsl: harmless diagnostic\n");
+        Console.OpenStandardError().Write(warning, 0, warning.Length);
+        return args.Length > 0 && args[0] == "fail" ? 7 : 0;
+    }
+}
+'@
+    $env:PATH = $testRoot + ';' + $savedPath
+    [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
+    $expectedPath = '/mnt/c/Users/' + [char]0x4e2d + [char]0x6587 + ' folder'
+    foreach ($mode in @('ok', 'fail')) {
+        $result = Invoke-WslCaptureNative @($mode)
+        $expectedCode = if ($mode -eq 'fail') { 7 } else { 0 }
+        if ($result.ExitCode -ne $expectedCode) { throw 'native exit code was lost' }
+        if ($result.Output -notcontains $expectedPath) { throw 'native UTF-8 path was corrupted' }
+        if ([Console]::OutputEncoding.CodePage -ne 437) { throw 'console encoding was not restored' }
+        if ($ErrorActionPreference -ne 'Stop') { throw 'error preference was not restored' }
+    }
+    Copy-Item -LiteralPath (Join-Path $testRoot 'wsl.exe') -Destination (Join-Path $testRoot 'arkcli.exe')
+    function ConvertTo-WslPath($Distro, $WindowsPath) {
+        if ($WindowsPath -ne (Join-Path $testRoot 'arkcli.exe')) { throw 'wrong Windows CLI selected' }
+        return '/windows tools/arkcli.exe'
+    }
+    $env:OPENAI4S_ARKCLI_PATH = ''
+    $WslArkCli = Get-WslArkCliPath 'Ubuntu'
+    if ($WslArkCli -ne '/windows tools/arkcli.exe') { throw 'Windows PATH CLI was not discovered' }
+    $forwarded = @(Get-WslBootstrapArgs 'Ubuntu' '/b.sh' @('serve'))
+    if ($forwarded -notcontains 'OPENAI4S_ARKCLI_PATH=/windows tools/arkcli.exe') { throw 'CLI path lost argv boundary' }
+    $env:OPENAI4S_ARKCLI_PATH = '/opt/ark/bin/arkcli'
+    if ((Get-WslArkCliPath 'Ubuntu') -ne '/opt/ark/bin/arkcli') { throw 'explicit WSL path lost precedence' }
+    $env:OPENAI4S_ARKCLI_PATH = Join-Path $testRoot 'arkcli.exe'
+    if ((Get-WslArkCliPath 'Ubuntu') -ne '/windows tools/arkcli.exe') { throw 'explicit Windows path was not translated' }
+} finally {
+    $env:PATH = $savedPath
+    $env:OPENAI4S_ARKCLI_PATH = $savedArkCli
+    [Console]::OutputEncoding = $savedEncoding
+    $resolvedTestRoot = [IO.Path]::GetFullPath($testRoot)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $resolvedTestRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'unsafe test cleanup path' }
+    Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
+}
 
 Write-Output "PowerShell $($PSVersionTable.PSVersion): launcher contracts passed"

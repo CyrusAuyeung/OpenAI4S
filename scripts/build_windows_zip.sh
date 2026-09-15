@@ -220,6 +220,11 @@ OpenAI4S $VERSION - first launch on Windows
 
      openai4s serve --port 8760 --no-browser --detached
 
+   Volcengine login: the launcher discovers arkcli.exe on Windows PATH.
+   For a standalone executable, set OPENAI4S_ARKCLI_PATH to its full Windows
+   path before launch; an absolute WSL CLI path also works. No WSLENV setting
+   is needed. Ark CLI is installed separately, not included in this ZIP.
+
 5. Choosing a distribution.
 
    OPENAI4S_WSL_DISTRO wins when set. Otherwise the launcher keeps a WSL2

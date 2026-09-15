@@ -41,6 +41,7 @@
     OPENAI4S_WSL_CONDA_MIRROR  Conda mirror root used by environment setup
     OPENAI4S_WSL_FAKE_IP_DNS  auto (default), on, or off for Clash-style DNS
     OPENAI4S_WSL_DATA_DIR  optional absolute Linux data path (default ~/.openai4s)
+    OPENAI4S_ARKCLI_PATH  optional Windows executable or absolute WSL CLI path
     OPENAI4S_HOST         default 127.0.0.1
     OPENAI4S_PORT         default 8760
     OPENAI4S_NO_OPEN      set to 1 to print readiness without opening a browser
@@ -190,14 +191,19 @@ function Invoke-WslCaptureNative([string[]] $WslArgs) {
     # through LASTEXITCODE; capture both streams while that one call is allowed
     # to continue, then restore the script-wide fail-fast policy.
     $previousPreference = $ErrorActionPreference
+    $previousEncoding = [Console]::OutputEncoding
     $output = @()
     $code = 1
     try {
         $ErrorActionPreference = 'Continue'
+        # WSL_UTF8 selects the bytes WSL writes; PowerShell 5.1 separately
+        # decodes native stdout with Console.OutputEncoding (often OEM).
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = @(& wsl.exe @WslArgs 2>&1)
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousEncoding
     }
     return [pscustomobject]@{
         ExitCode = $code
@@ -543,6 +549,23 @@ function Assert-WslDataDir([string] $Value) {
     }
 }
 
+function Get-WslArkCliPath([string] $Distro) {
+    $configured = $env:OPENAI4S_ARKCLI_PATH
+    if ($configured -and $configured.StartsWith('/')) { return $configured }
+    $name = if ($configured) { $configured } else { 'arkcli.exe' }
+    $command = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
+        return (ConvertTo-WslPath $Distro $command.Source)
+    }
+    if ($configured) {
+        Stop-WithGuidance 'OPENAI4S_ARKCLI_PATH does not name an installed executable.' @(
+            'Use the full Windows path to arkcli.exe, or an absolute Linux',
+            'path to a CLI installed inside the selected WSL distribution.'
+        )
+    }
+    return ''
+}
+
 function Get-WslBootstrapArgs([string] $Distro, [string] $BootstrapLinux, [string[]] $BootstrapArgs, [string] $User = '') {
     $wslArgs = @('-d', $Distro)
     if ($User) { $wslArgs += @('-u', $User) }
@@ -552,6 +575,7 @@ function Get-WslBootstrapArgs([string] $Distro, [string] $BootstrapLinux, [strin
     if ($WslDataDir) {
         $wslArgs += "OPENAI4S_DATA_DIR=$WslDataDir"
     }
+    if ($WslArkCli) { $wslArgs += "OPENAI4S_ARKCLI_PATH=$WslArkCli" }
     $wslArgs += "OPENAI4S_FAKE_IP_DNS_MODE=$FakeIpDnsMode"
     if ($PypiIndexOff) {
         $wslArgs += 'OPENAI4S_PYPI_INDEX_URL=off'
@@ -795,6 +819,7 @@ if ($BindHost.Contains(':')) {
 }
 
 $distro = Select-Distro
+$WslArkCli = Get-WslArkCliPath $distro
 if ((Test-LocalhostForwardingDisabled) -and
     ((-not $env:OPENAI4S_HOST) -or $BindHost -eq '0.0.0.0')) {
     $fallbackHost = Get-WslIpv4 $distro
