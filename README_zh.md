@@ -330,20 +330,6 @@ uv run pre-commit run --all-files   # 全量格式化 + lint
 
 ---
 
-## ✏️ 引用
-
-```bibtex
-@misc{zhang2026openai4scodeactionscience,
-      title={OpenAI4S: Code as Action, Science as Sessions},
-      author={Gongbo Zhang and Hao Li and Yu Wang and Mujie Lin and Liuzhenghao Lv and Yicheng Mao and Yimi Wang and Jun Zhu and Minhan Tang and Zhengxiang Jiang and Yusong Wang and Jiayu Yao and Kunpeng Ning and Dawei Pang and Yonghong Tian and OpenAI4S Community and Yuyang Liu and Li Yuan},
-      year={2026},
-      eprint={2609.15096},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2609.15096},
-}
-```
-
 ## 🤝 社区贡献者
 
 <!-- CONTRIBUTORS:START -->
