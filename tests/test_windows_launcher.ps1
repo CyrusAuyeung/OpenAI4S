@@ -185,7 +185,7 @@ public class WslFixture {
     $env:OPENAI4S_ARKCLI_PATH = 'arkcli'
     if ((Get-WslArkCliPath 'Ubuntu') -ne '/windows tools/arkcli.exe') { throw 'an earlier npm .cmd hid arkcli.exe' }
     $env:PATH = $testRoot + ';' + $savedPath
-    foreach ($invalid in @((Join-Path $testRoot 'missing\arkcli.exe'), (Join-Path $testRoot 'arkcli.cmd'))) {
+    foreach ($invalid in @((Join-Path $testRoot 'missing\arkcli.exe'), (Join-Path $testRoot 'arkcli.cmd'), 'arkcli*', '*')) {
         $env:OPENAI4S_ARKCLI_PATH = $invalid
         $refused = $false
         try { Get-WslArkCliPath 'Ubuntu' | Out-Null } catch { $refused = $_.Exception.Message -match 'does not name' }

@@ -959,11 +959,14 @@ def test_a_windows_cli_through_wsl_interop_receives_the_caller_contract(
     env = _command_env(("/mnt/c/Tools/Ark/arkcli.exe", "api", "apikey.list"))
 
     names = env["WSLENV"].split(":")
-    assert {"ARKCLI_CALLER_TYPE/u", "ARKCLI_SKILL_NAME/u", "HTTPS_PROXY/u"} <= set(
+    # `/w`: included only when WSL launches a Win32 process (Microsoft's WSLENV
+    # flag table); `/u` would silently drop every one of these.
+    assert {"ARKCLI_CALLER_TYPE/w", "ARKCLI_SKILL_NAME/w", "HTTPS_PROXY/w"} <= set(
         names
     )
     assert all(
-        name.startswith("ARKCLI_") or name.upper().endswith("_PROXY/U")
+        name.endswith("/w")
+        and (name.startswith("ARKCLI_") or name.upper().endswith("_PROXY/W"))
         for name in names
     )
     assert "WSLENV" not in _command_env(("/usr/local/bin/arkcli", "auth", "whoami"))

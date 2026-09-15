@@ -124,9 +124,11 @@ def _command_env(argv: Sequence[str]) -> dict[str, str]:
         # A Windows arkcli.exe reached through WSL interop receives only the
         # Linux variables WSLENV names, and the allowlist never copies the
         # daemon's own WSLENV. Name exactly the caller identity and the
-        # already-allowlisted proxy settings a Linux arkcli would see.
+        # already-allowlisted proxy settings a Linux arkcli would see. `/w` is
+        # "only when running Win32 from WSL"; `/u` is the opposite direction,
+        # and `/p` would rewrite a proxy URL as a path.
         child_env["WSLENV"] = ":".join(
-            f"{key}/u"
+            f"{key}/w"
             for key in child_env
             if key.startswith("ARKCLI_") or key.upper().endswith("_PROXY")
         )

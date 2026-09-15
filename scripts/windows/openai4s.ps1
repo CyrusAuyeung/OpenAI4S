@@ -586,9 +586,11 @@ function Get-WslArkCliPath([string] $Distro) {
         try {
             if (Test-Path -LiteralPath $configured -PathType Leaf) { $source = $configured }
         } catch { }
-    } else {
+    } elseif (-not $configured -or $configured.IndexOfAny([char[]] @('*', '?', '[', ']')) -lt 0) {
         # The first arkcli.exe in PATH order, not the first Application: an
-        # npm arkcli.cmd earlier on PATH would otherwise hide it.
+        # npm arkcli.cmd earlier on PATH would otherwise hide it. A configured
+        # name with wildcard characters is refused below instead: Get-Command
+        # would expand `*` into whatever .exe comes first, such as cmd.exe.
         $name = if ($configured) { $configured } else { 'arkcli.exe' }
         $command = Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue |
             Where-Object { $_.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) } |
