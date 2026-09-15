@@ -72,6 +72,8 @@ $AppHost = $ClientHost
 $AppPort = if ($env:OPENAI4S_PORT) { $env:OPENAI4S_PORT } else { '8760' }
 $WslProxy = $env:OPENAI4S_WSL_PROXY
 $WslDataDir = $env:OPENAI4S_WSL_DATA_DIR
+# Resolved after distribution selection, and only for non-management commands.
+$WslArkCli = ''
 $FakeIpDnsMode = if ($env:OPENAI4S_WSL_FAKE_IP_DNS) {
     $env:OPENAI4S_WSL_FAKE_IP_DNS.Trim().ToLowerInvariant()
 } else {
@@ -183,6 +185,26 @@ function Stop-WithGuidance([string] $Problem, [string[]] $Steps) {
     exit 1
 }
 
+function Enter-Utf8NativeOutput {
+    # WSL_UTF8 selects the bytes WSL writes; PowerShell 5.1 separately
+    # decodes native stdout with Console.OutputEncoding (often OEM). Returns
+    # the encoding to restore, or $null when nothing changed: a host with no
+    # console (the ISE, a CREATE_NO_WINDOW parent) refuses SetConsoleOutputCP,
+    # and failing to change a decoder must not abort the launcher.
+    try {
+        $previous = [Console]::OutputEncoding
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        return $previous
+    } catch {
+        return $null
+    }
+}
+
+function Exit-Utf8NativeOutput($Previous) {
+    if ($null -eq $Previous) { return }
+    try { [Console]::OutputEncoding = $Previous } catch { }
+}
+
 function Invoke-WslCaptureNative([string[]] $WslArgs) {
     # Windows PowerShell 5.1 converts native stderr into ErrorRecord objects.
     # With this script's fail-fast ErrorActionPreference, a harmless WSL
@@ -191,19 +213,17 @@ function Invoke-WslCaptureNative([string[]] $WslArgs) {
     # through LASTEXITCODE; capture both streams while that one call is allowed
     # to continue, then restore the script-wide fail-fast policy.
     $previousPreference = $ErrorActionPreference
-    $previousEncoding = [Console]::OutputEncoding
+    $previousEncoding = $null
     $output = @()
     $code = 1
     try {
         $ErrorActionPreference = 'Continue'
-        # WSL_UTF8 selects the bytes WSL writes; PowerShell 5.1 separately
-        # decodes native stdout with Console.OutputEncoding (often OEM).
-        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $previousEncoding = Enter-Utf8NativeOutput
         $output = @(& wsl.exe @WslArgs 2>&1)
         $code = $LASTEXITCODE
     } finally {
+        Exit-Utf8NativeOutput $previousEncoding
         $ErrorActionPreference = $previousPreference
-        [Console]::OutputEncoding = $previousEncoding
     }
     return [pscustomobject]@{
         ExitCode = $code
@@ -491,12 +511,15 @@ function Get-WslIpv4([string] $Distro) {
     return $null
 }
 
-function ConvertTo-WslPath([string] $Distro, [string] $WindowsPath) {
+function ConvertTo-WslPath([string] $Distro, [string] $WindowsPath, [switch] $Optional) {
+    # -Optional returns '' instead of refusing: the guidance below is about
+    # this package's own folder, not about an optional tool found elsewhere.
     $result = Invoke-WslCaptureNative -WslArgs @(
         '-d', $Distro, '--exec', 'wslpath', '-a', $WindowsPath
     )
     $translated = $result.Output
     if ($result.ExitCode -ne 0) {
+        if ($Optional) { return '' }
         Stop-WithGuidance "WSL could not reach this folder: $WindowsPath" @(
             'Unzip the package onto a local drive (for example C:\OpenAI4S).',
             'A network share or a OneDrive placeholder folder is not always',
@@ -511,6 +534,7 @@ function ConvertTo-WslPath([string] $Distro, [string] $WindowsPath) {
         } | Where-Object { $_.StartsWith('/') }
     )
     if (-not $paths) {
+        if ($Optional) { return '' }
         Stop-WithGuidance "WSL returned no Linux path for: $WindowsPath" @(
             'Unzip the package onto a local drive and try again.'
         )
@@ -550,12 +574,24 @@ function Assert-WslDataDir([string] $Value) {
 }
 
 function Get-WslArkCliPath([string] $Distro) {
+    # Ark CLI is optional. Only an explicit OPENAI4S_ARKCLI_PATH may refuse a
+    # launch; an arkcli.exe that merely happens to be on PATH is skipped when
+    # WSL cannot reach it (a UNC share it does not mount, for example).
     $configured = $env:OPENAI4S_ARKCLI_PATH
     if ($configured -and $configured.StartsWith('/')) { return $configured }
     $name = if ($configured) { $configured } else { 'arkcli.exe' }
     $command = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command -and $command.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
-        return (ConvertTo-WslPath $Distro $command.Source)
+        $translated = ConvertTo-WslPath $Distro $command.Source -Optional
+        if ($translated) { return $translated }
+        if (-not $configured) {
+            Write-Host "  note: $($command.Source) is not reachable from WSL; not using it for Volcengine login." -ForegroundColor DarkGray
+            return ''
+        }
+        Stop-WithGuidance "WSL cannot reach OPENAI4S_ARKCLI_PATH: $($command.Source)" @(
+            'Copy arkcli.exe to a local drive, or install the CLI inside WSL',
+            'and set OPENAI4S_ARKCLI_PATH to its absolute Linux path.'
+        )
     }
     if ($configured) {
         Stop-WithGuidance 'OPENAI4S_ARKCLI_PATH does not name an installed executable.' @(
@@ -628,12 +664,17 @@ function Invoke-Bootstrap([string] $Distro, [string] $BootstrapLinux, [string[]]
     # failure guidance promises the reader.
     $wslArgs = Get-WslBootstrapArgs $Distro $BootstrapLinux $BootstrapArgs $User
     $previousPreference = $ErrorActionPreference
+    $previousEncoding = $null
     $code = 1
     try {
         $ErrorActionPreference = 'Continue'
+        # The same decoding as Invoke-WslCaptureNative, or localized wsl.exe
+        # diagnostics and Unicode paths stream to the console as mojibake.
+        $previousEncoding = Enter-Utf8NativeOutput
         & wsl.exe @wslArgs 2>&1 | ForEach-Object { Write-Host ([string] $_) }
         $code = $LASTEXITCODE
     } finally {
+        Exit-Utf8NativeOutput $previousEncoding
         $ErrorActionPreference = $previousPreference
     }
     return $code
@@ -819,7 +860,6 @@ if ($BindHost.Contains(':')) {
 }
 
 $distro = Select-Distro
-$WslArkCli = Get-WslArkCliPath $distro
 if ((Test-LocalhostForwardingDisabled) -and
     ((-not $env:OPENAI4S_HOST) -or $BindHost -eq '0.0.0.0')) {
     $fallbackHost = Get-WslIpv4 $distro
@@ -859,6 +899,14 @@ if (Test-SandboxIndependentCli $Arguments) {
 
 $facts = Get-PackageFacts
 $payloadLinux = "$packageLinux/payload/$($facts.PayloadName)"
+
+# Ark CLI only matters to a process that can run the Volcengine bridge. A
+# management command must neither pay a wsl.exe round trip for it nor be
+# refused by an optional tool's configuration: `stop` and `doctor` have to
+# work when something else is wrong.
+if (-not (Test-SandboxIndependentCli $Arguments)) {
+    $WslArkCli = Get-WslArkCliPath $distro
+}
 
 # Reached by a management command only when nothing is installed yet, and by
 # every ordinary launch. Preflight still does not gate the management commands:

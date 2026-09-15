@@ -9,7 +9,8 @@ $ast.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
     $node.Name -in @('Select-Distro', 'Get-WslBootstrapArgs', 'ConvertTo-NativeArgument', 'Start-Bootstrap',
-                     'Show-RunningBuild', 'Assert-AppPage', 'Invoke-WslCaptureNative', 'Get-WslArkCliPath')
+                     'Show-RunningBuild', 'Assert-AppPage', 'Invoke-WslCaptureNative', 'Get-WslArkCliPath',
+                     'Enter-Utf8NativeOutput', 'Exit-Utf8NativeOutput', 'Invoke-Bootstrap')
 }, $false) | ForEach-Object { Invoke-Expression $_.Extent.Text }
 function Stop-WithGuidance([string]$Message, $Lines) { throw $Message }
 function Test-DistroHasInstall($Name) { return $Name -eq 'Ubuntu-existing' }
@@ -92,7 +93,11 @@ $savedEncoding = [Console]::OutputEncoding
 $savedArkCli = $env:OPENAI4S_ARKCLI_PATH
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
-    Add-Type -OutputAssembly (Join-Path $testRoot 'wsl.exe') -OutputType ConsoleApplication -TypeDefinition @'
+    $env:PATH = $testRoot + ';' + $savedPath
+    # PowerShell 6+ cannot compile a console application with Add-Type, so the
+    # native fixture is Windows PowerShell only -- the host OpenAI4S.cmd runs.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        Add-Type -OutputAssembly (Join-Path $testRoot 'wsl.exe') -OutputType ConsoleApplication -TypeDefinition @'
 using System;
 using System.Text;
 public class WslFixture {
@@ -105,20 +110,34 @@ public class WslFixture {
     }
 }
 '@
-    $env:PATH = $testRoot + ';' + $savedPath
-    [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
-    $expectedPath = '/mnt/c/Users/' + [char]0x4e2d + [char]0x6587 + ' folder'
-    foreach ($mode in @('ok', 'fail')) {
-        $result = Invoke-WslCaptureNative @($mode)
-        $expectedCode = if ($mode -eq 'fail') { 7 } else { 0 }
-        if ($result.ExitCode -ne $expectedCode) { throw 'native exit code was lost' }
-        if ($result.Output -notcontains $expectedPath) { throw 'native UTF-8 path was corrupted' }
-        if ([Console]::OutputEncoding.CodePage -ne 437) { throw 'console encoding was not restored' }
-        if ($ErrorActionPreference -ne 'Stop') { throw 'error preference was not restored' }
+        [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
+        $expectedPath = '/mnt/c/Users/' + [char]0x4e2d + [char]0x6587 + ' folder'
+        foreach ($mode in @('ok', 'fail')) {
+            $result = Invoke-WslCaptureNative @($mode)
+            $expectedCode = if ($mode -eq 'fail') { 7 } else { 0 }
+            if ($result.ExitCode -ne $expectedCode) { throw 'native exit code was lost' }
+            if ($result.Output -notcontains $expectedPath) { throw 'native UTF-8 path was corrupted' }
+            if ([Console]::OutputEncoding.CodePage -ne 437) { throw 'console encoding was not restored' }
+            if ($ErrorActionPreference -ne 'Stop') { throw 'error preference was not restored' }
+        }
+        # The streaming path (preflight, install, CLI passthrough) decodes too.
+        $script:told = @()
+        if ((Invoke-Bootstrap 'Ubuntu' '/b.sh' @('preflight')) -ne 0) { throw 'streamed exit code was lost' }
+        if ($script:told -notcontains $expectedPath) { throw 'streamed native UTF-8 path was corrupted' }
+        if ([Console]::OutputEncoding.CodePage -ne 437) { throw 'console encoding was not restored after streaming' }
+        if ($ErrorActionPreference -ne 'Stop') { throw 'error preference was not restored after streaming' }
+    } else {
+        Write-Output "PowerShell $($PSVersionTable.PSVersion): native console fixture skipped (Windows PowerShell only)"
     }
-    Copy-Item -LiteralPath (Join-Path $testRoot 'wsl.exe') -Destination (Join-Path $testRoot 'arkcli.exe')
-    function ConvertTo-WslPath($Distro, $WindowsPath) {
+
+    # Get-Command resolves an Application by name and PATHEXT, not by content.
+    New-Item -ItemType File -Path (Join-Path $testRoot 'arkcli.exe') | Out-Null
+    New-Item -ItemType File -Path (Join-Path $testRoot 'arkcli.cmd') | Out-Null
+    $script:translationFails = $false
+    function ConvertTo-WslPath($Distro, $WindowsPath, [switch] $Optional) {
         if ($WindowsPath -ne (Join-Path $testRoot 'arkcli.exe')) { throw 'wrong Windows CLI selected' }
+        if (-not $Optional) { throw 'an Ark CLI translation failure must not use the package guidance' }
+        if ($script:translationFails) { return '' }
         return '/windows tools/arkcli.exe'
     }
     $env:OPENAI4S_ARKCLI_PATH = ''
@@ -126,18 +145,46 @@ public class WslFixture {
     if ($WslArkCli -ne '/windows tools/arkcli.exe') { throw 'Windows PATH CLI was not discovered' }
     $forwarded = @(Get-WslBootstrapArgs 'Ubuntu' '/b.sh' @('serve'))
     if ($forwarded -notcontains 'OPENAI4S_ARKCLI_PATH=/windows tools/arkcli.exe') { throw 'CLI path lost argv boundary' }
+    function Start-Process {
+        param($FilePath, $ArgumentList, $WindowStyle, [switch]$PassThru)
+        $script:nativeLine = $ArgumentList
+        return [pscustomobject]@{ HasExited = $false }
+    }
+    Start-Bootstrap 'Ubuntu' '/b.sh' @('serve') | Out-Null
+    if ($script:nativeLine -notlike '*"OPENAI4S_ARKCLI_PATH=/windows tools/arkcli.exe"*') { throw 'CLI path lost its native argv boundary' }
+
+    # An optional CLI WSL cannot reach is skipped; a configured one is refused.
+    $script:translationFails = $true
+    if ((Get-WslArkCliPath 'Ubuntu') -ne '') { throw 'an unreachable PATH CLI was forwarded' }
+    $env:OPENAI4S_ARKCLI_PATH = Join-Path $testRoot 'arkcli.exe'
+    $refused = $false
+    try { Get-WslArkCliPath 'Ubuntu' | Out-Null } catch { $refused = $_.Exception.Message -match 'cannot reach' }
+    if (-not $refused) { throw 'an unreachable configured CLI was not refused' }
+    $script:translationFails = $false
+
     $env:OPENAI4S_ARKCLI_PATH = '/opt/ark/bin/arkcli'
     if ((Get-WslArkCliPath 'Ubuntu') -ne '/opt/ark/bin/arkcli') { throw 'explicit WSL path lost precedence' }
     $env:OPENAI4S_ARKCLI_PATH = Join-Path $testRoot 'arkcli.exe'
     if ((Get-WslArkCliPath 'Ubuntu') -ne '/windows tools/arkcli.exe') { throw 'explicit Windows path was not translated' }
+    foreach ($invalid in @((Join-Path $testRoot 'missing\arkcli.exe'), (Join-Path $testRoot 'arkcli.cmd'))) {
+        $env:OPENAI4S_ARKCLI_PATH = $invalid
+        $refused = $false
+        try { Get-WslArkCliPath 'Ubuntu' | Out-Null } catch { $refused = $_.Exception.Message -match 'does not name' }
+        if (-not $refused) { throw "an unusable configured CLI was accepted: $invalid" }
+    }
+    $env:OPENAI4S_ARKCLI_PATH = ''
+    $env:PATH = Join-Path $testRoot 'no-such-dir'
+    if ((Get-WslArkCliPath 'Ubuntu') -ne '') { throw 'a missing optional CLI was not ignored' }
 } finally {
+    # Best effort, so a cleanup failure never replaces the assertion that failed.
     $env:PATH = $savedPath
     $env:OPENAI4S_ARKCLI_PATH = $savedArkCli
     [Console]::OutputEncoding = $savedEncoding
     $resolvedTestRoot = [IO.Path]::GetFullPath($testRoot)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-    if (-not $resolvedTestRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'unsafe test cleanup path' }
-    Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
+    if ($resolvedTestRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Output "PowerShell $($PSVersionTable.PSVersion): launcher contracts passed"

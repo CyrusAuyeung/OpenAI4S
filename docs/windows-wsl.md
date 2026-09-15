@@ -117,6 +117,24 @@ OpenAI4S.cmd
 命令       ~/.local/bin/openai4s
 ```
 
+#### 火山引擎登录
+
+在「自定义 → 模型」中配置火山模型。经 `OpenAI4S.cmd` 启动时，启动器会发现
+Windows PATH 中的 `arkcli.exe` 并转为 WSL 路径，复用该 CLI 已有的 Windows 登录。
+发现的 Windows CLI 优先于 WSL 内安装的 CLI；若要改用 WSL 内的 CLI，把
+`OPENAI4S_ARKCLI_PATH` 设为它的绝对 Linux 路径。没有 Windows `arkcli.exe`
+（或它位于 WSL 无法访问的网络共享上）时，照常发现 WSL 内安装的 CLI。
+未加入 PATH 的独立 exe 可指定完整路径：
+
+```powershell
+$env:OPENAI4S_ARKCLI_PATH = 'C:\Tools\Ark\arkcli.exe'
+.\OpenAI4S.cmd
+```
+
+无需设置 `WSLENV`。ZIP 不自带 Ark CLI。修改路径后需先运行 `OpenAI4S.cmd stop`
+再重新启动：服务已在运行时，再次启动会沿用旧值。Windows npm 的 `.cmd`
+不能直接在 WSL 执行，请使用原生 exe 或在 WSL 安装 CLI。
+
 ### 4. 日常命令
 
 在 Windows PowerShell 中：
@@ -319,26 +337,25 @@ file byte for byte.
 
 ### Volcengine login
 
-Configure the model in Customize → Models. A CLI installed inside WSL is
-discovered normally. The Windows launcher also discovers `arkcli.exe` on the
-Windows PATH and forwards its translated path, so it can reuse that CLI's
-existing Windows login. For a standalone executable outside PATH:
+Configure the model in Customize → Models. When started through
+`OpenAI4S.cmd`, the launcher discovers `arkcli.exe` on the Windows PATH and
+forwards its translated path, so it can reuse that CLI's existing Windows
+login. A discovered Windows CLI takes precedence over a CLI installed inside
+WSL; to use the WSL one instead, set `OPENAI4S_ARKCLI_PATH` to its absolute
+Linux path. With no Windows `arkcli.exe` (or one WSL cannot reach, such as on
+a network share), a CLI installed inside WSL is discovered normally. For a
+standalone executable outside PATH:
 
 ```powershell
 $env:OPENAI4S_ARKCLI_PATH = 'C:\Tools\Ark\arkcli.exe'
 .\OpenAI4S.cmd
 ```
 
-An absolute Linux path also works. No manual `WSLENV` setting is needed.
-The executable must already be installed; the ZIP does not bundle Ark CLI.
-Restart OpenAI4S after changing the path. A Windows npm `.cmd` launcher is
-not a WSL executable: use its native `arkcli.exe` or install the CLI in WSL.
-
-在「自定义 → 模型」中配置火山模型。启动器会发现 Windows PATH 中的
-`arkcli.exe` 并转为 WSL 路径，复用该 CLI 已有的 Windows 登录。
-未加入 PATH 时，可按上例指定 exe 的完整路径；也支持绝对 Linux 路径，
-无需设置 `WSLENV`。ZIP 不自带 Ark CLI，修改路径后需重启应用。
-Windows npm 的 `.cmd` 不能直接在 WSL 执行，请使用原生 exe 或在 WSL 安装 CLI。
+No manual `WSLENV` setting is needed. The executable must already be
+installed; the ZIP does not bundle Ark CLI. After changing the path, run
+`OpenAI4S.cmd stop` and start again: a launch that finds the daemon already
+running keeps the old value. A Windows npm `.cmd` launcher is not a WSL
+executable: use its native `arkcli.exe` or install the CLI in WSL.
 
 ### Lifecycle commands
 
