@@ -164,6 +164,23 @@ describe("draft capacity", () => {
     expect(io.text).not.toHaveBeenCalled();
     expect(editor.canSave).toBe(false);
   });
+  it("reserves in-flight load bytes so concurrent opens stay within the cap", async () => {
+    const { store, io } = fixture();
+    const body = "x".repeat(Math.floor(EDITOR_MAX_BYTES / 3));
+    const pending = deferred<string>();
+    vi.mocked(io.head).mockResolvedValue({ versionId: "v1", sizeBytes: body.length, checksum: "a".repeat(64) });
+    vi.mocked(io.text).mockReturnValueOnce(pending.promise).mockResolvedValue(body);
+    const first = store.open("s", { id: "a", version_id: "v1" });
+    const second = store.open("s", { id: "b", version_id: "v1" });
+    await vi.waitFor(() => expect(second.problem).toBe("capacity"));
+    expect(first.phase).toBe("loading");
+    expect(io.text).toHaveBeenCalledTimes(1);
+    expect(store.bytes).toBe(2 * body.length);
+    pending.resolve(body);
+    await vi.waitFor(() => expect(first.phase).toBe("ready"));
+    expect(store.bytes).toBe(2 * body.length);
+    expect(store.bytes).toBeLessThanOrEqual(EDITOR_MAX_BYTES);
+  });
 });
 
 it.each([null, {}, { versions: [] }, { versions: [{ version_id: "v1" }] },

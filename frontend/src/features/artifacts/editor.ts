@@ -116,9 +116,11 @@ export class ArtifactEditor {
   observed: { versionId: string; matchesDraft: boolean } | null = null;
   checking = false;
   checkFailed = false;
+  /** Head-sized UTF-8 hold so in-flight peers count against the store cap. */
+  reserved = 0;
   constructor(readonly store: ArtifactEditorStore, readonly sessionId: string, readonly artifact: Readonly<ArtifactRow>) {}
   get key(): string { return JSON.stringify([this.sessionId, this.artifact.id, this.baseline?.versionId ?? ""]); }
-  get bytes(): number { return this.baseline ? utf8(this.baseline.original) + utf8(this.text) : 0; }
+  get bytes(): number { return this.baseline ? utf8(this.baseline.original) + utf8(this.text) : this.reserved; }
   get dirty(): boolean { return this.baseline !== null && this.text !== this.baseline.original; }
   get canSave(): boolean { return this.phase === "ready" && this.baseline !== null && this.store.drafts.get(this.key) === this; }
   private emit(): void { this.store.onChange?.(); this.onChange?.(); }
@@ -130,16 +132,19 @@ export class ArtifactEditor {
     try {
       const version = this.artifact.version_id || this.artifact.latest_version_id;
       const head = await this.store.io.head(this.artifact.id, version || undefined);
-      if (head.sizeBytes * 2 > EDITOR_MAX_BYTES) throw new EditorCapacityError();
+      if (this.store.bytes + 2 * head.sizeBytes > EDITOR_MAX_BYTES) throw new EditorCapacityError();
+      this.reserved = 2 * head.sizeBytes;
       const text = await this.store.io.text(head.versionId, EDITOR_MAX_BYTES / 2, head.checksum);
       if (this.store.drafts.get(this.key) !== this) return;
-      if (this.store.bytes + 2 * utf8(text) > EDITOR_MAX_BYTES) throw new EditorCapacityError();
+      if (this.store.bytes - this.reserved + 2 * utf8(text) > EDITOR_MAX_BYTES) throw new EditorCapacityError();
       this.store.drafts.delete(this.key);
       this.baseline = Object.freeze({ sessionId: this.sessionId, artifactId: this.artifact.id, versionId: head.versionId, original: text });
       this.text = text;
+      this.reserved = 0;
       this.store.drafts.set(this.key, this);
       this.phase = "ready";
     } catch (error) {
+      this.reserved = 0;
       this.phase = "error";
       this.problem = error instanceof EditorCapacityError ? "capacity" : "load";
     }
