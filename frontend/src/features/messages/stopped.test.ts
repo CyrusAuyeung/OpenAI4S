@@ -83,7 +83,16 @@ class FakeEl {
   }
   set innerHTML(value: string) {
     this.children = [];
-    this._text = String(value).replace(/<[^>]+>/g, "");
+    // Strip to a fixed point, as the other test doubles do: a single pass over
+    // `<<b>script>` leaves `<script>`, and a test reading `.textContent` would
+    // then see markup this double claims to have removed. Not a sanitiser.
+    let text = String(value),
+      previous: string;
+    do {
+      previous = text;
+      text = text.replace(/<[^>]+>/g, "");
+    } while (text !== previous);
+    this._text = text;
   }
   get innerHTML(): string {
     return this._text;
