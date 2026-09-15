@@ -133,9 +133,13 @@ public class WslFixture {
     # Get-Command resolves an Application by name and PATHEXT, not by content.
     New-Item -ItemType File -Path (Join-Path $testRoot 'arkcli.exe') | Out-Null
     New-Item -ItemType File -Path (Join-Path $testRoot 'arkcli.cmd') | Out-Null
+    # Brackets are legal in a folder name and wildcards to Get-Command.
+    $bracketCli = Join-Path (Join-Path $testRoot 'Tools [x64]') 'arkcli.exe'
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($bracketCli)) | Out-Null
+    [IO.File]::WriteAllBytes($bracketCli, [byte[]] @())
     $script:translationFails = $false
     function ConvertTo-WslPath($Distro, $WindowsPath, [switch] $Optional) {
-        if ($WindowsPath -ne (Join-Path $testRoot 'arkcli.exe')) { throw 'wrong Windows CLI selected' }
+        if ($WindowsPath -notin @((Join-Path $testRoot 'arkcli.exe'), $bracketCli)) { throw 'wrong Windows CLI selected' }
         if (-not $Optional) { throw 'an Ark CLI translation failure must not use the package guidance' }
         if ($script:translationFails) { return '' }
         return '/windows tools/arkcli.exe'
@@ -144,14 +148,16 @@ public class WslFixture {
     $WslArkCli = Get-WslArkCliPath 'Ubuntu'
     if ($WslArkCli -ne '/windows tools/arkcli.exe') { throw 'Windows PATH CLI was not discovered' }
     $forwarded = @(Get-WslBootstrapArgs 'Ubuntu' '/b.sh' @('serve'))
-    if ($forwarded -notcontains 'OPENAI4S_ARKCLI_PATH=/windows tools/arkcli.exe') { throw 'CLI path lost argv boundary' }
+    # Discovered, not chosen: a CLI installed inside WSL must keep precedence.
+    if ($forwarded -notcontains 'OPENAI4S_ARKCLI_FALLBACK_PATH=/windows tools/arkcli.exe') { throw 'CLI path lost argv boundary' }
+    if ($forwarded -like 'OPENAI4S_ARKCLI_PATH=*') { throw 'a discovered Windows CLI overrode the WSL CLI' }
     function Start-Process {
         param($FilePath, $ArgumentList, $WindowStyle, [switch]$PassThru)
         $script:nativeLine = $ArgumentList
         return [pscustomobject]@{ HasExited = $false }
     }
     Start-Bootstrap 'Ubuntu' '/b.sh' @('serve') | Out-Null
-    if ($script:nativeLine -notlike '*"OPENAI4S_ARKCLI_PATH=/windows tools/arkcli.exe"*') { throw 'CLI path lost its native argv boundary' }
+    if ($script:nativeLine -notlike '*"OPENAI4S_ARKCLI_FALLBACK_PATH=/windows tools/arkcli.exe"*') { throw 'CLI path lost its native argv boundary' }
 
     # An optional CLI WSL cannot reach is skipped; a configured one is refused.
     $script:translationFails = $true
@@ -165,7 +171,20 @@ public class WslFixture {
     $env:OPENAI4S_ARKCLI_PATH = '/opt/ark/bin/arkcli'
     if ((Get-WslArkCliPath 'Ubuntu') -ne '/opt/ark/bin/arkcli') { throw 'explicit WSL path lost precedence' }
     $env:OPENAI4S_ARKCLI_PATH = Join-Path $testRoot 'arkcli.exe'
-    if ((Get-WslArkCliPath 'Ubuntu') -ne '/windows tools/arkcli.exe') { throw 'explicit Windows path was not translated' }
+    $WslArkCli = Get-WslArkCliPath 'Ubuntu'
+    if ($WslArkCli -ne '/windows tools/arkcli.exe') { throw 'explicit Windows path was not translated' }
+    if (@(Get-WslBootstrapArgs 'Ubuntu' '/b.sh' @('serve')) -notcontains 'OPENAI4S_ARKCLI_PATH=/windows tools/arkcli.exe') {
+        throw 'an explicit Windows CLI was not forwarded as the override'
+    }
+    $env:OPENAI4S_ARKCLI_PATH = $bracketCli
+    if ((Get-WslArkCliPath 'Ubuntu') -ne '/windows tools/arkcli.exe') { throw 'a bracketed Windows path was read as a wildcard' }
+    $npmDir = Join-Path $testRoot 'npm'
+    [IO.Directory]::CreateDirectory($npmDir) | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $npmDir 'arkcli.cmd'), [byte[]] @())
+    $env:PATH = $npmDir + ';' + $testRoot + ';' + $savedPath
+    $env:OPENAI4S_ARKCLI_PATH = 'arkcli'
+    if ((Get-WslArkCliPath 'Ubuntu') -ne '/windows tools/arkcli.exe') { throw 'an earlier npm .cmd hid arkcli.exe' }
+    $env:PATH = $testRoot + ';' + $savedPath
     foreach ($invalid in @((Join-Path $testRoot 'missing\arkcli.exe'), (Join-Path $testRoot 'arkcli.cmd'))) {
         $env:OPENAI4S_ARKCLI_PATH = $invalid
         $refused = $false

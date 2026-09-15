@@ -119,11 +119,11 @@ OpenAI4S.cmd
 
 #### 火山引擎登录
 
-在「自定义 → 模型」中配置火山模型。经 `OpenAI4S.cmd` 启动时，启动器会发现
-Windows PATH 中的 `arkcli.exe` 并转为 WSL 路径，复用该 CLI 已有的 Windows 登录。
-发现的 Windows CLI 优先于 WSL 内安装的 CLI；若要改用 WSL 内的 CLI，把
-`OPENAI4S_ARKCLI_PATH` 设为它的绝对 Linux 路径。没有 Windows `arkcli.exe`
-（或它位于 WSL 无法访问的网络共享上）时，照常发现 WSL 内安装的 CLI。
+在「自定义 → 模型」中配置火山模型。WSL 内安装的 CLI 照常被发现并保持优先。
+经 `OpenAI4S.cmd` 启动时，启动器还会发现 Windows PATH 中的 `arkcli.exe`，
+转为 WSL 路径后作为后备：只有 WSL 内找不到 CLI 时才使用，从而复用该 CLI
+已有的 Windows 登录。WSL 无法访问的 `arkcli.exe`（例如位于网络共享上）会被跳过。
+设置 `OPENAI4S_ARKCLI_PATH` 表示显式指定，优先于以上两者。
 未加入 PATH 的独立 exe 可指定完整路径：
 
 ```powershell
@@ -337,13 +337,13 @@ file byte for byte.
 
 ### Volcengine login
 
-Configure the model in Customize → Models. When started through
-`OpenAI4S.cmd`, the launcher discovers `arkcli.exe` on the Windows PATH and
-forwards its translated path, so it can reuse that CLI's existing Windows
-login. A discovered Windows CLI takes precedence over a CLI installed inside
-WSL; to use the WSL one instead, set `OPENAI4S_ARKCLI_PATH` to its absolute
-Linux path. With no Windows `arkcli.exe` (or one WSL cannot reach, such as on
-a network share), a CLI installed inside WSL is discovered normally. For a
+Configure the model in Customize → Models. A CLI installed inside WSL is
+discovered normally and keeps precedence. When started through
+`OpenAI4S.cmd`, the launcher also discovers `arkcli.exe` on the Windows PATH
+and forwards its translated path as a fallback, used only when no CLI is found
+inside WSL, so it can reuse that CLI's existing Windows login. An `arkcli.exe`
+WSL cannot reach, such as one on a network share, is skipped. Setting
+`OPENAI4S_ARKCLI_PATH` chooses a CLI explicitly and overrides both. For a
 standalone executable outside PATH:
 
 ```powershell

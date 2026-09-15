@@ -579,22 +579,36 @@ function Get-WslArkCliPath([string] $Distro) {
     # WSL cannot reach it (a UNC share it does not mount, for example).
     $configured = $env:OPENAI4S_ARKCLI_PATH
     if ($configured -and $configured.StartsWith('/')) { return $configured }
-    $name = if ($configured) { $configured } else { 'arkcli.exe' }
-    $command = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command -and $command.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
-        $translated = ConvertTo-WslPath $Distro $command.Source -Optional
+    $source = ''
+    if ($configured -and $configured.IndexOfAny([char[]] @('\', '/', ':')) -ge 0) {
+        # A path is checked literally: Get-Command reads `[` and `]` as
+        # wildcards, and both are legal in a Windows folder name.
+        try {
+            if (Test-Path -LiteralPath $configured -PathType Leaf) { $source = $configured }
+        } catch { }
+    } else {
+        # The first arkcli.exe in PATH order, not the first Application: an
+        # npm arkcli.cmd earlier on PATH would otherwise hide it.
+        $name = if ($configured) { $configured } else { 'arkcli.exe' }
+        $command = Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) } |
+            Select-Object -First 1
+        if ($command) { $source = $command.Source }
+    }
+    if ($source -and $source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
+        $translated = ConvertTo-WslPath $Distro $source -Optional
         if ($translated) { return $translated }
         if (-not $configured) {
-            Write-Host "  note: $($command.Source) is not reachable from WSL; not using it for Volcengine login." -ForegroundColor DarkGray
+            Write-Host "  note: $source is not reachable from WSL; not using it for Volcengine login." -ForegroundColor DarkGray
             return ''
         }
-        Stop-WithGuidance "WSL cannot reach OPENAI4S_ARKCLI_PATH: $($command.Source)" @(
+        Stop-WithGuidance "WSL cannot reach OPENAI4S_ARKCLI_PATH: $source" @(
             'Copy arkcli.exe to a local drive, or install the CLI inside WSL',
             'and set OPENAI4S_ARKCLI_PATH to its absolute Linux path.'
         )
     }
     if ($configured) {
-        Stop-WithGuidance 'OPENAI4S_ARKCLI_PATH does not name an installed executable.' @(
+        Stop-WithGuidance "OPENAI4S_ARKCLI_PATH does not name an installed executable: $configured" @(
             'Use the full Windows path to arkcli.exe, or an absolute Linux',
             'path to a CLI installed inside the selected WSL distribution.'
         )
@@ -611,7 +625,12 @@ function Get-WslBootstrapArgs([string] $Distro, [string] $BootstrapLinux, [strin
     if ($WslDataDir) {
         $wslArgs += "OPENAI4S_DATA_DIR=$WslDataDir"
     }
-    if ($WslArkCli) { $wslArgs += "OPENAI4S_ARKCLI_PATH=$WslArkCli" }
+    if ($WslArkCli) {
+        # Only an explicit choice overrides a CLI installed inside WSL; one the
+        # launcher merely found on the Windows PATH is the daemon's fallback.
+        $arkVariable = if ($env:OPENAI4S_ARKCLI_PATH) { 'OPENAI4S_ARKCLI_PATH' } else { 'OPENAI4S_ARKCLI_FALLBACK_PATH' }
+        $wslArgs += "$arkVariable=$WslArkCli"
+    }
     $wslArgs += "OPENAI4S_FAKE_IP_DNS_MODE=$FakeIpDnsMode"
     if ($PypiIndexOff) {
         $wslArgs += 'OPENAI4S_PYPI_INDEX_URL=off'
