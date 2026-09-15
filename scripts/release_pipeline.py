@@ -130,6 +130,66 @@ def _sandbox_posture(
 SBOM_NAME = "sbom.cdx.json"
 
 
+#: Where the default Web UI shell (`webui/dist/index.html`) loads its bundle
+#: from. The installed-daemon smoke used to look for the legacy escape-hatch
+#: shell's `id="dashboard"` + `static/app.js`; once the Vite shell became the
+#: default, every build failed smoke while its unit test -- serving a
+#: hand-written legacy page -- stayed green.
+DEFAULT_SHELL_ASSET_PREFIX = "/static/dist/assets/"
+
+
+def default_shell_assets(document: bytes) -> tuple[list[str], list[str]]:
+    """The module entrypoints and stylesheets a served shell names from dist.
+
+    Parsed rather than byte-matched, because the bundle names are content
+    hashes that change on every frontend build. Only same-origin, root-relative
+    paths under :data:`DEFAULT_SHELL_ASSET_PREFIX` count: a shell that points
+    its entrypoint anywhere else is not the shell this wheel ships.
+    """
+    import posixpath
+    from html.parser import HTMLParser
+
+    def shipped(ref: str, suffix: str) -> bool:
+        try:
+            parts = urllib.parse.urlsplit(ref)
+        except ValueError:
+            return False
+        return (
+            not parts.scheme
+            and not parts.netloc
+            and not parts.query
+            and parts.path.startswith(DEFAULT_SHELL_ASSET_PREFIX)
+            and parts.path.endswith(suffix)
+            and posixpath.normpath(parts.path) == parts.path
+        )
+
+    class Assets(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.scripts: list[str] = []
+            self.styles: list[str] = []
+
+        def handle_starttag(
+            self, tag: str, attrs: list[tuple[str, str | None]]
+        ) -> None:
+            values = {name.lower(): (value or "").strip() for name, value in attrs}
+            if tag == "script" and values.get("type", "").lower() == "module":
+                if shipped(values.get("src", ""), ".js"):
+                    self.scripts.append(values["src"])
+            elif (
+                tag == "link" and "stylesheet" in values.get("rel", "").lower().split()
+            ):
+                if shipped(values.get("href", ""), ".css"):
+                    self.styles.append(values["href"])
+
+    parser = Assets()
+    # `HTMLParser` is tolerant by design: malformed markup yields fewer tags,
+    # never an exception, and fewer tags fails the shell check closed.
+    parser.feed(document.decode("utf-8", "replace"))
+    parser.close()
+    return list(dict.fromkeys(parser.scripts)), list(dict.fromkeys(parser.styles))
+
+
 def dmg_present(assets: Sequence[Path]) -> bool:
     """Whether this release carries a macOS image at all.
 
@@ -983,7 +1043,8 @@ class Pipeline:
             )
         if self.dry_run:
             return StepResult("test", True, "would run the offline suite")
-        completed = self._run([sys.executable, "-m", "pytest", "-q", "-x"])
+        # No `-q`: addopts already passes one, and a second hides the summary.
+        completed = self._run([sys.executable, "-m", "pytest", "-x"])
         if completed.returncode != 0:
             raise ReleaseError(f"the offline suite failed ({completed.returncode})")
         return StepResult("test", True, "offline suite passed")
@@ -1128,6 +1189,9 @@ class Pipeline:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         env = {**env, "OPENAI4S_PORT": str(port), "OPENAI4S_HOST": "127.0.0.1"}
+        # Smoke judges the shell users get by default. An exported escape hatch
+        # on the release machine would otherwise swap in the frozen legacy page.
+        env.pop("OPENAI4S_WEBUI", None)
         # `serve` is foreground by design, so it is started as a child and
         # stopped through the CLI's own pidfile — the same path a user takes.
         daemon = subprocess.Popen(
@@ -1138,10 +1202,11 @@ class Pipeline:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        served = ""
         try:
             deadline = time.monotonic() + 90
             last = ""
-            while time.monotonic() < deadline:
+            while not served and time.monotonic() < deadline:
                 if daemon.poll() is not None:
                     output = (daemon.stdout.read() or b"") if daemon.stdout else b""
                     raise ReleaseError(
@@ -1155,28 +1220,87 @@ class Pipeline:
                         env,
                         f"http://127.0.0.1:{port}/",
                     )
-                    return f"served authenticated Web UI on 127.0.0.1:{port}"
+                    served = f"served authenticated Web UI on 127.0.0.1:{port}"
                 except ReleaseError as error:
                     # Deliberately contains no token or authenticated URL. The
                     # CLI bootstrap URL is a credential and must not leak into
                     # a release log just because readiness took another tick.
                     last = str(error)
-                time.sleep(1)
-            raise ReleaseError(f"the installed daemon never served a page: {last}")
+                    time.sleep(1)
+            if not served:
+                raise ReleaseError(f"the installed daemon never served a page: {last}")
         finally:
-            subprocess.run(
-                [str(python), "-I", "-m", "openai4s", "stop"],
-                cwd=str(root),
-                env=env,
-                capture_output=True,
-                timeout=120,
-            )
+            # Always stopped. On a failure path the stop's own verdict must not
+            # replace the error that explains why the smoke failed, so it is
+            # only enforced below, once the daemon has actually served.
+            stop_failure = self._stop_installed_daemon(python, root, env, daemon)
+        if stop_failure:
+            raise ReleaseError(stop_failure)
+        return served
+
+    @staticmethod
+    def _stop_installed_daemon(
+        python: Path,
+        root: Path,
+        env: dict[str, str],
+        daemon: subprocess.Popen,
+    ) -> str:
+        """Stop the smoke daemon through the installed CLI; return why it failed.
+
+        An empty string means `openai4s stop` exited 0 and the daemon really
+        exited. The daemon is this pipeline's own child, so nothing else can
+        reap it: while `stop` polls for it to exit, an unreaped daemon lingers
+        as a zombie, which a pid-existence check reads as still running. The
+        smoke used to block in `subprocess.run(stop)` meanwhile, so every
+        release smoke sat out stop's whole timeout, got exit 2, and threw the
+        status away. Reaping while `stop` runs keeps the pipeline from
+        manufacturing that zombie; checking the status makes the claim a gate.
+        """
+        failure = ""
+        # A file, not a pipe: nothing reads the output until stop has exited,
+        # and a filled pipe would block it forever.
+        with tempfile.TemporaryFile() as output:
+            try:
+                stopper = subprocess.Popen(
+                    [str(python), "-I", "-m", "openai4s", "stop"],
+                    cwd=str(root),
+                    env=env,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+            except OSError as error:
+                stopper = None
+                failure = f"the installed CLI could not run `openai4s stop`: {error}"
+            if stopper is not None:
+                deadline = time.monotonic() + 120
+                returncode = stopper.poll()
+                while returncode is None and time.monotonic() < deadline:
+                    daemon.poll()  # reap the daemon the moment it exits
+                    time.sleep(0.05)
+                    returncode = stopper.poll()
+                if returncode is None:
+                    stopper.kill()
+                    stopper.wait()
+                    failure = "`openai4s stop` did not return within 120s"
+                elif returncode != 0:
+                    output.seek(0)
+                    said = output.read().decode("utf-8", "replace").strip()
+                    failure = f"`openai4s stop` exited {returncode}: {said[-800:]}"
+        if daemon.poll() is None:
+            if not failure:
+                # stop saw the pid exit; the reap may be a poll interval behind.
+                try:
+                    daemon.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    failure = "`openai4s stop` exited 0 but the daemon kept running"
             if daemon.poll() is None:
                 daemon.terminate()
-            try:
-                daemon.wait(timeout=30)
-            except subprocess.TimeoutExpired:  # pragma: no cover
-                daemon.kill()
+                try:
+                    daemon.wait(timeout=30)
+                except subprocess.TimeoutExpired:  # pragma: no cover
+                    daemon.kill()
+                    daemon.wait()
+        return failure
 
     @staticmethod
     def _probe_installed_daemon(
@@ -1197,7 +1321,10 @@ class Pipeline:
         The installed CLI owns the token-file contract, so ask its ``url``
         command for the browser bootstrap URL rather than duplicating the
         filename here. A cookie-aware stdlib opener follows the 303 hand-off,
-        then loads both the installed HTML shell and its JavaScript entrypoint.
+        then loads the HTML shell the daemon serves *by default* and every
+        dist entrypoint and stylesheet that shell names. The legacy
+        ``OPENAI4S_WEBUI=legacy`` shell does not pass: a smoke that judged a
+        page users never get by default would be a dishonest gate.
         """
         import http.cookiejar
         import urllib.error
@@ -1266,45 +1393,66 @@ class Pipeline:
         opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
         )
+
+        def load(url: str) -> tuple[int, str, str, bytes]:
+            with opener.open(url, timeout=5) as response:
+                return (
+                    getattr(response, "status", 0),
+                    str(response.headers.get("Content-Type", "")).lower(),
+                    response.geturl(),
+                    response.read(),
+                )
+
         try:
             # The first GET exchanges ?token= for an HttpOnly cookie and follows
             # the 303 to the credential-free root page.
-            with opener.open(authenticated_url, timeout=5) as response:
-                html_status = getattr(response, "status", 0)
-                html_type = str(response.headers.get("Content-Type", "")).lower()
-                final_url = response.geturl()
-                html = response.read()
-            with opener.open(
-                urllib.parse.urljoin(base_url, "static/app.js"), timeout=5
-            ) as response:
-                script_status = getattr(response, "status", 0)
-                script_type = str(response.headers.get("Content-Type", "")).lower()
-                script = response.read()
+            html_status, html_type, final_url, html = load(authenticated_url)
         except (OSError, urllib.error.URLError):
             # Never include the exception: HTTPError renders its URL, and the
             # bootstrap URL contains the daemon credential.
             raise ReleaseError("authenticated installed Web UI is not ready") from None
 
+        scripts, styles = default_shell_assets(html)
         if (
             not (200 <= html_status < 300)
             or "text/html" not in html_type
             or "token=" in final_url
             or b"<title>OpenAI4S</title>" not in html
-            or b'id="dashboard"' not in html
-            or b"static/app.js" not in html
+            or not scripts
         ):
             raise ReleaseError("installed daemon did not serve the Web UI shell")
-        # The entrypoint is judged by serving facts: status, a JavaScript
-        # content type, a non-empty body, and the shell above actually
-        # referencing it. Never by source literals — asserting fragments like
-        # `"use strict";` here turned an app.js style choice into a release
-        # failure whose message points at packaging.
-        if (
-            not (200 <= script_status < 300)
-            or "javascript" not in script_type
-            or not script.strip()
+
+        # Each asset is judged by serving facts: status, content type, a
+        # non-empty body, and the shell above actually naming it. Never by
+        # source literals — asserting fragments like `"use strict";` turned an
+        # app.js style choice into a release failure that pointed at packaging.
+        # The URLs are the shell's own, fetched through the same cookie jar, so
+        # a wheel that ships `dist/index.html` without its bundle fails here.
+        for refs, kind, failure in (
+            (
+                scripts,
+                "javascript",
+                "installed daemon did not serve the Web UI application",
+            ),
+            (
+                styles,
+                "text/css",
+                "installed daemon did not serve the Web UI stylesheet",
+            ),
         ):
-            raise ReleaseError("installed daemon did not serve the Web UI application")
+            for ref in refs:
+                try:
+                    status, content_type, _url, body = load(
+                        urllib.parse.urljoin(base_url, ref)
+                    )
+                except (OSError, urllib.error.URLError):
+                    raise ReleaseError(failure) from None
+                if (
+                    not (200 <= status < 300)
+                    or kind not in content_type
+                    or not body.strip()
+                ):
+                    raise ReleaseError(failure)
 
     def step_sbom(self) -> StepResult:
         if self.dry_run:

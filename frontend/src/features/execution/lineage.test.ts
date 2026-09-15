@@ -5,6 +5,7 @@ import { provMode, provSub } from "../../stores/ui";
 import { resetStoreFields } from "../../stores/signal-field";
 import { syncArtifactVersion } from "../artifacts/cache";
 import { filesT } from "../artifacts/copy";
+import { t } from "../../i18n/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
   asLineage,
@@ -241,4 +242,79 @@ it("an exact version without a recorded environment is an expected state, not a 
     await vi.waitFor(() => expect(walk(view).some((node) => node.textContent === filesT("prov.env.noSnapshot"))).toBe(true));
     expect(walk(view).some((node) => node.textContent.includes("req-9"))).toBe(false);
   } finally { setExecutionFetch(null); vi.unstubAllGlobals(); resetStoreFields(); }
+});
+
+
+/**
+ * UPG5-02. A snapshot whose packages were never read -- a 0.2.x Python kernel
+ * recorded by its `repl` mode, an interpreter the daemon could not read, a
+ * remote worker -- carries `packages: []`, `package_count: 0` and a
+ * `packages_unavailable` reason. The panel rendered that as "Packages 0" and
+ * "No packages to report." right beside "the package list is unknown".
+ */
+const LEGACY_REPL_ENV = {
+  kind: "python",
+  environment_name: "base",
+  package_count: 0,
+  packages: [],
+  packages_unavailable:
+    "openai4s 0.2.x recorded this Python kernel by its 'repl' mode and did not read its packages; the package list is unknown",
+  source: "captured",
+  generation_confidence: "verified",
+};
+
+async function renderEnvironmentPanel(env: Record<string, unknown>): Promise<{ chips: string[]; empty: string[]; notes: string[] }> {
+  resetStoreFields();
+  vi.stubGlobal("document", { createElement: () => new ProvenanceNode() });
+  const pinned = { id: "a", version_id: "v1", _exactVersion: true };
+  dockArtifact.value = pinned; provMode.value = true; provSub.value = "environment";
+  setExecutionFetch(async () => new Response(JSON.stringify(env)));
+  try {
+    const view = new ProvenanceNode();
+    renderProvenanceInto(view as unknown as HTMLElement, pinned);
+    const walk = (node: ProvenanceNode): ProvenanceNode[] => [node, ...node.children.flatMap(walk)];
+    await vi.waitFor(() => expect(walk(view).some((node) => node.className === "env-chips")).toBe(true));
+    const nodes = walk(view);
+    return {
+      chips: nodes.filter((n) => n.className === "env-chip").map((n) => n.children.map((c) => c.textContent).join(" ")),
+      empty: nodes.filter((n) => n.className === "dock-empty").map((n) => n.textContent),
+      notes: nodes.filter((n) => n.className.startsWith("env-src")).map((n) => n.textContent),
+    };
+  } finally { setExecutionFetch(null); vi.unstubAllGlobals(); resetStoreFields(); }
+}
+
+describe("a package list that was never read is unknown, not empty", () => {
+  it("envPackageCount has no count to give when the record says the list is unknown", () => {
+    expect(envPackageCount(LEGACY_REPL_ENV)).toBeNull();
+    expect(envPackageCount({ package_count: 0, packages: [], packages_unavailable: "could not read distributions from '/x/python'" })).toBeNull();
+  });
+
+  it("the legacy 0.2.x panel shows neither 'Packages 0' nor 'No packages to report.'", async () => {
+    const out = await renderEnvironmentPanel(LEGACY_REPL_ENV);
+    expect(out.chips).not.toContain("Packages 0");
+    expect(out.chips).toContain("Packages " + filesT("prov.env.packagesUnknown"));
+    expect(out.empty).not.toContain(t("prov.env.noPackages"));
+    // The reason is still on the panel.
+    expect(out.notes.some((n) => n.includes("the package list is unknown"))).toBe(true);
+  });
+
+  it("a Python snapshot whose list really is empty still says so", async () => {
+    const out = await renderEnvironmentPanel({ kind: "python", package_count: 0, packages: [], source: "captured" });
+    expect(out.chips).toContain("Packages 0");
+    expect(out.empty).toContain(t("prov.env.noPackages"));
+  });
+
+  it("an R kernel's Python package count does not apply rather than being zero", async () => {
+    const out = await renderEnvironmentPanel({
+      kind: "r",
+      package_count: 0,
+      packages: [],
+      packages_unavailable: "r kernel: Python distribution metadata does not apply",
+      source: "captured",
+    });
+    expect(out.chips).not.toContain("Packages 0");
+    expect(out.chips).toContain("Packages " + filesT("prov.env.packagesNotApplicable"));
+    expect(out.empty).not.toContain(t("prov.env.noPackages"));
+    expect(out.notes.some((n) => n.includes("does not apply"))).toBe(true);
+  });
 });
