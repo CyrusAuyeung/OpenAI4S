@@ -335,7 +335,14 @@ and `SHA256SUMS`, and no wheel, sdist, SBOM, provenance or evidence bundle.
 
 A version number can be uploaded to PyPI only once. If `finalize` fails after
 the PyPI job has succeeded, re-run the failed job instead of dispatching a new
-build.
+build. A new `publish=true` dispatch is refused by the guard once PyPI has the
+version: the rebuild is not byte-identical, and staging it would overwrite the
+draft's assets with files PyPI does not have.
+
+The guard job holds `contents: write` although it only reads. GitHub shows a
+draft release only to a caller with push access, so with the workflow's
+read-only token the guard reported an existing draft as missing. That is how
+v0.3.0's first publish dispatch stopped.
 
 The workflow uses GitHub/PyPI OIDC and does not accept a long-lived PyPI token.
 Its PyPI job also creates PyPI's default provenance attestations through the

@@ -1735,6 +1735,35 @@ def test_a_complete_release_publishes_last(assets):
     assert calls[-1][-1] == "--draft=false", "publishing is the final act"
 
 
+def test_the_sealed_report_is_a_snapshot_not_a_verdict(assets):
+    """`evidence` runs before `checksums`, `draft`, `upload` and `publish`.
+
+    The staging job's bundle recorded the end-of-run verdict anyway, with
+    `ok: true` and `published: true` and all thirteen steps planned, for a run
+    that had uploaded nothing yet. That record is attached to the release and
+    kept for 90 days even when the run later fails at PyPI. The stdout
+    report was right all along, so this reads the zip.
+    """
+    import zipfile
+
+    _signed_dmg(assets)
+    staged = _pipeline(
+        assets, mode="release", stop_after="reverify", gh=_gh_for(assets)
+    ).run()
+    assert staged["ok"] is True and staged["published"] is False, staged
+
+    with zipfile.ZipFile(assets / "openai4s-0.2.0-evidence.zip") as archive:
+        sealed = json.loads(archive.read("release-report.json"))
+    assert sealed["ok"] is None
+    assert sealed["published"] is False
+    assert sealed["sealed_at"] == "evidence"
+    assert sealed["stopped_at"] is None
+    assert sealed["planned"] == list(STEPS[: STEPS.index("reverify") + 1])
+    assert [step["step"] for step in sealed["steps"]] == list(
+        STEPS[: STEPS.index("evidence")]
+    )
+
+
 def _write_checksums(assets: Path) -> None:
     """A SHA256SUMS covering the uploaded assets, as step_checksums writes it.
 

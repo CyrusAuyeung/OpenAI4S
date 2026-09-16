@@ -877,6 +877,111 @@ def test_publishing_requires_an_existing_draft_before_anything_runs():
         assert "guard" in block, f"{job.strip()} may run without the draft check"
 
 
+def test_every_job_that_reads_the_draft_can_see_it():
+    """A draft release is visible only to a caller with push access.
+
+    The workflow-level token is `contents: read`, and under it `gh release view`
+    answers "release not found" for an existing draft. The guard inherited that
+    token, so the first real publish dispatch (v0.3.0, run 35087359578)
+    refused a correct draft. The draft-first design was never reachable. Every
+    job that looks the draft up needs `contents: write`. The guard gets it
+    only because it runs no repository code, which is held here too.
+    """
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text("utf-8")
+    )
+    assert workflow["permissions"] == {"contents": "read"}
+    readers = {
+        name: job
+        for name, job in workflow["jobs"].items()
+        if any(
+            "gh release" in str(step.get("run") or "")
+            or "release_pipeline.py" in str(step.get("run") or "")
+            for step in job.get("steps") or []
+        )
+    }
+    assert {"guard", "attach", "finalize"} <= set(readers), sorted(readers)
+    for name, job in readers.items():
+        assert (job.get("permissions") or {}).get(
+            "contents"
+        ) == "write", f"{name} reads the draft with a token that cannot see it"
+    guard_steps = workflow["jobs"]["guard"]["steps"]
+    assert all("uses" not in step for step in guard_steps), (
+        "the guard holds contents: write, so it must not check out or run "
+        "repository code"
+    )
+
+
+def _run_guard(tmp_path, *, publish, pypi, draft=True):
+    """Execute the guard's own shell step against a fake `gh` and `curl`."""
+    yaml = pytest.importorskip("yaml")
+    if shutil.which("jq") is None or shutil.which("bash") is None:
+        pytest.skip("the guard step needs bash and jq")
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text("utf-8")
+    )
+    (step,) = workflow["jobs"]["guard"]["steps"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    release = json.dumps({"isDraft": draft, "isPrerelease": False})
+    (bin_dir / "gh").write_text(f"#!/bin/sh\necho '{release}'\n", encoding="utf-8")
+    curl = "exit 7" if pypi == "unreachable" else f"printf '%s' '{pypi}'"
+    (bin_dir / "curl").write_text(
+        f'#!/bin/sh\necho "$@" >> "{tmp_path}/curl.args"\n{curl}\n', encoding="utf-8"
+    )
+    for tool in ("gh", "curl"):
+        (bin_dir / tool).chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "TAG": "v9.8.7",
+        "PUBLISH": "true" if publish else "false",
+        "PYPI_ONLY": "false" if publish else "true",
+        "GH_TOKEN": "unused",
+        "GH_REPO": "owner/repo",
+    }
+    return subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_the_guard_refuses_to_stage_a_version_pypi_already_has(tmp_path):
+    """A second dispatch would clobber the draft with bytes PyPI lacks.
+
+    The build is not byte-reproducible and `attach` uploads with `--clobber`.
+    Once PyPI has the version, the pypi job then fails on the reused filename
+    and `--only publish` refuses the mismatch, leaving a release no retry can
+    finish. Only a definite 404 may let staging start.
+    """
+    fresh = _run_guard(tmp_path / "fresh", publish=True, pypi="404")
+    assert fresh.returncode == 0, fresh.stdout + fresh.stderr
+    assert "pypi.org/pypi/openai4s/9.8.7/json" in (
+        tmp_path / "fresh" / "curl.args"
+    ).read_text("utf-8")
+
+    for case, answer in (
+        ("taken", "200"),
+        ("broken", "503"),
+        ("offline", "unreachable"),
+    ):
+        refused = _run_guard(tmp_path / case, publish=True, pypi=answer)
+        assert refused.returncode != 0, (case, refused.stdout)
+    taken = _run_guard(tmp_path / "taken2", publish=True, pypi="200")
+    assert "already on PyPI" in taken.stdout
+    assert "Re-run the failed finalize job" in taken.stdout
+
+    # `pypi_only` exists for a public release whose PyPI upload never
+    # happened; it is not asked, and PyPI answers for it at upload time.
+    recovery = _run_guard(tmp_path / "recovery", publish=False, pypi="200", draft=False)
+    assert recovery.returncode == 0, recovery.stdout + recovery.stderr
+    assert not (tmp_path / "recovery" / "curl.args").exists()
+
+
 def test_publishing_refuses_a_prerelease_draft():
     """A stable tag must not publish a GitHub Release still marked prerelease.
 
