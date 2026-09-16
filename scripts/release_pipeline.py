@@ -1519,7 +1519,7 @@ class Pipeline:
         """
         if self.dry_run:
             return StepResult("evidence", True, "would seal the evidence bundle")
-        payload = self.report(planned=STEPS, sealing=True)
+        payload = self.report(planned=self.planned_steps(), sealing=True)
         carried = [
             path
             for path in (
@@ -2297,6 +2297,15 @@ class Pipeline:
             "steps": [result.public() for result in self.results],
         }
         if sealing:
+            # A seal is a snapshot, taken before `checksums`, `draft`, `upload`
+            # and `publish` have run. The end-of-run verdict above does not
+            # exist yet: sealed as-is, the bundle said `ok: true` and
+            # `published: true` for a run that had uploaded nothing, and it
+            # stayed that way in the 90-day artifact of a run that later
+            # failed at PyPI.
+            document["ok"] = None
+            document["published"] = False
+            document["sealed_at"] = "evidence"
             # Only when sealing: `_frozen_sha` runs git and can raise, and the
             # ordinary report is also built on the failure path where raising
             # would replace the real reason with a git error.
