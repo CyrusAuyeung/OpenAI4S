@@ -10,6 +10,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
+| `ChampionZhong.png` | 贡献者 `ChampionZhong` 的可直接渲染头像。 |
 | `ClarenceYC.png` | 贡献者 `ClarenceYC` 的可直接渲染头像。 |
 | `Devin-jun.png` | 贡献者 `Devin-jun` 的可直接渲染头像。 |
 | `EQSTLab.png` | 贡献者 `EQSTLab` 的可直接渲染头像。 |

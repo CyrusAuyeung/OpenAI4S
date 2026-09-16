@@ -282,7 +282,11 @@ contract.
   error", "code": "internal_error", "status", "request_id"}`, and the original
   goes to the redacted `unhandled_exception` diagnostic that
   `diagnostics.build_bundle` collects. A `GatewayError`'s message is
-  author-written and is passed through unchanged. Quote `request_id` in a
+  author-written and is passed through unchanged. One exception class is
+  known rather than unhandled: a secret broker that failed closed (no
+  keychain, libsecret or DPAPI, and no environment backend) answers `503`
+  with `"code": "secret_store_unavailable"` and a fixed sentence naming the
+  ways to configure a store, never the backend's own error text. Quote `request_id` in a
   support report: it is this daemon's own correlation id, never an upstream
   provider's.
 - Some handlers still return errors **inside a 200 body** instead of an error

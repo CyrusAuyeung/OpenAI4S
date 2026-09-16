@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -137,6 +138,25 @@ def resolve_profile_key(store: Any, profile: Mapping[str, Any]) -> str:
         return ""
 
 
+def _network_failure(error: BaseException | None) -> bool:
+    """A connect, DNS or socket failure: no HTTP status came back.
+
+    `transport.py` wraps every `URLError` in a `TransportError` with no
+    `status`, and that is not an `OSError`, so an `isinstance` check alone
+    missed every refused connection, unknown host and connect timeout. The
+    probe reported them as "internal error" and then sent its second request
+    to an endpoint that had just failed to answer the first. The gateway's
+    turn path (`_friendly_error`) already reads a status-less transport error
+    this way. The only other status-less transport errors are a stream read
+    that broke mid-reply and a caller's cancel, which the probe never sends.
+    """
+    from openai4s.llm.models import TransportError
+
+    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return True
+    return isinstance(error, TransportError) and error.status is None
+
+
 def _probe_detail(error: Exception, public: dict) -> str:
     """What a failed probe may say, chosen from controlled signals only.
 
@@ -192,10 +212,26 @@ def _probe_detail(error: Exception, public: dict) -> str:
         return (
             "the provider returned a server error; this is not a configuration problem"
         )
-    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+    if _network_failure(error):
         return (
-            "the endpoint could not be reached; check the base URL and this "
-            "machine's network access"
+            "the endpoint could not be reached, or the connection dropped; "
+            "check the base URL and this machine's network access"
+        )
+    if status == 408:
+        return (
+            "the endpoint timed out answering the probe; check this machine's "
+            "network access and try again"
+        )
+    if isinstance(status, int) and 400 <= status < 500:
+        # The status is a transport-set integer, never provider prose.
+        return (
+            f"the provider rejected the probe request (HTTP {status}); check "
+            "the model name and the protocol selected for this profile"
+        )
+    if isinstance(error, json.JSONDecodeError):
+        return (
+            "the endpoint answered, but not like a model API; check the base "
+            "URL (OpenAI-compatible endpoints usually end in /v1)"
         )
     # Unknown provenance. `public_exception` already chose the generic sentence
     # and wrote the original to the diagnostic log under its own surface.
@@ -602,7 +638,7 @@ class ModelProfileService:
 
         status = getattr(last_error, "status", None) if last_error else None
         stop_after_first = last_error is not None and (
-            isinstance(last_error, (TimeoutError, ConnectionError, OSError))
+            _network_failure(last_error)
             or status in (401, 403, 429)
             or (isinstance(status, int) and 500 <= status < 600)
         )
