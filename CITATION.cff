@@ -2,10 +2,12 @@
 #
 # GitHub renders `preferred-citation` when it is present, so that block is
 # the arXiv paper and must match the BibTeX in both README halves;
-# tests/test_citation_metadata.py holds the three copies together.
-# `repository-code` stays at the top level only: GitHub's formatter
-# (ruby-cff) prefers it over `url`, so inside `preferred-citation` it
-# would replace the arXiv link with the repository link.
+# tests/test_citation_metadata.py holds the three copies together, and the
+# software metadata below to pyproject.toml.
+# `repository-code` stays at the top level only: ruby-cff, the library GitHub
+# Docs names, prefers it over `url` for the BibTeX link, so inside
+# `preferred-citation` it would replace the arXiv link with the repository
+# link.
 # There is deliberately no `version` or `date-released`: this file is not
 # one of the version pins bumped at release time, and a stale version is
 # worse than none.
