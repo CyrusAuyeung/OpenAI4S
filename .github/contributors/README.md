@@ -12,6 +12,7 @@ directory.
 
 | File | Purpose |
 | --- | --- |
+| `ChampionZhong.png` | Render-ready avatar for contributor `ChampionZhong`. |
 | `ClarenceYC.png` | Render-ready avatar for contributor `ClarenceYC`. |
 | `Devin-jun.png` | Render-ready avatar for contributor `Devin-jun`. |
 | `EQSTLab.png` | Render-ready avatar for contributor `EQSTLab`. |

@@ -56,7 +56,12 @@ EXCLUDE = {"github-actions[bot]", "dependabot[bot]", "actions-user"}
 # links every past commit. This entry carries the recognition until then, and
 # `include_recognized_contributors` drops it automatically the moment the API
 # starts returning the login, so nothing has to be cleaned up afterwards.
-RECOGNIZED_CONTRIBUTORS = ("EQSTLab", "difficulttopickaname")
+#
+# `ChampionZhong` found and fixed the first-run wizard's fail-closed secret
+# store read (#165). That commit lands, with its authorship, through #164. The
+# entry keeps the recognition on the wall until the API lists the login, which
+# it then does for the same reason as above.
+RECOGNIZED_CONTRIBUTORS = ("EQSTLab", "difficulttopickaname", "ChampionZhong")
 _UA = {"User-Agent": "openai4s-contributors-script"}
 
 
