@@ -733,7 +733,7 @@ def test_installed_release_smoke_exercises_real_skill_discovery(tmp_path):
         smoke._check_discoverable_catalog(cfg, 2)
 
 
-def test_installed_release_smoke_requires_eleven_workflows():
+def test_installed_release_smoke_requires_the_frozen_workflow_count():
     smoke = _load_script("release_import_smoke")
     workflows = [SimpleNamespace(id="tool-bringup")]
     workflows.extend(
@@ -741,8 +741,25 @@ def test_installed_release_smoke_requires_eleven_workflows():
         for index in range(smoke.MIN_BENCHMARK_WORKFLOWS - 2)
     )
 
-    with pytest.raises(RuntimeError, match="at least 11 required"):
+    with pytest.raises(
+        RuntimeError, match=f"at least {smoke.MIN_BENCHMARK_WORKFLOWS} required"
+    ):
         smoke._check_workflow_catalog(workflows)
+
+
+def test_installed_release_smoke_floor_follows_the_frozen_catalog():
+    """The floor is a commitment about the tree, not a number of its own.
+
+    `MIN_BENCHMARK_WORKFLOWS` was set when the suite had eleven workflows and
+    stayed there when `codebase-mode` and `delegation` took it to thirteen, so
+    a wheel that lost both would still clear the only check that runs against
+    an installed package. Deriving the expectation from `load_workflows()`
+    makes the next workflow addition move the floor too.
+    """
+    from openai4s.benchmark import load_workflows
+
+    smoke = _load_script("release_import_smoke")
+    assert smoke.MIN_BENCHMARK_WORKFLOWS == len(load_workflows())
 
 
 def test_installed_release_smoke_requires_tool_bringup_workflow():
