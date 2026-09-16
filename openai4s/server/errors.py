@@ -163,6 +163,22 @@ def public_failure(payload: object, status: int, request_id: str | None) -> obje
 #: that destroys the good ones.
 INTERNAL_ERROR_MESSAGE = "internal error"
 
+#: The public sentence for a secret broker that failed closed. Fixed text, so
+#: nothing from the refused backend's self-test reaches the client.
+SECRET_STORE_UNAVAILABLE_MESSAGE = (
+    "no secure credential store is available on this host, so credentials "
+    "cannot be saved or read; use a system keychain, supply them through the "
+    "daemon's environment (OPENAI4S_SECRET_ENV=1), or set "
+    "OPENAI4S_SECRET_STORE=plaintext (see docs/security.md)"
+)
+
+
+def _secret_store_unavailable(exc: BaseException) -> bool:
+    from openai4s.security.secret_broker import SecretStoreUnavailable
+
+    return isinstance(exc, SecretStoreUnavailable)
+
+
 #: Long enough to identify a failure, short enough that a diagnostic cannot
 #: become a channel for the data the exception was carrying.
 _DIAGNOSTIC_CHARS = 600
@@ -409,6 +425,17 @@ def public_exception(
     if isinstance(exc, GatewayError):
         return _enriched(gateway_error_payload(exc), exc.code, request_id), exc.code
     record_diagnostic(exc, surface=surface, request_id=request_id)
+    if _secret_store_unavailable(exc):
+        # A known refusal, not an unknown failure: the broker fails closed on
+        # a host with no keychain, libsecret or DPAPI. As "internal error" it
+        # told the operator nothing, on exactly the headless servers and
+        # containers where `auto` meets it. The exception's own text is not
+        # used, because its detail can quote a backend's self-test output.
+        body = {
+            "error": SECRET_STORE_UNAVAILABLE_MESSAGE,
+            "code": "secret_store_unavailable",
+        }
+        return _enriched(body, 503, request_id), 503
     status = int(status)
     payload = {
         "error": INTERNAL_ERROR_MESSAGE,
@@ -449,6 +476,7 @@ def _enriched(payload: dict, status: int, request_id: str) -> dict:
 __all__ = [
     "ERROR_CODES",
     "INTERNAL_ERROR_MESSAGE",
+    "SECRET_STORE_UNAVAILABLE_MESSAGE",
     "GatewayError",
     "error_code_for",
     "expected_refusal",
