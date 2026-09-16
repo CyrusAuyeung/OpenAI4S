@@ -117,6 +117,14 @@ jobs:
     if: inputs.publish || inputs.pypi_only
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # GitHub shows a draft release only to a caller with push access. With the
+    # workflow-level `contents: read` token, `gh release view` answered
+    # "release not found" for the very draft this job exists to find: the
+    # first publish dispatch (v0.3.0, run 35087359578) stopped here. The job
+    # checks out nothing and runs only the gh/jq calls below, so the write
+    # scope reaches no repository code.
+    permissions:
+      contents: write
     steps:
       - name: The named tag must exist, in the state the chosen mode requires
         env:
@@ -152,6 +160,20 @@ jobs:
           else
             if [ "$(jq -r .isDraft release.json)" != "true" ]; then
               echo "::error::$TAG is already public; staging assets onto it is the half-published state this pipeline exists to prevent"
+              exit 1
+            fi
+            # Once PyPI has the version, staging again can only do harm. The
+            # build is not byte-reproducible, and `attach` uploads with
+            # --clobber, so a second dispatch would replace the draft's assets
+            # with bytes PyPI does not have. Then the pypi job fails on the
+            # reused filename and `--only publish` refuses the mismatch, which
+            # leaves the release stuck. Only a definite 404 lets staging start.
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/openai4s/${TAG#v}/json") || code=unreachable
+            if [ "$code" = "200" ]; then
+              echo "::error::openai4s ${TAG#v} is already on PyPI; do not dispatch again. Re-run the failed finalize job of the run that published it, or run release_pipeline.py --mode release --only publish against the untouched draft"
+              exit 1
+            elif [ "$code" != "404" ]; then
+              echo "::error::could not tell whether PyPI already has openai4s ${TAG#v} (HTTP $code); refusing to stage"
               exit 1
             fi
           fi
@@ -828,9 +850,13 @@ jobs:
     # a public release with no matching package version.
     #
     # If this job fails after PyPI succeeded, the release stays a draft and
-    # nothing needs rebuilding: re-run this workflow with the same tag, or run
-    # `release_pipeline.py --only publish` by hand. Do not bump the version and
-    # do not rebuild — the artifacts on the draft are the ones PyPI has.
+    # nothing needs rebuilding: use "Re-run failed jobs" on this same run (not
+    # "Re-run all jobs", which rebuilds), or run
+    # `release_pipeline.py --mode release --only publish` by hand. Never
+    # dispatch this tag again: the guard refuses once PyPI has the version,
+    # because a new build would clobber the draft with bytes PyPI does not
+    # have. Do not bump the version and do not rebuild -- the artifacts on the
+    # draft are the ones PyPI has.
     if: inputs.publish
     needs: [freeze, attach, pypi]
     runs-on: ubuntu-latest
