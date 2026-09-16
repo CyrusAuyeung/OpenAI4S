@@ -283,8 +283,8 @@ The canonical bilingual documentation is published at **[openai4s.org/docs](http
 - [x] Read-only session sharing over an outbound relay you operate, with the
   daemon never binding a public port and residual secrets failing the publish
   closed.
-- [x] An **executable** benchmark of end-to-end scientific workflows — 11
-  workflows / 34 cases run against the real Store, kernel managers, host
+- [x] An **executable** benchmark of end-to-end scientific workflows — 13
+  workflows / 46 cases run against the real Store, kernel managers, host
   dispatcher, and compute manager, where a declared `failure` /
   `permission_denied` / `recovered` / `provenance` outcome fails when the run
   *succeeds*. Publishing comparable public results is still ahead.
