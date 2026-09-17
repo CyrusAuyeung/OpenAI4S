@@ -1,4 +1,9 @@
-from scripts import update_contributors
+import re
+import subprocess
+
+import pytest
+
+from scripts import check_directory_readmes, update_contributors
 
 
 def test_public_recognition_is_appended_after_commit_contributors():
@@ -150,3 +155,122 @@ def test_the_unauthenticated_avatar_fallback_never_carries_the_token(
 
     assert seen[0][1] == "secret-token"
     assert seen[1] == ("https://github.com/Recognized.png?s=256", None)
+
+
+@pytest.fixture
+def contributor_checkout(tmp_path, monkeypatch):
+    """A real Git file inventory with offline contributor/PNG boundaries."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.chdir(tmp_path)
+    avatar_dir = tmp_path / ".github" / "contributors"
+    avatar_dir.mkdir(parents=True)
+    for name in ("README.md", "README_zh.md"):
+        (tmp_path / name).write_text(
+            "# Wall\n\n<!-- CONTRIBUTORS:START -->\n<!-- CONTRIBUTORS:END -->\n",
+            encoding="utf-8",
+        )
+        (avatar_dir / name).write_text(
+            "# Avatars\n\nKeep this introduction.\n\n"
+            "<!-- AVATAR-FILES:START -->\n"
+            "| File | Description |\n| --- | --- |\n"
+            "| `Departed.png` | Old entry. |\n"
+            "<!-- AVATAR-FILES:END -->\n\nKeep this footer.\n",
+            encoding="utf-8",
+        )
+    for name in ("CONTENTS.md", "CONTENTS_zh.md"):
+        (tmp_path / ".github" / name).write_text(
+            "# Files\n\n`contributors/`\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(check_directory_readmes, "ROOT", tmp_path)
+    monkeypatch.setattr(update_contributors, "_token", lambda: None)
+    monkeypatch.setattr(update_contributors, "RECOGNIZED_CONTRIBUTORS", ())
+    monkeypatch.setattr(update_contributors, "_circular_png", lambda raw: raw)
+    return avatar_dir
+
+
+@pytest.mark.parametrize(
+    "existing,logins,failed,expected",
+    [
+        ([], ["NewPerson"], [], ["NewPerson.png"]),
+        (["Departed.png", "Departed.svg"], ["NewPerson"], [], ["NewPerson.png"]),
+        (
+            ["Existing.png"],
+            ["NewPerson", "Existing"],
+            ["Existing"],
+            ["Existing.png", "NewPerson.png"],
+        ),
+        (
+            ["existing.png"],
+            ["NewPerson", "Existing"],
+            ["Existing"],
+            ["NewPerson.png", "existing.png"],
+        ),
+        ([], ["Unavailable"], ["Unavailable"], []),
+        (
+            ["Existing.png"],
+            ["Existing", "Unavailable"],
+            ["Unavailable"],
+            ["Existing.png"],
+        ),
+    ],
+)
+def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
+    contributor_checkout, monkeypatch, existing, logins, failed, expected
+):
+    avatar_dir = contributor_checkout
+    for name in existing:
+        (avatar_dir / name).write_bytes(b"previous-avatar")
+    monkeypatch.setattr(
+        update_contributors,
+        "fetch_contributors",
+        lambda _token: [{"login": login} for login in logins],
+    )
+
+    def download(url, _token):
+        if any(f"/{login}.png?" in url for login in failed):
+            raise OSError("temporary avatar failure")
+        return b"synthetic-avatar"
+
+    monkeypatch.setattr(update_contributors, "_get", download)
+    assert update_contributors.main() == 0
+    assert check_directory_readmes.main() == 0
+    inventories = []
+    for name in ("README.md", "README_zh.md"):
+        text = (avatar_dir / name).read_text(encoding="utf-8")
+        assert re.findall(r"^\| `([^`]+\.png)` \|", text, re.MULTILINE) == expected
+        assert "Keep this introduction.\n\n<!-- AVATAR-FILES:START -->" in text
+        assert "<!-- AVATAR-FILES:END -->\n\nKeep this footer.\n" in text
+        inventories.append(text)
+    assert "| File | Purpose |" in inventories[0]
+    assert "| 文件 | 职责 |" in inventories[1]
+
+    assert update_contributors.main() == 0
+    assert inventories == [
+        (avatar_dir / name).read_text(encoding="utf-8")
+        for name in ("README.md", "README_zh.md")
+    ]
+
+
+@pytest.mark.parametrize(
+    "invalid_block",
+    [
+        "no markers",
+        "<!-- AVATAR-FILES:START -->",
+        "<!-- AVATAR-FILES:END --><!-- AVATAR-FILES:START -->",
+        "<!-- AVATAR-FILES:START -->"
+        "<!-- AVATAR-FILES:START --><!-- AVATAR-FILES:END -->",
+    ],
+)
+def test_invalid_inventory_markers_do_not_rewrite_either_readme(
+    contributor_checkout, invalid_block
+):
+    avatar_dir = contributor_checkout
+    english = (avatar_dir / "README.md").read_bytes()
+    chinese = avatar_dir / "README_zh.md"
+    chinese.write_text(invalid_block, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="avatar inventory markers"):
+        update_contributors.update_avatar_readmes()
+
+    assert (avatar_dir / "README.md").read_bytes() == english
+    assert chinese.read_text(encoding="utf-8") == invalid_block

@@ -5,7 +5,8 @@ Fetches the repository's contributors straight from the GitHub API (the same
 source, and same commit-count order, as the sidebar / contributors graph) and
 appends publicly recognized contributions that are not represented in the
 commit graph. It then rewrites the block between the ``CONTRIBUTORS`` markers
-in each README.
+in each README, and keeps the bilingual avatar-directory inventories in sync
+with the PNG files that remain after the refresh.
 
 Unlike a third-party image service (e.g. contrib.rocks, which calls the GitHub
 API anonymously, gets rate-limited for this repo, and rendered only a single
@@ -38,6 +39,8 @@ READMES = ("README.md", "README_zh.md")
 AVATAR_DIR = os.path.join(".github", "contributors")
 START = "<!-- CONTRIBUTORS:START -->"
 END = "<!-- CONTRIBUTORS:END -->"
+INVENTORY_START = "<!-- AVATAR-FILES:START -->"
+INVENTORY_END = "<!-- AVATAR-FILES:END -->"
 SRC = 256  # source crop resolution for a crisp circle
 DISPLAY = 64  # rendered avatar size in px, close to the original wall
 # Bots and the automated co-author identity are not community members. The
@@ -233,6 +236,51 @@ def update_readme(path: str, block: str) -> bool:
     return True
 
 
+def update_avatar_readmes() -> list[str]:
+    """Document surviving PNGs, preserving their on-disk filename spelling."""
+    names = sorted(
+        name
+        for name in os.listdir(AVATAR_DIR)
+        if name.endswith(".png") and os.path.isfile(os.path.join(AVATAR_DIR, name))
+    )
+    updates: list[tuple[str, str]] = []
+    for filename, header, description in (
+        (
+            "README.md",
+            "| File | Purpose |",
+            "Render-ready avatar for contributor `{login}`.",
+        ),
+        (
+            "README_zh.md",
+            "| 文件 | 职责 |",
+            "贡献者 `{login}` 的可直接渲染头像。",
+        ),
+    ):
+        path = os.path.join(AVATAR_DIR, filename)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        if (
+            text.count(INVENTORY_START) != 1
+            or text.count(INVENTORY_END) != 1
+            or text.index(INVENTORY_START) > text.index(INVENTORY_END)
+        ):
+            raise ValueError(f"invalid avatar inventory markers in {path}")
+        rows = [header, "| --- | --- |"]
+        for name in names:
+            detail = description.format(login=name[:-4])
+            rows.append(f"| `{name}` | {detail} |")
+        start = text.index(INVENTORY_START) + len(INVENTORY_START)
+        end = text.index(INVENTORY_END)
+        updated = text[:start] + "\n" + "\n".join(rows) + "\n" + text[end:]
+        if updated != text:
+            updates.append((path, updated))
+    # Validate both blocks before rewriting either document.
+    for path, text in updates:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return [path for path, _text in updates]
+
+
 def main() -> int:
     token = _token()
     people = fetch_contributors(token)
@@ -243,6 +291,7 @@ def main() -> int:
     have_png, written = write_avatars(people, token)
     block = render(people, have_png)
     changed = [p for p in READMES if os.path.exists(p) and update_readme(p, block)]
+    changed.extend(update_avatar_readmes())
     print(
         f"{len(people)} contributors: "
         + ", ".join(c["login"] for c in people)

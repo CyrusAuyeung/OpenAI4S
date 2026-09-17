@@ -5,11 +5,13 @@
 One PNG per contributor, cropped to a circle with transparent corners, linked
 from the contributor wall in the root READMEs. `scripts/update_contributors.py`
 writes them from the GitHub contributors API and a maintained list of publicly
-recognized non-commit contributors. Nothing in the OpenAI4S runtime reads this
-directory.
+recognized non-commit contributors. The same script updates the marked file
+tables in both directory READMEs from the PNGs left on disk after refresh and
+pruning. Nothing in the OpenAI4S runtime reads this directory.
 
 ## Files
 
+<!-- AVATAR-FILES:START -->
 | File | Purpose |
 | --- | --- |
 | `ChampionZhong.png` | Render-ready avatar for contributor `ChampionZhong`. |
@@ -30,6 +32,7 @@ directory.
 | `stau-7001.png` | Render-ready avatar for contributor `stau-7001`. |
 | `wangyu-sd.png` | Render-ready avatar for contributor `wangyu-sd`. |
 | `yusowa0716.png` | Render-ready avatar for contributor `yusowa0716`. |
+<!-- AVATAR-FILES:END -->
 
 Do not hand-edit the raster files. Regenerate them through the contributor
 workflow so cropping and README links stay consistent; the script prunes any
