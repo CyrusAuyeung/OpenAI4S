@@ -7,6 +7,8 @@ try {
   playwright = await import(fallback);
 }
 const { chromium } = playwright;
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { authenticate, waitUntil } from "./browser_auth.mjs";
 
 const baseUrl = process.env.OPENAI4S_BROWSER_URL || "http://127.0.0.1:8760/";
@@ -129,6 +131,329 @@ async function dumpBranchForkState(frameId) {
   return { snapshot, apiBranches };
 }
 
+// C1/C3/C7 correctness cases use real persisted Cells/Artifacts. REST faults
+// and anonymous event interleavings are explicitly injected UI fault fixtures.
+async function correctnessScenes(projectId) {
+  const made = await api("/frames", { method: "POST", data: { project_id: projectId } });
+  const fid = made.id || made.frame_id;
+  await page.evaluate(async ({ fid, projectId }) => window.openConversation(fid, projectId), { fid, projectId });
+  await ensureDockOpen();
+  let autoFigureName = "";
+  async function execute(revision) {
+    const code = [
+      "from pathlib import Path", "import struct, zlib",
+      "def png_chunk(kind, data):", "    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)",
+      `rgb = bytes([${revision === 1 ? "255, 0, 0" : "0, 0, 255"}])`,
+      "image_bytes = bytes([137,80,78,71,13,10,26,10]) + png_chunk(b'IHDR', struct.pack('>2I5B', 1,1,8,2,0,0,0)) + png_chunk(b'IDAT', zlib.compress(bytes([0]) + rgb)) + png_chunk(b'IEND', b'')",
+      "Path('history.png').write_bytes(image_bytes)",
+      `Path('history.csv').write_text('revision,value\\n${revision},${revision * 11}\\n'.replace('\\\\n', '\\n'))`,
+      "Path('left').mkdir(exist_ok=True)", "Path('right').mkdir(exist_ok=True)",
+      `Path('left/same.csv').write_text('side,value\\nleft,${revision}\\n'.replace('\\\\n', '\\n'))`,
+      `Path('right/same.csv').write_text('side,value\\nright,${revision}\\n'.replace('\\\\n', '\\n'))`,
+      ...(revision === 1 ? ["import matplotlib; matplotlib.use('Agg')", "import matplotlib.pyplot as plt", "plt.figure(); plt.plot([0, 1], [1, 0])"] : [`Path(${JSON.stringify(autoFigureName)}).write_bytes(image_bytes)`]),
+      `print('correctness revision ${revision}')`,
+    ].join("\n");
+    const result = await api(`/frames/${fid}/kernel/execute`, { method: "POST", data: { language: "python", code, wait: true } });
+    assert.ok(!result.error, JSON.stringify(result));
+    const log = await api(`/frames/${fid}/execution-log`);
+    const entry = log.entries.find((row) => row.source.includes(`correctness revision ${revision}`));
+    assert.ok(entry && !entry.error, JSON.stringify(entry));
+    const outputs = entry.output_artifacts || [];
+    for (const name of ["history.png", "history.csv", "left/same.csv", "right/same.csv"]) {
+      assert.equal(outputs.filter((row) => row.filename === name).length, 1, `exact output binding ${name}`);
+    }
+    return entry;
+  }
+  const first = await execute(1);
+  const v1 = first.output_artifacts.find((row) => row.filename === "history.csv");
+  assert.equal(first.figures.length, 1, "real matplotlib figure captured by the daemon");
+  autoFigureName = first.figures[0];
+  const image1 = first.output_artifacts.find((row) => row.filename === autoFigureName);
+  const originalImage = await (await page.request.get(new URL(image1.url, baseUrl).toString())).body();
+  await page.evaluate(async (a) => {
+    await window.openViewer({ id: a.artifact_id, filename: a.filename, version_id: a.version_id });
+    window.openViewer({ id: a.artifact_id, filename: a.filename, content_type: "text/csv" });
+  }, v1);
+  assert.equal(await page.locator("#dock-tabs .dock-tab").filter({ hasText: "history.csv" }).count(), 2);
+  await page.locator("#dock-tabs .dock-tab").filter({ hasText: v1.version_id }).click();
+  await page.locator("#dock-viewer table.sheet").waitFor();
+  assert.match(await page.locator("#dock-viewer").innerText(), /11/);
+  const metadataRequests = [];
+  const recordMetadata = (request) => { if (/\/(lineage|environment)(?:\?|$)/.test(request.url()) && request.url().includes(v1.artifact_id)) metadataRequests.push(request.url()); };
+  page.on("request", recordMetadata);
+  await page.locator('[data-f16-provenance="1"]').click();
+  await page.locator(".prov-subtab").filter({ hasText: "Environment" }).click();
+  await waitUntil("exact environment read", async () => metadataRequests.some((url) => url.includes("/environment?version=")));
+  assert.ok(metadataRequests.every((url) => new URL(url).searchParams.get("version") === v1.version_id));
+  await page.locator('[data-f16-provenance="back"]').click();
+  const second = await execute(2);
+  const v2 = second.output_artifacts.find((row) => row.filename === "history.csv");
+  assert.equal(v1.artifact_id, v2.artifact_id);
+  assert.notEqual(v1.version_id, v2.version_id);
+  await waitUntil("new persisted Artifact event", async () => workbenchEvents.some((event) =>
+    event.type === "artifact_created" && JSON.stringify(event).includes(v2.version_id)));
+  const pinned = await page.evaluate(() => window.S.dockArtifact);
+  assert.equal(pinned.version_id, v1.version_id);
+  assert.equal(pinned._exactVersion, true);
+  assert.match(await page.locator("#dock-viewer").innerText(), /11/);
+  assert.doesNotMatch(await page.locator("#dock-viewer table.sheet").innerText(), /22/);
+  page.off("request", recordMetadata);
+  const latestTab = page.locator("#dock-tabs .dock-tab").filter({ hasText: "history.csv" }).filter({ hasNotText: v1.version_id });
+  await latestTab.click();
+  await waitUntil("latest sheet v2", async () => (await page.locator("#dock-viewer").innerText()).includes("22"));
+  const latestReads = [];
+  const recordLatest = (request) => { if (new URL(request.url()).pathname === `/api/v1/artifacts/${v1.artifact_id}`) latestReads.push(request.url()); };
+  page.on("request", recordLatest);
+  // Reopening rebuilds the Notebook through the real execution-log projection.
+  await page.reload({ waitUntil: "networkidle" });
+  await ensureDockOpen();
+  await page.evaluate(() => window.setActiveTab("notebook"));
+  const cell1 = page.locator(`.notebook-cell[data-producing-cell="${first.producing_cell_id}"]`).first();
+  await cell1.waitFor();
+  await cell1.locator("img.nbc-fig").waitFor();
+  assert.equal(await cell1.locator("img.nbc-fig").getAttribute("src"), image1.url);
+  assert.ok(await cell1.locator("img.nbc-fig").evaluate((node) => node.complete && node.naturalWidth > 0));
+  assert.match(await cell1.innerText(), /11/);
+  assert.doesNotMatch(await cell1.locator("table.nbc-table").first().innerText(), /22/);
+  for (const out of first.output_artifacts) {
+    const response = await page.request.get(new URL(out.url, baseUrl).toString());
+    assert.equal(response.status(), 200);
+    const link = cell1.locator(`a[download="${out.filename}"]`);
+    assert.ok(await link.count(), `download link ${out.filename}`);
+    assert.equal(await link.first().getAttribute("href"), out.url);
+    if (out.filename === autoFigureName) assert.deepEqual(await response.body(), originalImage);
+    if (out.filename.endsWith("same.csv")) assert.match(await response.text(), new RegExp(out.filename.split("/")[0] + ",1"));
+  }
+  // The conversation's separate latest-file thumbnail also reads the head.
+  // Measure that normal page load so only additional failure fallback fails.
+  const normalLatestReads = latestReads.length;
+  latestReads.length = 0;
+  await page.route(`**${v1.url}*`, (route) => route.fulfill({ status: 404, contentType: "application/json", body: '{"error":"fixture missing version"}' }));
+  try {
+    await page.reload({ waitUntil: "networkidle" }); await ensureDockOpen();
+    await page.evaluate(() => window.setActiveTab("notebook"));
+    const failedCell = page.locator(`.notebook-cell[data-producing-cell="${first.producing_cell_id}"]`).first();
+    await failedCell.locator(".nbc-artifact-error").waitFor();
+    assert.equal(latestReads.length, normalLatestReads, "historical failure adds no latest request beyond normal thumbnails");
+    const failedRead = page.waitForResponse((response) => new URL(response.url()).pathname === v1.url && response.status() === 404);
+    await failedCell.locator(".nbc-artifact-error button").click();
+    await failedRead;
+    assert.equal(latestReads.length, normalLatestReads, "retry requests only the exact failed version");
+  } finally { await page.unroute(`**${v1.url}*`); page.off("request", recordLatest); }
+  console.log("C1 browser: real two-version Cells, reopen, exact figures/tables/downloads, same basename, fixed/latest tabs and 404 without latest passed");
+
+  // C3: failures remain visible; only GETs occur during recovery. Anonymous
+  // chunks intentionally have no message_id/turn_id, matching the legacy wire.
+  let mode = "503", gets = 0, actions = 0, streamRunning = false;
+  const messagesUrl = `**/api/v1/frames/${fid}/messages?*`;
+  const historyFixture = () => ({ messages: [{ role: "assistant", content: "confirmed history", seq: 1 },
+    ...(mode === "terminal" ? [{ role: "assistant", content: "anonymous stream survives", seq: 2 }] : [])], has_earlier: false });
+  await page.route(`**/api/v1/frames/${fid}/status`, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ running: streamRunning, status: streamRunning ? "running" : "done" }) }));
+  const countActions = (request) => { if (!["GET", "HEAD"].includes(request.method())) actions++; };
+  page.on("request", countActions);
+  await page.route(messagesUrl, (route) => {
+    gets++;
+    return route.fulfill({ status: mode === "503" ? 503 : mode === "401" ? 401 : 200,
+      contentType: "application/json", body: JSON.stringify(mode === "503" || mode === "401" ? { error: "injected history fault", code: mode === "401" ? "unauthorized" : "unavailable", request_id: "browser-history" } : mode === "malformed" ? {} : historyFixture()) });
+  });
+  try {
+    for (const failure of ["503", "401", "malformed"]) {
+      mode = failure;
+      await page.evaluate(async ({ fid, projectId }) => window.openConversation(fid, projectId), { fid, projectId });
+      await page.locator('.history-load-status[data-history-state="partial"], .history-load-status[data-history-state="error"]').waitFor();
+      assert.equal(await page.locator("#messages .empty-session").count(), 0);
+      assert.match(await page.locator(".history-load-status").innerText(), failure === "401" ? /access|认证|权限/i : failure === "malformed" ? /Invalid|格式/i : /unavailable|不可用/i);
+    }
+    mode = "ok";
+    await page.locator(".history-load-status button").click();
+    await waitUntil("history retry recovered", async () => (await page.locator("#messages").innerText()).includes("confirmed history") && !(await page.locator(".history-load-status").count()));
+    await page.route(`**/api/v1/frames/${fid}/steps*`, (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"steps unavailable"}' }));
+    streamRunning = true;
+    await page.evaluate((fid) => {
+      window.onEvent({ type: "text_chunk", root_frame_id: fid, chunk: "anonymous stream survives" });
+      window.onEvent({ type: "replay_begin", root_frame_id: fid, gap: true });
+      window.onEvent({ type: "replay_end", root_frame_id: fid });
+    }, fid);
+    await page.locator('.history-load-status[data-history-state="partial"]').waitFor();
+    assert.match(await page.locator("#messages").innerText(), /confirmed history/);
+    assert.match(await page.locator("#messages").innerText(), /anonymous stream survives/);
+    assert.equal(await page.evaluate(() => window.S._replayGap), fid);
+    await page.unroute(`**/api/v1/frames/${fid}/steps*`);
+    mode = "terminal";
+    streamRunning = false;
+    await page.evaluate((fid) => window.onEvent({ type: "frame_update", root_frame_id: fid, frame_id: fid, status: "done" }), fid);
+    await waitUntil("terminal GET aligns anonymous history", async () => !(await page.locator(".history-load-status").count()));
+    await page.evaluate((fid) => window.onEvent({ type: "replay_end", root_frame_id: fid }), fid);
+    await waitUntil("complete recovery clears gap", async () => !(await page.evaluate(() => window.S._replayGap)));
+    assert.equal((await page.locator("#messages").innerText()).split("anonymous stream survives").length - 1, 1);
+    // A lost terminal event is recoverable from a current stopped status GET.
+    streamRunning = true;
+    await page.evaluate((fid) => {
+      window.onEvent({ type: "text_chunk", root_frame_id: fid, chunk: "anonymous stream survives" });
+      window.onEvent({ type: "replay_begin", root_frame_id: fid, gap: true });
+      window.onEvent({ type: "replay_end", root_frame_id: fid });
+    }, fid);
+    await page.locator('.history-load-status[data-history-state="partial"]').waitFor();
+    streamRunning = false;
+    await page.locator(".history-load-status button").click();
+    await waitUntil("lost terminal restored using GET", async () => !(await page.locator(".history-load-status").count()));
+    assert.equal((await page.locator("#messages").innerText()).split("anonymous stream survives").length - 1, 1);
+    assert.equal(actions, 0, "history retries may not execute or submit work");
+    assert.ok(gets < 20, `recovery GET storm: ${gets}`);
+  } finally { await page.unroute(messagesUrl); await page.unroute(`**/api/v1/frames/${fid}/status`); await page.unroute(`**/api/v1/frames/${fid}/steps*`); page.off("request", countActions); }
+  console.log("C3 browser: 503/401/malformed → visible failure → GET retry; steps gap and anonymous stream terminal alignment; zero execution requests passed");
+
+  async function showJson(filename, raw) {
+    const uploaded = await api("/uploads", { method: "POST", data: { frame_id: fid, project_id: projectId, filename, content_base64: Buffer.from(raw).toString("base64") } });
+    const versions = await api(`/artifacts/${uploaded.artifact_id}/versions`);
+    const row = versions.versions[0];
+    await page.evaluate(async (a) => window.openViewer(a), { id: uploaded.artifact_id, filename, version_id: row.version_id });
+    return `/api/v1/artifacts/versions/${row.version_id}`;
+  }
+  await showJson("sparse.json", JSON.stringify([{ a: 1 }, { a: 2, late: 3, zero: 0, bool: false, unsafe: "<img src=x onerror=window.__jsonXss=1>" }]));
+  await page.locator("#dock-viewer table.sheet").waitFor();
+  assert.deepEqual(await page.locator("#dock-viewer th").allTextContents(), ["a", "late", "zero", "bool", "unsafe"]);
+  assert.deepEqual((await page.locator("#dock-viewer tr").nth(2).locator("td").allTextContents()).slice(0, 4), ["2", "3", "0", "false"]);
+  assert.equal(await page.locator("#dock-viewer td img").count(), 0);
+  const mixed = JSON.stringify({ rows: [{ a: 1 }, null, [2], false, "<script>window.__jsonXss=1</script>"] });
+  await showJson("mixed.json", mixed);
+  await page.locator("#dock-viewer .renderer-source").waitFor();
+  assert.equal(await page.locator("#dock-viewer .renderer-source").textContent(), mixed);
+  const large = JSON.stringify({ items: [{ a: "safe words ".repeat(31000) }, null], tail: "END-OF-FULL-JSON" });
+  const largeUrl = await showJson("large-mixed.json", large);
+  await page.locator('#dock-viewer button[aria-expanded="false"]').waitFor();
+  assert.equal((await page.locator("#dock-viewer .renderer-source").textContent()).length, 300000);
+  let expansionGets = 0;
+  const countExpansion = (request) => { if (request.url().includes(largeUrl)) expansionGets++; };
+  page.on("request", countExpansion);
+  await page.locator('#dock-viewer button[aria-expanded="false"]').press("Enter");
+  assert.equal(await page.locator("#dock-viewer .renderer-source").textContent(), large);
+  assert.equal(expansionGets, 0, "expand uses the text already fetched");
+  page.off("request", countExpansion);
+  const fullUrl = await page.locator("#dock-viewer a[download]").last().getAttribute("href");
+  assert.equal(await (await page.request.get(new URL(fullUrl, baseUrl).toString())).text(), large);
+  assert.equal(await page.evaluate(() => window.__jsonXss), undefined);
+  const rows = Array.from({ length: 5001 }, (_, i) => i === 5000 ? { afterLimit: "late" } : { a: i });
+  await showJson("row-cap.json", JSON.stringify(rows));
+  await page.locator("#dock-viewer table.sheet").waitFor();
+  assert.deepEqual(await page.locator("#dock-viewer th").allTextContents(), ["a", "afterLimit"]);
+  assert.equal(await page.locator("#dock-viewer table.sheet tr").count(), 5001);
+  assert.match(await page.locator("#dock-viewer").innerText(), /5[,.]?001|5001/);
+  console.log("C7 browser: sparse fields, 0/false, HTML as text, mixed raw JSON, 300k preview/full expansion/download and row-5001 schema passed");
+
+  // C5 uses a controlled doctor response to exercise presentation and faults;
+  // the passive GET, settings navigation/save and permission routes stay real.
+  let checks = 0, checkMode = "ok";
+  const checksUrl = "**/api/v1/diagnostics/checks";
+  const checkFixture = { status: "fail", request_id: "browser-checks", checks: [
+    { name: "model", status: "fail", detail: "Model is not configured.", remedy: "Choose a model in existing settings.", facts: Object.fromEntries(Array.from({ length: 22 }, (_, i) => [`key${i}`, "<img src=x onerror=window.__diagXss=1>".repeat(30)])) },
+    { name: "connectors", status: "warn", detail: "Connector fixture unavailable.", remedy: "Review network settings." },
+    { name: "unknown-fixture", status: "fail", detail: "<script>window.__diagXss=1</script>", remedy: "https://example.invalid/do-not-open" },
+    { name: "data", status: "ok", detail: "Legacy optional fields omitted." },
+  ] };
+  await page.route(checksUrl, async (route) => {
+    checks++;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await route.fulfill({ status: checkMode === "403" ? 403 : 200, contentType: "application/json", body: JSON.stringify(checkMode === "403" ? { error: "operator only", code: "forbidden" } : checkFixture) });
+  });
+  try {
+    await page.evaluate(() => window.openCust("general"));
+    await page.locator("[data-diagnostics-run]").waitFor();
+    assert.equal(checks, 0, "opening diagnostics must be passive");
+    await page.locator("[data-diagnostics-run]").press("Enter");
+    assert.ok(await page.locator("[data-diagnostics-run]").isDisabled());
+    await page.locator('[data-diagnostics-results="current"]').waitFor();
+    assert.equal(checks, 1);
+    const model = page.locator('[data-diagnostic-check="model"]');
+    assert.match(await model.locator("[data-diagnostic-remedy]").innerText(), /Choose a model/);
+    await model.locator("summary").press("Enter");
+    assert.equal(await model.locator("dt").count(), 20);
+    assert.ok((await model.locator("dd").allTextContents()).every((text) => text.length <= 500));
+    assert.equal(await page.locator("[data-diagnostics-results] img, [data-diagnostics-results] script").count(), 0);
+    assert.equal(await page.locator('[data-diagnostic-check="unknown-fixture"] button, [data-diagnostic-check="unknown-fixture"] a').count(), 0);
+    const received = await page.locator("[data-diagnostics-results] time").getAttribute("datetime");
+    await model.locator('[data-diagnostic-setting="models"]').click();
+    await page.locator('.cust-tab[data-tab="models"].active').waitFor();
+    await page.locator('.cust-tab[data-tab="general"]').click();
+    assert.equal(await page.locator("[data-diagnostics-results] time").getAttribute("datetime"), received);
+    await page.locator('[data-diagnostic-setting="network"]').click();
+    await page.locator('.cust-tab[data-tab="network"].active').waitFor();
+    const configSaved = page.waitForResponse((response) => response.url().endsWith("/api/v1/network/status") && response.request().method() === "PUT");
+    await page.locator("#cust .toggle").first().click();
+    assert.ok((await configSaved).ok());
+    await page.locator('.cust-tab[data-tab="general"]').click();
+    await page.locator("[data-diagnostics-stale]").waitFor();
+    assert.equal(checks, 1, "configuration changes do not run checks automatically");
+    checkMode = "403";
+    await page.locator("[data-diagnostics-run]").click();
+    await page.locator("[data-diagnostics-error]").waitFor();
+    await page.locator('[data-diagnostics-results="previous"]').waitFor();
+    assert.equal(await page.locator("[data-diagnostics-results] time").getAttribute("datetime"), received);
+    assert.equal(await page.evaluate(() => window.__diagXss), undefined);
+    // Boot the same real settings surface with its persisted Chinese locale.
+    await page.locator("#cust-close").click();
+    const priorLang = await page.evaluate(() => localStorage.getItem("os-lang"));
+    try {
+      await page.evaluate(() => localStorage.setItem("os-lang", "zh"));
+      await page.reload({ waitUntil: "networkidle" });
+      await page.evaluate(() => window.openCust("general"));
+      await page.locator("[data-diagnostics-run]").waitFor();
+      assert.equal(await page.locator("[data-diagnostics-run]").innerText(), "运行检查");
+      assert.equal(checks, 2, "Chinese settings opening is also passive");
+      checkMode = "ok";
+      await page.locator("[data-diagnostics-run]").press("Enter");
+      await page.locator('[data-diagnostics-results="current"]').waitFor();
+      assert.match(await page.locator("[data-diagnostics-results]").innerText(), /本次获取时间|下一步/);
+      assert.equal(checks, 3);
+    } finally {
+      await page.evaluate((lang) => lang === null ? localStorage.removeItem("os-lang") : localStorage.setItem("os-lang", lang), priorLang);
+      await page.reload({ waitUntil: "networkidle" });
+      await page.evaluate(() => window.openCust("general"));
+    }
+  } finally {
+    await page.unroute(checksUrl);
+    await page.locator("#cust-close").click();
+    await api("/network/status", { method: "PUT", data: { enabled: false } });
+  }
+  console.log("C5 browser: passive open, keyboard checks, remedy/settings, facts limits, safe text, retained results, config invalidation and 403 passed");
+
+}
+
+// UI5-F1: New session publishes the created id before it opens the frame, and
+// the open treated the new frame as its own predecessor -- the dock kept the
+// previous session's cells and merged the new session's in beside them.
+async function newSessionNotebookScene(projectId) {
+  const made = await api("/frames", { method: "POST", data: { project_id: projectId } });
+  const fromId = made.id || made.frame_id;
+  for (const code of ["print('new-session scene A1')", "print('new-session scene A2')"]) {
+    const result = await api(`/frames/${fromId}/kernel/execute`, { method: "POST", data: { language: "python", code, wait: true } });
+    assert.ok(!result.error, JSON.stringify(result));
+  }
+  await page.evaluate(async ({ fid, projectId }) => window.openConversation(fid, projectId), { fid: fromId, projectId });
+  await ensureDockOpen();
+  await page.evaluate(() => window.setActiveTab("notebook"));
+  const dockCells = page.locator("#dock-notebook .notebook-cell");
+  await waitUntil("the previous session's two cells", async () => (await dockCells.count()) === 2);
+  await page.locator("#new-session").click();
+  let newId = "";
+  await waitUntil("New session opened", async () => {
+    newId = (new URL(page.url()).pathname.match(/\/frames\/([^/]+)/) || [])[1] || "";
+    return !!newId && newId !== fromId;
+  });
+  await waitWorkbenchIdle();
+  await page.waitForTimeout(1500);
+  assert.equal((await api(`/frames/${newId}/execution-log`)).entries.length, 0);
+  assert.equal(await dockCells.count(), 0, "a new session's Notebook shows no cells of the previous one");
+  const own = await api(`/frames/${newId}/kernel/execute`, { method: "POST", data: { language: "python", code: "print('new-session scene B1')", wait: true } });
+  assert.ok(!own.error, JSON.stringify(own));
+  await waitUntil("the new session's own cell", async () => (await dockCells.count()) >= 1);
+  await page.waitForTimeout(1000);
+  const texts = await dockCells.allInnerTexts();
+  assert.equal(texts.length, 1, `exactly the new session's cell, got ${JSON.stringify(texts)}`);
+  assert.match(texts[0], /new-session scene B1/);
+  console.log("UI5-F1 browser: New session starts with an empty Notebook and shows only its own cell");
+}
+
 function queueTickets(snapshot) {
   return [snapshot?.owner, ...(snapshot?.queue || [])].filter(Boolean);
 }
@@ -183,7 +508,9 @@ try {
     "openAnnotations",
     "openConversation",
     "openCust",
+    "openKetcher",
     "openPinPop",
+    "openViewer",
     "outstandingAdmissions",
     "parseTable",
     "reconcileLastAdmission",
@@ -241,7 +568,9 @@ try {
       openAnnotations: typeof openAnnotations,
       openConversation: typeof openConversation,
       openCust: typeof openCust,
+      openKetcher: typeof openKetcher,
       openPinPop: typeof openPinPop,
+      openViewer: typeof openViewer,
       outstandingAdmissions: typeof outstandingAdmissions,
       parseTable: typeof parseTable,
       reconcileLastAdmission: typeof reconcileLastAdmission,
@@ -397,6 +726,8 @@ try {
   });
   const projectId = project.project_id || project.id;
   if (!projectId) throw new Error("project creation did not return an id");
+  await correctnessScenes(projectId);
+  await newSessionNotebookScene(projectId);
   const frame = await api("/frames", {
     method: "POST",
     data: { project_id: projectId },
@@ -2042,8 +2373,26 @@ try {
     throw new Error(`expected html data-theme dark|light, got ${themeBefore}`);
   }
   const themeAfter = themeBefore === "dark" ? "light" : "dark";
+  // icon() answers an unknown name with an empty <svg>: a missing table entry
+  // leaves a blank button that still takes space and clicks. The theme toggle
+  // must also repaint its drawing, not only swap data-icon.
+  const iconFor = (theme) => (theme === "dark" ? "sun" : "moon");
+  async function requireDrawnIcon(selector) {
+    if ((await page.locator(`${selector} svg > *`).count()) === 0) {
+      throw new Error(`${selector} renders an empty icon (data-icon=${await page.locator(selector).getAttribute("data-icon")})`);
+    }
+  }
+  for (const selector of ["#ws-theme", "#sidebar-collapse", "#dock-toggle", "#settings-gear"]) {
+    await requireDrawnIcon(selector);
+  }
+  const themeDrawingBefore = await page.locator("#ws-theme svg").innerHTML();
   await themeBtn.click();
   await waitUntil("data-theme flip", async () => (await htmlAttr("data-theme")) === themeAfter);
+  await waitUntil(`#ws-theme data-icon=${iconFor(themeAfter)}`, async () => (await themeBtn.getAttribute("data-icon")) === iconFor(themeAfter));
+  await requireDrawnIcon("#ws-theme");
+  if ((await page.locator("#ws-theme svg").innerHTML()) === themeDrawingBefore) {
+    throw new Error("#ws-theme kept its old drawing after the theme flipped");
+  }
   const storedTheme = await page.evaluate(() => localStorage.getItem("os-theme"));
   if (storedTheme !== themeAfter) {
     throw new Error(`os-theme localStorage is ${JSON.stringify(storedTheme)}, expected ${themeAfter}`);
@@ -2055,6 +2404,10 @@ try {
   if (storedThemeAfterReload !== themeAfter) {
     throw new Error(`os-theme did not survive reload: ${JSON.stringify(storedThemeAfterReload)}`);
   }
+  // installTheme() runs before the Shell exists; the reloaded toggle must still
+  // show the glyph for the applied theme, not the markup's default.
+  await waitUntil(`reloaded #ws-theme data-icon=${iconFor(themeAfter)}`, async () => (await page.locator("#ws-theme").getAttribute("data-icon")) === iconFor(themeAfter));
+  await requireDrawnIcon("#ws-theme");
 
   await page.locator("#ws-theme").waitFor({ state: "visible" });
   const filesLabel = page.locator('#workspace:not(.hidden) [data-i18n="ws.nav.files"]');
@@ -2145,6 +2498,9 @@ try {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.locator("body.sidebar-collapsed").waitFor({ state: "attached" });
   await page.locator("#sidebar-reopen").waitFor({ state: "visible" });
+  // At phone width the sidebar is off-canvas and this is the only way back to
+  // it; an empty drawing makes the whole side navigation undiscoverable.
+  await requireDrawnIcon("#sidebar-reopen");
 
   async function bodyOverflowX() {
     // Compare against innerWidth so a vertical scrollbar shrinking
@@ -2165,6 +2521,15 @@ try {
       `body overflows horizontally at 375x812 (drawer closed): body=${overflowCollapsed.body} root=${overflowCollapsed.root}`,
     );
   }
+  // The tabs shrink (the session title first, then "New session" ellipsizes)
+  // instead of scrolling the tab bar and cutting a label mid-word.
+  const tabbarOverflow = await page.evaluate(() => {
+    const bar = document.getElementById("tabbar");
+    return bar ? bar.scrollWidth - bar.clientWidth : 0;
+  });
+  if (tabbarOverflow > 1) {
+    throw new Error(`the tab bar scrolls horizontally at 375x812 (${tabbarOverflow}px) instead of shrinking its tabs`);
+  }
 
   await page.locator("#sidebar-reopen").click();
   await waitUntil("mobile drawer open", async () => (await page.locator("body.sidebar-collapsed").count()) === 0);
@@ -2178,6 +2543,256 @@ try {
   await page.locator("#mobile-scrim:not(.hidden)").click();
   await page.locator("body.sidebar-collapsed").waitFor({ state: "attached" });
   await page.locator("#sidebar-reopen").waitFor({ state: "visible" });
+
+  // The dashboard header at 375px: its action row did not wrap, so the page
+  // was 521px wide and New project sat off-screen, clipped by overflow-x:hidden
+  // where no swipe could reach it. Measured in both languages (zh labels are a
+  // different width).
+  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.locator("#dash-new-project").waitFor({ state: "visible" });
+  async function dashboardHeaderFits(label) {
+    const overflow = await bodyOverflowX();
+    if (overflow.body > 0 || overflow.root > 0) {
+      throw new Error(`dashboard overflows horizontally at 375x812 (${label}): body=${overflow.body} root=${overflow.root}`);
+    }
+    const view = await page.evaluate(() => window.innerWidth);
+    for (const selector of ["#dash-import-session", "#dash-new-project"]) {
+      const box = await page.locator(selector).boundingBox();
+      if (!box || box.x < 0 || box.x + box.width > view + 0.5) {
+        throw new Error(`${selector} is not fully on screen at 375x812 (${label}): ${JSON.stringify(box)} in ${view}px`);
+      }
+    }
+  }
+  const dashLang = (await htmlAttr("lang")) === "en" ? "en" : "zh";
+  const dashOtherLang = dashLang === "en" ? "zh" : "en";
+  await dashboardHeaderFits(dashLang);
+  await page.locator(`#dashboard .lang-btn[data-lang="${dashOtherLang}"]`).click();
+  await waitUntil(`dashboard html lang=${dashOtherLang}`, async () => (await htmlAttr("lang")) === dashOtherLang);
+  await dashboardHeaderFits(dashOtherLang);
+  await page.locator(`#dashboard .lang-btn[data-lang="${dashLang}"]`).click();
+  await waitUntil(`dashboard html lang=${dashLang}`, async () => (await htmlAttr("lang")) === dashLang);
+  const searchBorder = await page.evaluate(() => getComputedStyle(document.getElementById("dash-project-search")).borderTopStyle);
+  if (searchBorder === "inset") {
+    throw new Error("#dash-project-search still wears the browser's default inset border");
+  }
+
+  // Cold load with the locale chunks held back. The Shell mounts before the
+  // dictionaries arrive; static labels applied then must keep their readable
+  // fallback, and must be repainted once the chunks land -- before this, they
+  // showed "dash.col.projects" / "palette.action.search" until a language
+  // switch. Views rendered from data (the dashboard lists, the session sidebar,
+  // an opened session) go through t() and are never repainted, so they must
+  // not render before the dictionaries exist: "dash.meta.sessions" and
+  // "session.empty.label" stayed on screen for good. And a label code owns must
+  // survive the late repaint: #conv-title was rewritten to "Session", and its
+  // blur commit then renamed the session on the server. A fresh context (same
+  // auth cookie) so nothing is cached.
+  //
+  // Every dictionary key, so the scan below can tell a key painted as text
+  // from a file name that merely has a dot in it.
+  const i18nKeys = [
+    ...new Set(
+      ["en", "zh"].flatMap((lang) =>
+        [...readFileSync(new URL(`../frontend/src/i18n/${lang}.ts`, import.meta.url), "utf8").matchAll(/^\s*"([^"\\]+)":/gm)]
+          .map((match) => match[1])
+          .filter((key) => key.includes(".")),
+      ),
+    ),
+  ];
+  if (i18nKeys.length < 500) throw new Error(`read only ${i18nKeys.length} i18n keys; the cold-load scan would measure nothing`);
+  const coldTitleName = "Cold load title probe";
+  const coldTitleFrame = await apiRetryWhileCaptureBusy("/frames", { method: "POST", data: { project_id: projectId } });
+  const coldTitleFrameId = coldTitleFrame.id || coldTitleFrame.frame_id;
+  if (!coldTitleFrameId) throw new Error("cold-load title frame creation did not return an id");
+  await apiRetryWhileCaptureBusy(`/frames/${encodeURIComponent(coldTitleFrameId)}`, { method: "PATCH", data: { name: coldTitleName } });
+  const coldTitleLink = new URL(
+    `projects/${encodeURIComponent(projectId)}/frames/${encodeURIComponent(coldTitleFrameId)}`,
+    baseUrl,
+  ).toString();
+  const serverFrameName = async () => {
+    const listed = await api(`/frames?project_id=${encodeURIComponent(projectId)}&limit=200`);
+    const row = (listed.frames || []).find((item) => item.id === coldTitleFrameId);
+    if (!row) throw new Error(`cold-load title frame ${coldTitleFrameId} is missing from GET /frames`);
+    return row.name;
+  };
+  for (const locale of ["en-US", "zh-CN"]) {
+    const coldContext = await browser.newContext({ locale, viewport: { width: 1440, height: 1000 } });
+    try {
+      await coldContext.addCookies(await page.context().cookies());
+      const coldPage = await coldContext.newPage();
+      const coldErrors = [];
+      coldPage.on("pageerror", (error) => coldErrors.push(String(error)));
+      // One hold per navigation: routing disables the HTTP cache, so each
+      // page load requests the chunks again and waits on the current hold.
+      let localesHeld = Promise.resolve();
+      const holdLocales = () => {
+        let release = () => {};
+        localesHeld = new Promise((resolve) => {
+          release = resolve;
+        });
+        return release;
+      };
+      const heldLocaleRequests = [];
+      await coldPage.route(/\/static\/dist\/assets\/(en|zh)-[\w-]+\.js(\?.*)?$/, async (route) => {
+        heldLocaleRequests.push(route.request().url());
+        await localesHeld;
+        await route.continue();
+      });
+      // Static labels only: a [data-i18n*] node whose text is still its key.
+      // visibleOnly: before the dictionaries arrive, components that render
+      // through t() (a closed Customize modal, the collapsed Files dock) hold
+      // keys nobody can see yet; what must never show is a key on screen.
+      const rawKeys = (visibleOnly) =>
+        coldPage.evaluate((onlyVisible) => {
+          const raw = [];
+          const seen = (node) =>
+            !onlyVisible ||
+            (typeof node.checkVisibility === "function" ? node.checkVisibility() : node.getClientRects().length > 0);
+          for (const [attr, read] of [
+            ["data-i18n", (node) => node.textContent],
+            ["data-i18n-title", (node) => node.title],
+            ["data-i18n-ph", (node) => node.placeholder],
+            ["data-i18n-val", (node) => node.value],
+          ]) {
+            document.querySelectorAll(`[${attr}]`).forEach((node) => {
+              const key = node.getAttribute(attr);
+              if (key && seen(node) && String(read(node) || "").trim() === key) raw.push(`${attr}=${key}`);
+            });
+          }
+          return raw;
+        }, visibleOnly);
+      // Everything on screen, however it was rendered: any visible text node,
+      // title, placeholder, aria-label or input value that is a dictionary key.
+      const visibleKeys = () =>
+        coldPage.evaluate((keys) => {
+          const known = new Set(keys);
+          const hits = [];
+          const shown = (node) =>
+            !!node && (typeof node.checkVisibility === "function" ? node.checkVisibility() : node.getClientRects().length > 0);
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = (node.nodeValue || "").trim();
+            if (known.has(text) && shown(node.parentElement)) hits.push(`text:${text}`);
+          }
+          document.querySelectorAll("[title], [placeholder], [aria-label], input, textarea").forEach((node) => {
+            if (!shown(node)) return;
+            const where = node.id ? `#${node.id}` : String(node.className || node.tagName);
+            for (const [label, value] of [
+              ["title", node.getAttribute("title")],
+              ["placeholder", node.getAttribute("placeholder")],
+              ["aria-label", node.getAttribute("aria-label")],
+              ["value", "value" in node ? node.value : null],
+            ]) {
+              const text = String(value || "").trim();
+              if (known.has(text)) hits.push(`${label}:${text}@${where}`);
+            }
+          });
+          return [...new Set(hits)];
+        }, i18nKeys);
+      // While the chunks are held, give the API time to answer: a view that
+      // renders before the dictionaries would be on screen by then.
+      const whileHeld = async (label, renderedSelector) => {
+        const deadline = Date.now() + 1500;
+        while (Date.now() < deadline && (await coldPage.locator(renderedSelector).count()) === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+        const heldRaw = [...(await rawKeys(true)), ...(await visibleKeys())];
+        if (heldRaw.length) {
+          throw new Error(`${locale} ${label} painted bare i18n keys before the dictionaries arrived: ${heldRaw.join(", ")}`);
+        }
+      };
+      const expected =
+        locale === "en-US"
+          ? { projects: "Projects", jump: "Latest" }
+          : { projects: "项目", jump: "最新" };
+      const repainted = async () =>
+        ((await coldPage.locator('[data-i18n="conv.jumpLastLabel"]').textContent()) || "").trim() === expected.jump;
+
+      // 1. The dashboard.
+      const releaseDashboard = holdLocales();
+      await coldPage.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await coldPage.locator("#dash-new-project").waitFor({ state: "visible" });
+      // paintIcons() and the first applyStaticI18n() run in the same
+      // bindWorkbench() call, so a drawn icon means the early pass has run.
+      await waitUntil(`${locale} cold load bound the workbench`, async () => (await coldPage.locator("#dash-new-project svg > *").count()) > 0);
+      const viteShell = (await coldPage.locator('script[src*="/static/dist/"]').count()) > 0;
+      if (viteShell && heldLocaleRequests.length === 0) {
+        throw new Error(`${locale} cold load: no locale chunk request matched the hold pattern, so this check measures nothing`);
+      }
+      await whileHeld("cold load", "#dash-projects .d-row:not(.skeleton-row)");
+      releaseDashboard();
+      await waitUntil(`${locale} cold load repainted static labels`, async () => {
+        const projects = ((await coldPage.locator('#dashboard [data-i18n="dash.col.projects"]').textContent()) || "").trim();
+        return projects === expected.projects && (await repainted());
+      });
+      await waitUntil(
+        `${locale} cold load rendered the project and session lists`,
+        async () =>
+          (await coldPage.locator("#dash-projects .d-row:not(.skeleton-row)").count()) > 0 &&
+          (await coldPage.locator("#dash-sessions .d-row:not(.skeleton-row), #dash-sessions .dash-empty").count()) > 0,
+      );
+      const repaintedRaw = await rawKeys(false);
+      if (repaintedRaw.length) {
+        throw new Error(`${locale} cold load left bare i18n keys after the dictionaries arrived: ${repaintedRaw.join(", ")}`);
+      }
+      const dashboardKeys = await visibleKeys();
+      if (dashboardKeys.length) {
+        throw new Error(`${locale} cold load shows bare i18n keys on the dashboard: ${dashboardKeys.join(", ")}`);
+      }
+
+      // 2. A deep link to a named session.
+      const requestsBeforeDeepLink = heldLocaleRequests.length;
+      const releaseDeepLink = holdLocales();
+      await coldPage.goto(coldTitleLink, { waitUntil: "domcontentloaded" });
+      await waitUntil(`${locale} cold deep link bound the workbench`, async () => (await coldPage.locator("#sidebar-collapse svg > *").count()) > 0);
+      if (viteShell && heldLocaleRequests.length === requestsBeforeDeepLink) {
+        throw new Error(`${locale} cold deep link: no locale chunk request was held, so this check measures nothing`);
+      }
+      await whileHeld("cold deep link", "#session-list .session");
+      releaseDeepLink();
+      await waitUntil(`${locale} cold deep link repainted static labels`, repainted);
+      let shownTitle = "";
+      try {
+        await waitUntil(`${locale} cold deep link opened the session`, async () => {
+          shownTitle = await coldPage.locator("#conv-title").inputValue();
+          return shownTitle === coldTitleName && (await coldPage.locator("#session-list .session").count()) > 0;
+        });
+      } catch {
+        throw new Error(`${locale} cold deep link shows #conv-title=${JSON.stringify(shownTitle)}, expected the session's name ${JSON.stringify(coldTitleName)}`);
+      }
+      const deepLinkKeys = await visibleKeys();
+      if (deepLinkKeys.length) {
+        throw new Error(`${locale} cold deep link shows bare i18n keys: ${deepLinkKeys.join(", ")}`);
+      }
+      // Clicking into the title and away commits it; nothing may be renamed.
+      const titleSurvives = async (stage) => {
+        const shown = await coldPage.locator("#conv-title").inputValue();
+        if (shown !== coldTitleName) {
+          throw new Error(`${locale} ${stage}: #conv-title=${JSON.stringify(shown)}, expected the session's name ${JSON.stringify(coldTitleName)}`);
+        }
+        await coldPage.locator("#conv-title").focus();
+        await coldPage.locator("#conv-title").blur();
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        const serverName = await serverFrameName();
+        if (serverName !== coldTitleName) {
+          throw new Error(`${locale} ${stage}: blurring the title renamed the session on the server to ${JSON.stringify(serverName)}`);
+        }
+      };
+      await titleSurvives("cold deep link");
+      // A language switch repaints every static label again, with the session open.
+      const otherLang = locale === "en-US" ? { lang: "zh", label: "中文" } : { lang: "en", label: "English" };
+      await coldPage.locator("#customize-btn").click();
+      await coldPage.locator("#cust .seg-btn", { hasText: otherLang.label }).click();
+      await waitUntil(`${locale} switched the workbench to ${otherLang.lang}`, async () => (await coldPage.locator("html").getAttribute("lang")) === otherLang.lang);
+      await coldPage.locator("#cust-close").click();
+      await titleSurvives(`language switch to ${otherLang.lang}`);
+      if (coldErrors.length) {
+        throw new Error(`${locale} cold load page errors: ${coldErrors.join(" | ")}`);
+      }
+    } finally {
+      await coldContext.close();
+    }
+  }
 
   if (pageErrors.length) {
     throw new Error(`browser page errors: ${pageErrors.join(" | ")}`);

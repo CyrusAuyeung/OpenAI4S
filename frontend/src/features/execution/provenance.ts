@@ -11,7 +11,8 @@ import { currentId } from "../../stores/session";
 import { provMode, provSub } from "../../stores/ui";
 import { isReady } from "../../compat/stub";
 import { t } from "../../i18n/runtime";
-import { artifactCacheKey } from "../artifacts/cache";
+import { artifactMetadataCacheKey, artifactMetadataTarget, artifactMetadataUrl, artifactTabKey } from "../artifacts/cache";
+import { filesT } from "../artifacts/copy";
 import { addOpenTab, setActiveTab } from "../artifacts/ui";
 import type { ArtifactRow } from "../artifacts/types";
 import { renderMd } from "../md/render";
@@ -52,9 +53,11 @@ function rerenderViewer(): void {
 
 export async function loadLineage(a: ArtifactRow | null | undefined): Promise<LineagePayload> {
   if (!a) return emptyLineage();
+  const target = artifactMetadataTarget(a);
   try {
-    return (await api(`/artifacts/${a.id}/lineage`)) as LineagePayload;
-  } catch {
+    return (await api(artifactMetadataUrl(target, "lineage"))) as LineagePayload;
+  } catch (error) {
+    if (target._exactVersion) throw error;
     return emptyLineage();
   }
 }
@@ -75,8 +78,8 @@ export function showProvenance(a: unknown): void {
   provMode.value = true;
   if (!provSub.value) provSub.value = "code";
   addOpenTab(art);
-  setActiveTab(art.id);
-  const key = artifactCacheKey(art);
+  setActiveTab(artifactTabKey(art));
+  const key = artifactMetadataCacheKey(art);
   if (!lineage.value || _lineageFor.value !== key) {
     const request = (_lineageReq.value = (_lineageReq.value || 0) + 1);
     void loadLineage(art).then((l) => {
@@ -86,10 +89,16 @@ export function showProvenance(a: unknown): void {
         !provMode.value ||
         !docked ||
         docked.id !== art.id ||
-        artifactCacheKey(docked) !== key
+        artifactMetadataCacheKey(docked) !== key
       )
         return;
       lineage.value = l;
+      _lineageFor.value = key;
+      rerenderViewer();
+    }).catch((error: unknown) => {
+      const docked = asArtifact(dockArtifact.value);
+      if (request !== _lineageReq.value || !docked || artifactMetadataCacheKey(docked) !== key) return;
+      lineage.value = { ...emptyLineage(), load_error: apiErrorText(error) };
       _lineageFor.value = key;
       rerenderViewer();
     });
@@ -120,7 +129,12 @@ export function renderProvenanceInto(v: HTMLElement, a: unknown): void {
   const body = el("div", "prov-body");
   v.appendChild(body);
   const lin =
-    _lineageFor.value === artifactCacheKey(art) ? (lineage.value as LineagePayload | null) : null;
+    _lineageFor.value === artifactMetadataCacheKey(art) ? (lineage.value as LineagePayload | null) : null;
+  const readError = lin && (lin as LineagePayload & { load_error?: string }).load_error;
+  if (readError && provSub.value !== "environment") {
+    body.appendChild(el("div", "dock-empty", t("prov.env.loadFailed", readError)));
+    return;
+  }
   const model = lin ? lineageReviewModel(lin) : null;
   const cell = model && model.cell;
   if (provSub.value === "code") {
@@ -152,24 +166,31 @@ export function renderProvenanceInto(v: HTMLElement, a: unknown): void {
 
 async function renderProvEnvironment(body: HTMLElement, a: ArtifactRow): Promise<void> {
   body.appendChild(el("div", "dock-empty", t("prov.env.loadingSnapshot")));
-  const key = artifactCacheKey(a);
+  const target = artifactMetadataTarget(a);
+  const key = artifactMetadataCacheKey(target);
   const snaps = _envSnapById.value || {};
   let env: EnvSnapshot;
   try {
     env = (snaps[key] ||
       (snaps[key] = await (a && a.id
-        ? api(`/artifacts/${a.id}/environment`)
+        ? api(artifactMetadataUrl(target, "environment"))
         : api("/kernel/environment")))) as EnvSnapshot;
     _envSnapById.value = snaps;
   } catch (e) {
-    if (provMode.value && provSub.value === "environment") {
+    if (provMode.value && provSub.value === "environment" && artifactMetadataCacheKey(asArtifact(dockArtifact.value)) === key) {
       body.innerHTML = "";
-      body.appendChild(el("div", "dock-empty", t("prov.env.loadFailed", apiErrorText(e))));
+      // Every upload and every pre-snapshot capture has no recorded
+      // environment, and the exact-version read never borrows the daemon's.
+      // That is an expected state with its own copy, not a failed request.
+      const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
+      body.appendChild(el("div", "dock-empty", code === "environment_snapshot_unavailable"
+        ? filesT("prov.env.noSnapshot")
+        : t("prov.env.loadFailed", apiErrorText(e))));
     }
     return;
   }
   const docked = asArtifact(dockArtifact.value);
-  if (!provMode.value || provSub.value !== "environment" || (a && artifactCacheKey(docked) !== key))
+  if (!provMode.value || provSub.value !== "environment" || artifactMetadataCacheKey(docked) !== key)
     return;
   body.innerHTML = "";
   const chip = (k: string, val: string) => {
@@ -184,7 +205,16 @@ async function renderProvEnvironment(body: HTMLElement, a: ArtifactRow): Promise
   const py = envPythonChip(env);
   if (py) chips.appendChild(chip(py.label, py.value));
   if (env.environment_name) chips.appendChild(chip("Env", publicText(env.environment_name, 48)));
-  chips.appendChild(chip("Packages", String(envPackageCount(env))));
+  const packageCount = envPackageCount(env);
+  const pythonKind = String(env.kind || "python").toLowerCase() === "python";
+  chips.appendChild(
+    chip(
+      "Packages",
+      packageCount != null
+        ? String(packageCount)
+        : filesT(pythonKind ? "prov.env.packagesUnknown" : "prov.env.packagesNotApplicable"),
+    ),
+  );
   body.appendChild(chips);
   if (env.interpreter) body.appendChild(el("div", "env-plat", publicText(env.interpreter, 160)));
   if (env.platform) body.appendChild(el("div", "env-plat", env.platform));
@@ -265,7 +295,8 @@ async function renderProvEnvironment(body: HTMLElement, a: ArtifactRow): Promise
     body.appendChild(rw);
   }
   if (!pkgs.length) {
-    body.appendChild(el("div", "dock-empty", t("prov.env.noPackages")));
+    // An unread list is not an empty one; the warn note above says why.
+    if (packageCount != null) body.appendChild(el("div", "dock-empty", t("prov.env.noPackages")));
     return;
   }
   const wrap = el("div", "env-tbl-wrap");

@@ -19,3 +19,4 @@ M-01 首次运行向导内核。四个必需决策步骤、skip/清单，以及 
 | [`machine.ts`](machine.ts) | 四步 reducer。凭据不进入向导状态。 |
 | [`status.ts`](status.ts) | 清洗 GET 载荷；丢掉凭据形状的键。 |
 | [`wizard-integration.test.ts`](wizard-integration.test.ts) | 现有配置档的 Continue 会等待激活完成后再进入下一步。 |
+| [`wizard-skip.test.ts`](wizard-skip.test.ts) | Test 还在等待时 Skip 仍然可用，并且能在 probe 返回前完成跳过；Skip 或 Continue 之后才到达的 probe 结果会被丢弃；用户等待期间 probe 失败，仍然会报告出来。 |

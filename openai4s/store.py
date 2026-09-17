@@ -119,6 +119,8 @@ from openai4s.storage.migrations import (
     _is_duplicate_column,
     applied_migrations,
     current_version,
+    preflight_schema,
+    require_supported_schema,
     run_migrations,
 )
 from openai4s.storage.model_capability_receipts import (
@@ -251,8 +253,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_artifacts_project_created
-    ON artifacts(project_id, created_at DESC, artifact_id DESC);
+-- ix_artifacts_project_created is created by migration 32 only. This script is
+-- committed before the migration's backup is taken, so an object added here
+-- lands in an older database ahead of its pre-upgrade copy and survives a
+-- rolled-back upgrade. A new database gets the index from the same step.
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
     version_id    TEXT PRIMARY KEY,
@@ -1223,16 +1227,25 @@ class Store:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self._closed = False
+        preflight_schema(self.db_path)
         # mode= on mkdir is masked by the umask and only applies on creation,
         # so harden explicitly and unconditionally afterwards.
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        harden_dir(self.db_path.parent)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
             timeout=_BUSY_TIMEOUT_S,
         )
+        try:
+            # Recheck the formal connection before hardening, DDL or seeds:
+            # the database may have changed since the read-only preflight.
+            require_supported_schema(self._conn)
+        except BaseException:
+            self._conn.close()
+            self._closed = True
+            raise
+        harden_dir(self.db_path.parent)
         # SQLite creates the file at the process umask — 0644 on most systems.
         # This database holds plaintext credentials, so close it to the owner
         # as soon as it exists and before any schema is written into it.
@@ -2610,10 +2623,11 @@ class Store:
         version at all.
         """
         with self._lock:
+            version = current_version(self._conn)
             return {
-                "version": current_version(self._conn),
+                "version": version,
                 "expected": SCHEMA_VERSION,
-                "current": current_version(self._conn) >= SCHEMA_VERSION,
+                "current": version == SCHEMA_VERSION,
                 "applied": applied_migrations(self._conn),
             }
 
@@ -3046,6 +3060,12 @@ class Store:
 
     def message_count(self, root_frame_id: str) -> int:
         return self._frames.message_count(root_frame_id)
+
+    def has_message_history(self) -> bool:
+        return self._frames.has_message_history()
+
+    def has_execution_history(self) -> bool:
+        return self._frames.has_execution_history()
 
     def cell_count(self, root_frame_id: str) -> int:
         return self._frames.cell_count(root_frame_id)

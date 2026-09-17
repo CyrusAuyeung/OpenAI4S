@@ -20,9 +20,12 @@ What these pin, in order of how much they would cost to get wrong:
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -380,6 +383,97 @@ def test_a_dry_run_touches_nothing_and_still_reports_every_step(assets):
 # --------------------------------------------------------------------------
 
 
+class _Hub:
+    """The WebSocket hub the gateway handler needs; no route below streams."""
+
+    def emitter(self, root_frame_id):
+        return lambda event: None
+
+    def broadcast(self, root_frame_id, event):
+        return None
+
+
+@contextlib.contextmanager
+def _real_gateway(tmp_path, *, webui=None, monkeypatch=None):
+    """The real gateway handler on loopback, with the default token gate on.
+
+    The smoke used to be tested against a hand-written legacy page, so when the
+    daemon's default shell changed the test kept passing and the real smoke
+    failed on every build. Serving through `make_handler` means the probe is
+    judged against whatever `/` actually serves -- change the shell and this
+    goes red here, not in the release job.
+    """
+    import threading
+
+    from openai4s.config import Config, LLMConfig
+    from openai4s.server import gateway as gateway_mod
+    from openai4s.server import local_auth
+    from tests._ports import bound_gateway_server
+
+    if webui is not None:
+        monkeypatch.setattr(gateway_mod, "WEBUI_DIR", webui)
+    httpd, port = bound_gateway_server()
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        llm=LLMConfig(provider="deepseek", api_key="test-key"),
+        max_turns=3,
+        host="127.0.0.1",
+        port=port,
+    )
+    cfg.ensure_dirs()
+    runner = gateway_mod.SessionRunner(cfg, _Hub(), start_idle_sweeper=False)
+    handler_cls = gateway_mod.make_handler(cfg, _Hub(), runner)
+    observed: list[tuple[str, str]] = []
+
+    class Recording(handler_cls):
+        def do_GET(self):
+            observed.append((self.path, self.headers.get("Cookie", "") or ""))
+            return super().do_GET()
+
+    httpd.RequestHandlerClass = Recording
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield SimpleNamespace(
+            base_url=f"http://127.0.0.1:{port}/",
+            token=local_auth.load_or_mint(cfg.data_dir),
+            observed=observed,
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+        try:
+            runner.close()
+        except Exception:  # noqa: BLE001 - teardown must not mask a failure
+            pass
+
+
+def _installed_cli_reports(monkeypatch, url):
+    """`openai4s url` as the installed CLI answers it: one bootstrap line."""
+
+    def installed_cli(argv, **_kwargs):
+        assert argv[-4:] == ["-I", "-m", "openai4s", "url"]
+        return _completed(0, f"{url}\n".encode())
+
+    monkeypatch.setattr(subprocess, "run", installed_cli)
+
+
+def _shipped_entrypoints():
+    """The dist assets the committed default shell names, read from its bytes."""
+    import re
+
+    shell = (ROOT / "openai4s" / "server" / "webui" / "dist" / "index.html").read_text(
+        "utf-8"
+    )
+    scripts = re.findall(
+        r'<script[^>]*type="module"[^>]*src="(/static/dist/assets/[^"]+\.js)"', shell
+    )
+    styles = re.findall(r'href="(/static/dist/assets/[^"]+\.css)"', shell)
+    assert scripts, "the committed default shell names no module entrypoint"
+    return scripts, styles
+
+
 def test_installed_daemon_smoke_bootstraps_and_loads_the_real_webui(
     monkeypatch, tmp_path
 ):
@@ -388,99 +482,257 @@ def test_installed_daemon_smoke_bootstraps_and_loads_the_real_webui(
     The release smoke requested bare ``/`` after token auth became the default,
     received 401 forever, and reported that the installed daemon never served a
     page. Switching only to ``/health`` would hide the packaging failure this
-    smoke exists to catch. Model both sides: unauthenticated root is genuinely
-    refused, then the installed CLI's bootstrap URL must load the HTML shell and
-    its JavaScript through the issued cookie.
+    smoke exists to catch. So: unauthenticated root is genuinely refused, then
+    the installed CLI's bootstrap URL must load the HTML shell the daemon
+    serves *by default* and the entrypoint that shell names, through the cookie.
+
+    This test used to serve a hand-written legacy page (`id="dashboard"` +
+    `/static/app.js`). The default shell became the Vite dist tree and the real
+    smoke failed on every build while this stayed green, because it never
+    looked at what the daemon ships. It now drives the real gateway handler
+    over the real `webui/` tree.
     """
-    import threading
     import urllib.error
-    import urllib.parse
     import urllib.request
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    token = "release-smoke-token"
-    observed: list[tuple[str, str]] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, _format, *_args):
-            return
-
-        def _reply(self, code, body=b"", content_type="text/plain", headers=()):
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            for name, value in headers:
-                self.send_header(name, value)
-            self.end_headers()
-            if body:
-                self.wfile.write(body)
-
-        def do_GET(self):
-            parsed = urllib.parse.urlsplit(self.path)
-            cookie = self.headers.get("Cookie", "")
-            observed.append((self.path, cookie))
-            if parsed.path == "/health":
-                self._reply(200, b'{"status":"ok"}', "application/json")
-                return
-            if parsed.path == "/" and urllib.parse.parse_qs(parsed.query).get(
-                "token"
-            ) == [token]:
-                self._reply(
-                    303,
-                    headers=(
-                        ("Location", "/"),
-                        ("Set-Cookie", f"os_token={token}; Path=/; HttpOnly"),
-                    ),
-                )
-                return
-            authenticated = f"os_token={token}" in cookie
-            if parsed.path == "/" and authenticated:
-                self._reply(
-                    200,
-                    b'<title>OpenAI4S</title><div id="dashboard"></div>'
-                    b'<script src="/static/app.js"></script>',
-                    "text/html; charset=utf-8",
-                )
-                return
-            if parsed.path == "/static/app.js" and authenticated:
-                # Deliberately shares no source text with the real app.js: the
-                # probe must judge the entrypoint by serving facts, and this
-                # body fails the smoke if source-literal coupling comes back.
-                self._reply(
-                    200,
-                    b"(() => { window.addEventListener('load', boot); })();",
-                    "text/javascript; charset=utf-8",
-                )
-                return
-            self._reply(401, b"unauthorized", "application/json")
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_port}/"
-
-    def installed_cli(argv, **_kwargs):
-        assert argv[-4:] == ["-I", "-m", "openai4s", "url"]
-        return _completed(0, f"{base_url}?token={token}\n".encode())
-
-    monkeypatch.setattr(subprocess, "run", installed_cli)
-    pipeline = Pipeline("0.2.0", assets_dir=tmp_path)
-    try:
+    monkeypatch.delenv("OPENAI4S_WEBUI", raising=False)
+    scripts, styles = _shipped_entrypoints()
+    with _real_gateway(tmp_path) as daemon:
+        _installed_cli_reports(monkeypatch, f"{daemon.base_url}?token={daemon.token}")
         with pytest.raises(urllib.error.HTTPError) as denied:
-            urllib.request.urlopen(base_url, timeout=2)
+            urllib.request.urlopen(daemon.base_url, timeout=5)
         assert denied.value.code == 401, "the regression needs a real token gate"
 
-        pipeline._probe_installed_daemon(
-            Path("/installed/bin/python"), tmp_path, {}, base_url
+        Pipeline("0.2.0", assets_dir=tmp_path)._probe_installed_daemon(
+            Path("/installed/bin/python"), tmp_path, {}, daemon.base_url
         )
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+        observed = list(daemon.observed)
 
+    cookie = f"os_token={daemon.token}"
     assert any(path == "/health" for path, _cookie in observed)
-    assert any(path == "/" and cookie for path, cookie in observed)
-    assert any(path == "/static/app.js" and cookie for path, cookie in observed)
+    assert any(path == "/" and cookie in c for path, c in observed)
+    for asset in (*scripts, *styles):
+        assert any(
+            path == asset and cookie in c for path, c in observed
+        ), f"the probe never loaded {asset} with the issued cookie"
+
+
+def test_installed_daemon_smoke_refuses_a_shell_whose_entrypoint_is_not_shipped(
+    monkeypatch, tmp_path
+):
+    """The shell alone is not the workbench: its named entrypoint must serve.
+
+    A wheel that packages `dist/index.html` but drops `dist/assets/` serves a
+    blank page. The probe fetches the exact script the shell names, so that
+    packaging fault is a smoke failure rather than a green release.
+    """
+    import shutil
+
+    webui = tmp_path / "webui"
+    (webui / "dist").mkdir(parents=True)
+    shutil.copyfile(
+        ROOT / "openai4s" / "server" / "webui" / "dist" / "index.html",
+        webui / "dist" / "index.html",
+    )
+    monkeypatch.delenv("OPENAI4S_WEBUI", raising=False)
+    with _real_gateway(tmp_path, webui=webui, monkeypatch=monkeypatch) as daemon:
+        _installed_cli_reports(monkeypatch, f"{daemon.base_url}?token={daemon.token}")
+        with pytest.raises(ReleaseError, match="Web UI application"):
+            Pipeline("0.2.0", assets_dir=tmp_path)._probe_installed_daemon(
+                Path("/installed/bin/python"), tmp_path, {}, daemon.base_url
+            )
+
+
+def test_installed_daemon_smoke_judges_the_default_shell_not_the_escape_hatch(
+    monkeypatch, tmp_path
+):
+    """The frozen legacy shell is not what a user gets, so it cannot pass smoke.
+
+    Accepting it would let a release go green on `OPENAI4S_WEBUI=legacy` while
+    the default workbench was broken -- a gate that tests a page nobody sees.
+    """
+    monkeypatch.setenv("OPENAI4S_WEBUI", "legacy")
+    with _real_gateway(tmp_path) as daemon:
+        _installed_cli_reports(monkeypatch, f"{daemon.base_url}?token={daemon.token}")
+        with pytest.raises(ReleaseError, match="Web UI shell"):
+            Pipeline("0.2.0", assets_dir=tmp_path)._probe_installed_daemon(
+                Path("/installed/bin/python"), tmp_path, {}, daemon.base_url
+            )
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        # classic (non-module) scripts are the shell's helpers, not its bundle
+        b'<script src="/static/dist/assets/index-a.js"></script>',
+        # another origin is not what this wheel ships
+        b'<script type="module" src="https://cdn.invalid/static/dist/assets/i.js">',
+        b'<script type="module" src="//cdn.invalid/static/dist/assets/i.js">',
+        # a traversal that merely starts with the prefix
+        b'<script type="module" src="/static/dist/assets/../../app.js">',
+        # the legacy escape hatch's entrypoint
+        b'<script type="module" src="/static/app.js"></script>',
+    ],
+)
+def test_the_smoke_counts_only_same_origin_dist_module_entrypoints(markup):
+    from scripts.release_pipeline import default_shell_assets
+
+    assert default_shell_assets(b"<title>OpenAI4S</title>" + markup) == ([], [])
+
+
+def test_the_smoke_reads_entrypoints_from_the_committed_default_shell():
+    from scripts.release_pipeline import default_shell_assets
+
+    shell = ROOT / "openai4s" / "server" / "webui" / "dist" / "index.html"
+    assert default_shell_assets(shell.read_bytes()) == _shipped_entrypoints()
+
+
+def test_the_daemon_smoke_never_inherits_the_legacy_shell_switch(monkeypatch, tmp_path):
+    """An operator's `OPENAI4S_WEBUI=legacy` must not change what smoke judges.
+
+    `_install_and_exercise` copies the caller's environment into the daemon it
+    starts, so a release machine with the escape hatch exported would smoke the
+    legacy page -- and, with the probe judging the default shell, fail for a
+    reason that has nothing to do with the wheel.
+    """
+    started: list[dict[str, str]] = []
+
+    class ExitedDaemon:
+        stdout = None
+
+        def __init__(self, argv, **kwargs):
+            started.append(dict(kwargs["env"]))
+
+        def poll(self):
+            return 1
+
+        def terminate(self):  # pragma: no cover - poll() already reports exit
+            return None
+
+        def wait(self, timeout=None):
+            return 1
+
+    monkeypatch.setattr(subprocess, "Popen", ExitedDaemon)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _completed())
+    pipeline = Pipeline("0.2.0", assets_dir=tmp_path)
+    with pytest.raises(ReleaseError, match="exited before serving"):
+        pipeline._smoke_daemon(
+            Path("/installed/bin/python"),
+            tmp_path,
+            {"OPENAI4S_WEBUI": "legacy", "OPENAI4S_DATA_DIR": str(tmp_path)},
+        )
+    assert started and "OPENAI4S_WEBUI" not in started[0]
+    assert started[0]["OPENAI4S_DATA_DIR"] == str(tmp_path)
+
+
+#: A stand-in for the installed interpreter. `serve` behaves like the daemon
+#: (a foreground process that exits promptly on SIGTERM); `stop` behaves like
+#: any stop that decides "gone" by pid existence alone, so a zombie reads as
+#: alive. That makes the pipeline's own reaping the only thing under test —
+#: the real CLI now reads zombies as exited, which would hide its absence.
+_FAKE_INSTALLED_CLI = r"""
+import json, os, signal, sys, time
+from pathlib import Path
+
+command = sys.argv[4]
+data = Path(os.environ["OPENAI4S_DATA_DIR"])
+pidfile = data / "fake-daemon.pid"
+if command == "serve":
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    staged = data / "fake-daemon.pid.tmp"
+    staged.write_text(str(os.getpid()))
+    os.replace(staged, pidfile)
+    time.sleep(120)
+    sys.exit(0)
+if command == "stop":
+    pid = int(pidfile.read_text())
+    rc = 2
+    if os.environ["FAKE_STOP"] == "pid-existence":
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + float(os.environ["FAKE_STOP_PATIENCE"])
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                rc = 0
+                break
+            time.sleep(0.05)
+    (data / "fake-stop.json").write_text(json.dumps({"rc": rc}))
+    print("daemon stopped" if rc == 0 else "error: daemon is still shutting down")
+    sys.exit(rc)
+sys.exit(64)
+"""
+
+
+def _fake_installed_python(tmp_path, monkeypatch, stop_mode, patience=20.0):
+    """Wire `_smoke_daemon` to real local processes, with no network probe."""
+    script = tmp_path / "fake_installed_cli.py"
+    script.write_text(_FAKE_INSTALLED_CLI, encoding="utf-8")
+    python = tmp_path / "python"
+    python.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
+    )
+    python.chmod(0o755)
+    data = tmp_path / "data"
+    data.mkdir()
+
+    def served_once_the_daemon_is_up(python, root, env, base_url):
+        deadline = time.monotonic() + 30
+        while not (data / "fake-daemon.pid").exists():
+            if time.monotonic() > deadline:  # pragma: no cover - diagnostic
+                raise ReleaseError("the fake daemon never wrote its pidfile")
+            time.sleep(0.02)
+
+    monkeypatch.setattr(
+        Pipeline,
+        "_probe_installed_daemon",
+        staticmethod(served_once_the_daemon_is_up),
+    )
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "OPENAI4S_DATA_DIR": str(data),
+        "FAKE_STOP": stop_mode,
+        "FAKE_STOP_PATIENCE": str(patience),
+    }
+    return python, data, env
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_the_daemon_smoke_reaps_its_daemon_while_the_cli_stops_it(
+    monkeypatch, tmp_path
+):
+    """The daemon is the pipeline's own child; only the pipeline can reap it.
+
+    The smoke used to block in `subprocess.run(stop)`, so the exited daemon sat
+    as a zombie for as long as `stop` polled. A stop that judges exit by pid
+    existence then waited out its whole timeout and returned 2 — about 30s of
+    every release smoke, CI's included — and the exit status was discarded.
+    """
+    python, data, env = _fake_installed_python(tmp_path, monkeypatch, "pid-existence")
+
+    started = time.monotonic()
+    outcome = Pipeline("0.2.0", assets_dir=tmp_path)._smoke_daemon(
+        python, tmp_path, env
+    )
+    elapsed = time.monotonic() - started
+
+    assert outcome.startswith("served authenticated Web UI")
+    assert json.loads((data / "fake-stop.json").read_text()) == {"rc": 0}
+    assert elapsed < 12, f"the smoke's stop took {elapsed:.1f}s"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_the_daemon_smoke_fails_when_the_cli_stop_fails(monkeypatch, tmp_path):
+    """Stopping through the CLI's own pidfile is a claim the smoke must check.
+
+    A stop that exits non-zero and leaves the daemon running is a broken
+    installed CLI, not a detail for the fallback `terminate()` to paper over.
+    """
+    python, data, env = _fake_installed_python(tmp_path, monkeypatch, "refuse")
+
+    with pytest.raises(ReleaseError, match=r"openai4s stop.*exited 2"):
+        Pipeline("0.2.0", assets_dir=tmp_path)._smoke_daemon(python, tmp_path, env)
+    assert json.loads((data / "fake-stop.json").read_text()) == {"rc": 2}
 
 
 # --------------------------------------------------------------------------
@@ -1481,6 +1733,35 @@ def test_a_complete_release_publishes_last(assets):
     verbs = [call[1] for call in calls]
     assert verbs.index("upload") < verbs.index("edit")
     assert calls[-1][-1] == "--draft=false", "publishing is the final act"
+
+
+def test_the_sealed_report_is_a_snapshot_not_a_verdict(assets):
+    """`evidence` runs before `checksums`, `draft`, `upload` and `publish`.
+
+    The staging job's bundle recorded the end-of-run verdict anyway, with
+    `ok: true` and `published: true` and all thirteen steps planned, for a run
+    that had uploaded nothing yet. That record is attached to the release and
+    kept for 90 days even when the run later fails at PyPI. The stdout
+    report was right all along, so this reads the zip.
+    """
+    import zipfile
+
+    _signed_dmg(assets)
+    staged = _pipeline(
+        assets, mode="release", stop_after="reverify", gh=_gh_for(assets)
+    ).run()
+    assert staged["ok"] is True and staged["published"] is False, staged
+
+    with zipfile.ZipFile(assets / "openai4s-0.2.0-evidence.zip") as archive:
+        sealed = json.loads(archive.read("release-report.json"))
+    assert sealed["ok"] is None
+    assert sealed["published"] is False
+    assert sealed["sealed_at"] == "evidence"
+    assert sealed["stopped_at"] is None
+    assert sealed["planned"] == list(STEPS[: STEPS.index("reverify") + 1])
+    assert [step["step"] for step in sealed["steps"]] == list(
+        STEPS[: STEPS.index("evidence")]
+    )
 
 
 def _write_checksums(assets: Path) -> None:

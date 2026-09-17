@@ -4,7 +4,9 @@
  * the owning module writes window, like F-06 `bootWs()` → `onEvent`).
  */
 
+import { settleLiveCellCard } from "../messages/cardState";
 import { setArtifactCreatedSideEffects } from "../ws/handlers";
+import { currentId } from "../../stores/session";
 import { eventFrameId, mine } from "../ws/guards";
 import { hasWsHandler, registerWsHandler } from "../ws/registry";
 import type { WsHandler, WsMessage } from "../ws/types";
@@ -29,7 +31,10 @@ export function registerNotebookHandlers(): void {
   });
   registerUnless("notebook_cell_finished", (m: WsMessage) => {
     if (mine(eventFrameId(m))) {
+      // The chat's activity card shows the same outcome (one handler per type).
+      settleLiveCellCard(m);
       nbCellFinished(m);
+      if (currentId.value) void loadExecutionLog(currentId.value);
       scheduleWorkbenchRefresh();
     }
   });

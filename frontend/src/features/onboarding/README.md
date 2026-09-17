@@ -19,3 +19,4 @@ M-01 first-run wizard kernel. Four required decision steps, skip/checklist, and 
 | [`machine.ts`](machine.ts) | Four-step reducer. Credentials never enter wizard state. |
 | [`status.ts`](status.ts) | Sanitize GET payload; drop credential-shaped keys. |
 | [`wizard-integration.test.ts`](wizard-integration.test.ts) | Existing-profile Continue awaits activation before dispatching the next step. |
+| [`wizard-skip.test.ts`](wizard-skip.test.ts) | Skip stays enabled while Test is still waiting and completes before the probe answers; a probe answer that arrives after Skip or Continue is dropped; a probe that fails while the user waits is still reported. |

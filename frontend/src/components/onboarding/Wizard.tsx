@@ -294,6 +294,11 @@ export function WizardHost() {
   const [state, dispatch] = useReducer(reduceWizard, INITIAL_WIZARD);
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  // A probe is not `busy`: it can wait out a connect timeout and its retries
+  // for minutes, and `busy` disables Skip. The run counter lets the wizard
+  // walk away from a probe that is still waiting; a late answer is dropped.
+  const [testing, setTesting] = useState(false);
+  const probeRun = useRef(0);
   const alive = useRef(true);
 
   useEffect(() => {
@@ -336,7 +341,13 @@ export function WizardHost() {
     dispatch({ type: "fail", message: next.message, requestId: next.requestId });
   };
 
+  const leaveTest = () => {
+    probeRun.current += 1;
+    setTesting(false);
+  };
+
   const onSkip = async () => {
+    leaveTest();
     setBusy(true);
     try {
       await completeOnboarding({ skip: true });
@@ -349,6 +360,7 @@ export function WizardHost() {
   };
 
   const onFinish = async () => {
+    leaveTest();
     setBusy(true);
     try {
       await completeOnboarding({ skip: true });
@@ -397,11 +409,13 @@ export function WizardHost() {
       dispatch({ type: "fail", message: ot("onboarding.test.needProfile"), requestId: "" });
       return;
     }
+    const run = (probeRun.current += 1);
+    const current = () => alive.current && probeRun.current === run;
     dispatch({ type: "startTest" });
-    setBusy(true);
+    setTesting(true);
     try {
       const result = await probeModelProfile(id);
-      if (!alive.current) return;
+      if (!current()) return;
       const detail = publicText(result.detail, 240);
       dispatch({
         type: "testResult",
@@ -417,7 +431,7 @@ export function WizardHost() {
         });
       }
     } catch (error) {
-      if (!alive.current) return;
+      if (!current()) return;
       const next = wizardErrorFromUnknown(error);
       dispatch({ type: "fail", message: next.message, requestId: next.requestId });
       dispatch({
@@ -427,7 +441,7 @@ export function WizardHost() {
         reachable: false,
       });
     } finally {
-      if (alive.current) setBusy(false);
+      if (current()) setTesting(false);
     }
   };
 
@@ -557,10 +571,10 @@ export function WizardHost() {
                   <button
                     type="button"
                     class="solid-btn"
-                    disabled={busy}
+                    disabled={busy || testing}
                     onClick={() => void onTest()}
                   >
-                    {busy && state.testClicked ? t("cust.models.testing") : t("cust.models.test")}
+                    {testing ? t("cust.models.testing") : t("cust.models.test")}
                   </button>
                 </div>
                 <CapabilityBadges receipt={state.receipt} unknownReason={state.probeDetail} />
@@ -585,7 +599,10 @@ export function WizardHost() {
               type="button"
               class="outline-btn"
               disabled={busy}
-              onClick={() => dispatch({ type: "showChecklist" })}
+              onClick={() => {
+                leaveTest();
+                dispatch({ type: "showChecklist" });
+              }}
             >
               {ot("onboarding.checklist")}
             </button>
@@ -605,6 +622,7 @@ export function WizardHost() {
               class="solid-btn"
               disabled={busy}
               onClick={() => {
+                if (state.step === "test") leaveTest();
                 if (state.step === "readiness") dispatch({ type: "markReadinessSeen" });
                 dispatch({ type: "next" });
               }}

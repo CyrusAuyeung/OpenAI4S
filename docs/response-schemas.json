@@ -6745,6 +6745,31 @@
         "type": "object"
       }
     },
+    "GET /artifacts/([^/]+)/environment [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "GET /artifacts/([^/]+)/environment [ok]": {
       "schema": {
         "properties": {
@@ -6812,10 +6837,16 @@
             ]
           },
           "platform": {
-            "type": "string"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "provenance": {
-            "type": "string"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "python_version": {
             "type": [
@@ -6914,6 +6945,31 @@
         "type": "object"
       }
     },
+    "GET /artifacts/([^/]+)/lineage [error]": {
+      "schema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "error",
+          "request_id",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
     "GET /artifacts/([^/]+)/lineage [ok]": {
       "schema": {
         "properties": {
@@ -6943,17 +6999,70 @@
                 "at": {
                   "type": "string"
                 },
+                "cell_index": {
+                  "type": "integer"
+                },
+                "exit_status": {
+                  "type": "string"
+                },
+                "files_read": {
+                  "type": "array"
+                },
+                "files_written": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kernel_id": {
+                  "type": "string"
+                },
                 "kind": {
+                  "type": "string"
+                },
+                "language": {
+                  "type": "string"
+                },
+                "source": {
                   "type": "string"
                 }
               },
               "required": [
-                "at",
                 "kind"
               ],
               "type": "object"
             },
             "type": "array"
+          },
+          "producer": {
+            "properties": {
+              "cell_recorded": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_kind": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "producing_cell_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cell_recorded",
+              "frame_id",
+              "frame_kind",
+              "kind",
+              "producing_cell_id"
+            ],
+            "type": "object"
+          },
+          "version_id": {
+            "type": "string"
           }
         },
         "required": [
@@ -7551,6 +7660,9 @@
                 "created_at": {
                   "type": "string"
                 },
+                "filename": {
+                  "type": "string"
+                },
                 "is_latest": {
                   "type": "boolean"
                 },
@@ -7558,7 +7670,10 @@
                   "type": "integer"
                 },
                 "producing_cell_id": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "retrieval_source": {
                   "properties": {
@@ -7598,6 +7713,7 @@
                 "checksum",
                 "content_type",
                 "created_at",
+                "filename",
                 "is_latest",
                 "ordinal",
                 "producing_cell_id",
@@ -8905,9 +9021,6 @@
                       "type": "string"
                     },
                     "missing": {
-                      "items": {
-                        "type": "string"
-                      },
                       "type": "array"
                     },
                     "phase": {
@@ -9217,6 +9330,9 @@
     "GET /files [ok]": {
       "schema": {
         "properties": {
+          "configured": {
+            "type": "boolean"
+          },
           "entries": {
             "items": {
               "properties": {
@@ -13271,7 +13387,10 @@
                   ]
                 },
                 "generation_id": {
-                  "type": "null"
+                  "type": [
+                    "null",
+                    "string"
+                  ]
                 },
                 "is_latest_attempt": {
                   "type": "boolean"
@@ -13287,6 +13406,32 @@
                 },
                 "origin": {
                   "type": "string"
+                },
+                "output_artifacts": {
+                  "items": {
+                    "properties": {
+                      "artifact_id": {
+                        "type": "string"
+                      },
+                      "filename": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "type": "string"
+                      },
+                      "version_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "artifact_id",
+                      "filename",
+                      "url",
+                      "version_id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
                 },
                 "peak_rss_kb": {
                   "type": [
@@ -13313,6 +13458,9 @@
                   "type": "boolean"
                 },
                 "stale_reasons": {
+                  "items": {
+                    "type": "string"
+                  },
                   "type": "array"
                 },
                 "state_revision": {
@@ -13364,6 +13512,7 @@
                 "language",
                 "mutation_uncertain",
                 "origin",
+                "output_artifacts",
                 "peak_rss_kb",
                 "pin",
                 "producing_cell_id",
@@ -14391,6 +14540,25 @@
                   },
                   "type": "array"
                 },
+                "cancelled": {
+                  "properties": {
+                    "execution_id": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "execution_id",
+                    "reason",
+                    "request_id"
+                  ],
+                  "type": "object"
+                },
                 "content": {
                   "type": "string"
                 },
@@ -15224,6 +15392,94 @@
       "schema": {
         "properties": {
           "steps": {
+            "items": {
+              "properties": {
+                "created_at": {
+                  "type": "integer"
+                },
+                "input": {
+                  "properties": {
+                    "environment": {
+                      "type": "string"
+                    },
+                    "files": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "language": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "environment",
+                    "files"
+                  ],
+                  "type": "object"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "output": {
+                  "properties": {
+                    "artifacts": {
+                      "items": {
+                        "properties": {
+                          "artifact_id": {
+                            "type": "string"
+                          },
+                          "filename": {
+                            "type": "string"
+                          },
+                          "version_id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "artifact_id",
+                          "filename",
+                          "version_id"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "artifacts"
+                  ],
+                  "type": "object"
+                },
+                "seq": {
+                  "type": "integer"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "step_id": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "null"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "created_at",
+                "input",
+                "kind",
+                "output",
+                "seq",
+                "status",
+                "step_id",
+                "summary",
+                "title"
+              ],
+              "type": "object"
+            },
             "type": "array"
           }
         },
@@ -15467,9 +15723,6 @@
                 "type": "string"
               },
               "missing": {
-                "items": {
-                  "type": "string"
-                },
                 "type": "array"
               },
               "phase": {
@@ -15771,6 +16024,9 @@
                 "capability_receipt": {
                   "type": "null"
                 },
+                "credential_source": {
+                  "type": "string"
+                },
                 "has_api_key": {
                   "type": "boolean"
                 },
@@ -15812,6 +16068,7 @@
               "required": [
                 "base_url",
                 "capability_receipt",
+                "credential_source",
                 "has_api_key",
                 "id",
                 "model",
@@ -16354,6 +16611,9 @@
                 "capability_receipt": {
                   "type": "null"
                 },
+                "credential_source": {
+                  "type": "string"
+                },
                 "has_api_key": {
                   "type": "boolean"
                 },
@@ -16395,6 +16655,7 @@
               "required": [
                 "base_url",
                 "capability_receipt",
+                "credential_source",
                 "has_api_key",
                 "id",
                 "model",
@@ -24501,6 +24762,71 @@
         "type": "object"
       }
     },
+    "PATCH /model-profiles/([^/]+) [ok]": {
+      "schema": {
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "capability_receipt": {
+            "type": "null"
+          },
+          "credential_source": {
+            "type": "string"
+          },
+          "has_api_key": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "readiness": {
+            "properties": {
+              "checked_endpoint": {
+                "type": "boolean"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "checked_endpoint",
+              "detail",
+              "state"
+            ],
+            "type": "object"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_url",
+          "capability_receipt",
+          "credential_source",
+          "has_api_key",
+          "id",
+          "model",
+          "name",
+          "provider",
+          "readiness",
+          "revision"
+        ],
+        "type": "object"
+      }
+    },
     "PATCH /model-profiles/([^/]+)/activate [error]": {
       "schema": {
         "properties": {
@@ -29001,7 +29327,10 @@
             "type": "integer"
           },
           "model": {
-            "type": "null"
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "name": {
             "type": "null"
@@ -29685,6 +30014,9 @@
                       "interpreter": {
                         "type": "string"
                       },
+                      "kernel_mode": {
+                        "type": "string"
+                      },
                       "key": {
                         "items": {
                           "type": [
@@ -29712,6 +30044,7 @@
                       "environment_name",
                       "environment_root",
                       "interpreter",
+                      "kernel_mode",
                       "key",
                       "runtime",
                       "sandbox",
@@ -33624,6 +33957,9 @@
         "properties": {
           "binding": {
             "properties": {
+              "backfilled": {
+                "type": "boolean"
+              },
               "bound": {
                 "type": "boolean"
               },
@@ -36169,6 +36505,9 @@
           "capability_receipt": {
             "type": "null"
           },
+          "credential_source": {
+            "type": "string"
+          },
           "has_api_key": {
             "type": "boolean"
           },
@@ -36210,6 +36549,7 @@
         "required": [
           "base_url",
           "capability_receipt",
+          "credential_source",
           "has_api_key",
           "id",
           "model",
@@ -38427,9 +38767,6 @@
           "ok": {
             "type": "boolean"
           },
-          "path": {
-            "type": "string"
-          },
           "problems": {
             "items": {
               "type": "string"
@@ -38448,7 +38785,6 @@
           "files_verified",
           "format",
           "ok",
-          "path",
           "problems",
           "schema_version",
           "verifies"

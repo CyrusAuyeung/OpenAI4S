@@ -7,7 +7,7 @@
 
 import { t } from "../../i18n/runtime";
 import { _liveCell, liveCells } from "../../stores/notebook";
-import { currentId } from "../../stores/session";
+import { _openGen, currentId, historyLoad, noteHistoryMutation } from "../../stores/session";
 import {
   _resumeTimer,
   _resumeTok,
@@ -19,7 +19,9 @@ import {
   stream as liveStream,
 } from "../../stores/stream";
 import { loadArtifacts } from "../artifacts/load";
+import { settleRunningCards } from "../messages/cardState";
 import { $, el } from "../messages/dom";
+import { finishStoppedStream } from "../messages/stopped";
 import { flushRender, type LiveStream } from "../messages/stream";
 import { notebookOnTurnDone } from "../notebook/kernel";
 import { hint } from "../sessions/chrome";
@@ -90,12 +92,15 @@ export function failureHint(detail: unknown): string {
 }
 
 export function turnDone(status: string, detail?: unknown): void {
+  noteHistoryMutation();
   running.value = false;
   enableComposer(true);
   setCancelHidden(true);
   clearTimeout(_resumeTimer.value as ReturnType<typeof setTimeout>);
   _resumeTok.value = (_resumeTok.value || 0) + 1;
   const st = liveStream.value as LiveStream | null;
+  if (st && status === "cancelled") finishStoppedStream(st, detail);
+  settleRunningCards();
   if (st) {
     flushRender(st, true);
     st.md.classList.remove("cursor");
@@ -111,6 +116,14 @@ export function turnDone(status: string, detail?: unknown): void {
     callLane("loadExecutionLog", currentId.value);
   }
   liveStream.value = null;
+  if (currentId.value && (historyLoad.value?.deferred || historyLoad.value?.status === "loading")) {
+    const fid = currentId.value;
+    const gen = _openGen.value;
+    // Defer past the synchronous WS dispatcher so its cursor is committed.
+    void Promise.resolve().then(() => {
+      if (currentId.value === fid && _openGen.value === gen) callLane("alignHistoryAfterTurn", fid, gen);
+    });
+  }
   liveCells.value = [];
   _liveCell.value = null;
   if (planReady.value && planStatus.value === "executing") {
