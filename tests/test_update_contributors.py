@@ -1,5 +1,6 @@
 import re
 import subprocess
+from contextlib import contextmanager
 
 import pytest
 
@@ -274,6 +275,7 @@ def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
 
     monkeypatch.setattr(update_contributors, "_get", download)
     assert update_contributors.main() == 0
+    assert sorted(path.name for path in avatar_dir.glob("*.png")) == expected
     _stage(root)
     assert check_directory_readmes.main() == 0
     refreshed = {f"{login}.png".casefold() for login in logins if login not in failed}
@@ -309,8 +311,9 @@ def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
         "<!-- AVATAR-FILES:START --><!-- AVATAR-FILES:END -->",
     ],
 )
+@pytest.mark.parametrize("filename", ["README.md", "README_zh.md"])
 def test_an_unusable_inventory_stops_the_refresh_before_any_write(
-    contributor_checkout, monkeypatch, capsys, invalid_block
+    contributor_checkout, monkeypatch, capsys, invalid_block, filename
 ):
     """No avatar, wall or inventory may change when one inventory is unusable.
 
@@ -320,19 +323,17 @@ def test_an_unusable_inventory_stops_the_refresh_before_any_write(
     avatar_dir = contributor_checkout
     root = avatar_dir.parents[1]
     (avatar_dir / "Departed.png").write_bytes(b"previous-avatar")
-    chinese = avatar_dir / "README_zh.md"
+    document = avatar_dir / filename
     if invalid_block is None:
-        chinese.unlink()
+        document.unlink()
     else:
-        chinese.write_text(invalid_block, encoding="utf-8")
-    monkeypatch.setattr(
-        update_contributors,
-        "fetch_contributors",
-        lambda _token: [{"login": "NewPerson"}],
-    )
-    monkeypatch.setattr(
-        update_contributors, "_get", lambda _url, _token: b"synthetic-avatar"
-    )
+        document.write_text(invalid_block, encoding="utf-8")
+
+    def unexpected_fetch(*_args):
+        raise AssertionError("invalid inventories must fail before auth or network")
+
+    monkeypatch.setattr(update_contributors, "_token", unexpected_fetch)
+    monkeypatch.setattr(update_contributors, "fetch_contributors", unexpected_fetch)
 
     def snapshot():
         return {
@@ -344,4 +345,48 @@ def test_an_unusable_inventory_stops_the_refresh_before_any_write(
     before = snapshot()
     assert update_contributors.main() == 1
     assert snapshot() == before
-    assert "README_zh.md" in capsys.readouterr().err
+    assert filename in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+def test_main_stages_all_four_readmes_before_replacing_any(
+    contributor_checkout, monkeypatch, failure
+):
+    avatar_dir = contributor_checkout
+    root = avatar_dir.parents[1]
+    (avatar_dir / "Existing.png").write_bytes(b"previous-avatar")
+    monkeypatch.setattr(
+        update_contributors,
+        "fetch_contributors",
+        lambda _token: [{"login": "Existing"}],
+    )
+    monkeypatch.setattr(
+        update_contributors, "_get", lambda _url, _token: b"previous-avatar"
+    )
+    originals = {
+        path: path.read_bytes()
+        for directory in (root, avatar_dir)
+        for path in directory.glob("README*.md")
+    }
+    original_paths = set(root.rglob("*"))
+    fdopen = update_contributors.os.fdopen
+    writes = 0
+
+    @contextmanager
+    def fail_last_staged_write(fd, *args, **kwargs):
+        nonlocal writes
+        with fdopen(fd, *args, **kwargs) as stream:
+            writes += 1
+            if writes == 4:
+                stream.write("partial staging output")
+                raise failure("interrupted while staging the last document")
+            yield stream
+
+    monkeypatch.setattr(update_contributors.os, "fdopen", fail_last_staged_write)
+
+    with pytest.raises(failure):
+        update_contributors.main()
+
+    assert writes == 4
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert set(root.rglob("*")) == original_paths

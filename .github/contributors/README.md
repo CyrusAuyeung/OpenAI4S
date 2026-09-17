@@ -12,6 +12,10 @@ pruning. Stage a refresh (`git add -A .github/contributors`) before running
 keeps a pruned avatar until its deletion is staged. Nothing in the OpenAI4S
 runtime reads this directory.
 
+All changed READMEs are prepared as sibling temporary files before any
+destination is replaced. A staging failure leaves every README unchanged;
+each replacement is atomic, but the batch is not an all-or-nothing transaction.
+
 ## Files
 
 <!-- AVATAR-FILES:START -->

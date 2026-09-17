@@ -255,7 +255,10 @@ def _replace_block(text: str, start: str, end: str, block: str) -> str:
 
 
 def _write_texts(updates: dict[str, str]) -> None:
-    """Stage every document beside its target, then replace them together."""
+    """Stage every document before replacing any destination.
+
+    Each replacement is atomic; the batch is not a multi-file transaction.
+    """
     staged: list[tuple[str, str]] = []
     try:
         for path, text in updates.items():
@@ -272,18 +275,18 @@ def _write_texts(updates: dict[str, str]) -> None:
                 os.remove(tmp)
 
 
-def update_readme(path: str, block: str) -> bool:
+def render_readme_update(path: str, block: str) -> str | None:
+    """Render a changed wall without writing it; keep the existing skip policy."""
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
     try:
         updated = _replace_block(text, START, END, block)
     except ValueError as exc:
         print(f"{path}: {exc}", file=sys.stderr)
-        return False
+        return None
     if updated == text:
-        return False
-    _write_texts({path: updated})
-    return True
+        return None
+    return updated
 
 
 def read_avatar_readmes() -> dict[str, str]:
@@ -305,7 +308,7 @@ def read_avatar_readmes() -> dict[str, str]:
     return texts
 
 
-def update_avatar_readmes(texts: dict[str, str], names: list[str]) -> list[str]:
+def avatar_readme_updates(texts: dict[str, str], names: list[str]) -> dict[str, str]:
     """Document surviving PNGs, preserving their on-disk filename spelling."""
     updates: dict[str, str] = {}
     for filename, header, description in INVENTORIES:
@@ -318,8 +321,7 @@ def update_avatar_readmes(texts: dict[str, str], names: list[str]) -> list[str]:
         updated = _replace_block(texts[path], INVENTORY_START, INVENTORY_END, block)
         if updated != texts[path]:
             updates[path] = updated
-    _write_texts(updates)
-    return list(updates)
+    return updates
 
 
 def main() -> int:
@@ -336,8 +338,15 @@ def main() -> int:
     people = include_recognized_contributors(people)
     have_png, written, surviving = write_avatars(people, token)
     block = render(people, have_png)
-    changed = [p for p in READMES if os.path.exists(p) and update_readme(p, block)]
-    changed.extend(update_avatar_readmes(inventories, surviving))
+    updates = {}
+    for path in READMES:
+        if os.path.exists(path):
+            updated = render_readme_update(path, block)
+            if updated is not None:
+                updates[path] = updated
+    updates.update(avatar_readme_updates(inventories, surviving))
+    _write_texts(updates)
+    changed = list(updates)
     print(
         f"{len(people)} contributors: "
         + ", ".join(c["login"] for c in people)
