@@ -252,7 +252,7 @@ def _matching_pypi(assets: Path):
         return {
             path.name: sha256_file(path)
             for path in assets.glob("*")
-            if path.name.endswith((".whl", ".tar.gz"))
+            if path.name.endswith(".whl") or path.name == "openai4s-0.2.0.tar.gz"
         }
 
     return digests
@@ -286,6 +286,8 @@ _LOCAL_ONLY_SIDECARS = (
     # to reach the finalize job through a channel the draft cannot rewrite.
     "build-receipt-dist.json",
     "build-receipt-macos.json",
+    "build-receipt-linux.json",
+    "build-receipt-windows.json",
     "stage-attestation.json",
 )
 
@@ -1119,6 +1121,9 @@ def test_a_build_receipt_from_another_workflow_run_is_refused(assets):
     assert "workflow run 7100" in report["steps"][-1]["detail"]
     assert "7101" in report["steps"][-1]["detail"]
 
+    # A stopped-run report is diagnostic output, not a receipted distribution
+    # to feed into the next staging attempt.
+    (assets / "openai4s-0.2.0-evidence-stopped.zip").unlink()
     same = _pipeline(
         assets, mode="release", gh=_gh_for(assets), workflow_run_id="7100"
     ).run()
@@ -1770,12 +1775,160 @@ def _write_checksums(assets: Path) -> None:
     Excludes the local-only sidecars (they are never uploaded), so the manifest
     matches the release listing `_gh_for` serves.
     """
+    # Finalize fixtures must carry the same sealed evidence as a real staged
+    # draft. Do not regenerate it after a mutation: those tests must preserve
+    # the original build's claims while only refreshing the mutable checksum.
+    if not (assets / "openai4s-0.2.0-evidence.zip").exists():
+        sealed = _pipeline(assets, mode="release", stop_after="evidence").run()
+        assert sealed["ok"], sealed
     lines = []
     for path in sorted(assets.glob("*")):
         if path.name == "SHA256SUMS" or path.name.endswith(_LOCAL_ONLY_SIDECARS):
             continue
         lines.append(f"{sha256_file(path)}  {path.name}\n")
     (assets / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+
+
+def _desktop_release_assets(assets, *, payload=b"linux-bundle"):
+    import zipfile
+
+    linux = assets / "OpenAI4S-0.2.0-linux-x86_64.tar.gz"
+    linux.write_bytes(b"linux-bundle")
+    windows = assets / "OpenAI4S-0.2.0-windows-x86_64.zip"
+    with zipfile.ZipFile(windows, "w") as archive:
+        archive.writestr(f"{windows.stem}/payload/{linux.name}", payload)
+    _write_build_receipt(assets, "linux", [linux])
+    _write_build_receipt(assets, "windows", [windows])
+    return linux, windows
+
+
+@pytest.mark.stubbed_backend
+def test_finalize_rejects_replaced_windows_even_after_checksum_refresh(assets):
+    """A replacement ZIP must not inherit the original sealed build evidence."""
+    import zipfile
+
+    _linux, windows = _desktop_release_assets(assets)
+    staged = _pipeline(
+        assets, mode="release", stop_after="reverify", gh=_gh_for(assets)
+    ).run()
+    assert staged["ok"], staged
+    with zipfile.ZipFile(windows, "a") as archive:
+        archive.writestr("repacked.txt", "another build")
+    _write_checksums(assets)
+    calls = []
+    original = _gh_for(assets)
+
+    def gh(argv):
+        calls.append(argv)
+        return original(argv)
+
+    # Deliberately no --attestation: the documented manual recovery path has
+    # to compare the complete evidence chain too.
+    report = _pipeline(assets, mode="release", only="publish", gh=gh).run()
+    assert not report["ok"], report
+    assert report["stopped_at"] == "publish"
+    assert windows.name in report["steps"][-1]["detail"]
+    assert not any(call[1] == "edit" for call in calls)
+
+
+@pytest.mark.stubbed_backend
+def test_staging_rejects_a_windows_payload_from_another_linux_build(assets):
+    """Individually receipted files still have to be the same shared payload."""
+    _desktop_release_assets(assets, payload=b"other-linux-build")
+    calls = []
+    original = _gh_for(assets)
+
+    def gh(argv):
+        calls.append(argv)
+        return original(argv)
+
+    report = _pipeline(assets, mode="release", gh=gh).run()
+    assert not report["ok"], report
+    assert "payload" in report["steps"][-1]["detail"].lower()
+    assert not any(call[1] in {"upload", "edit"} for call in calls)
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize("document", ["provenance.intoto.json", "sbom.cdx.json"])
+def test_finalize_checks_distribution_documents_after_checksum_refresh(
+    assets, document
+):
+    _write_checksums(assets)
+    path = assets / document
+    payload = json.loads(path.read_text())
+    if document == "provenance.intoto.json":
+        payload["subject"][0]["digest"]["sha256"] = "0" * 64
+    else:
+        payload["externalReferences"][0]["hashes"][0]["content"] = "0" * 64
+    path.write_text(json.dumps(payload))
+    _write_checksums(assets)
+    report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
+    assert not report["ok"] and not report["published"]
+    assert document in report["steps"][-1]["detail"]
+
+
+@pytest.mark.stubbed_backend
+def test_resealing_current_documents_cannot_replace_the_old_build_receipt(
+    assets, tmp_path
+):
+    import zipfile
+
+    from scripts.release_pipeline import seal_evidence_bundle
+
+    _linux, windows = _desktop_release_assets(assets)
+    _write_checksums(assets)
+    evidence = assets / "openai4s-0.2.0-evidence.zip"
+    with zipfile.ZipFile(evidence) as archive:
+        sealed_report = json.loads(archive.read("release-report.json"))
+        carried = {
+            Path(name).name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("artifacts/")
+        }
+    with zipfile.ZipFile(windows, "a") as archive:
+        archive.writestr("repacked.txt", "replacement build")
+    new_digest = sha256_file(windows)
+    for name in ("provenance.intoto.json", "sbom.cdx.json"):
+        path = assets / name
+        document = json.loads(path.read_text())
+        if name == "provenance.intoto.json":
+            for row in document["subject"]:
+                if row["name"] == windows.name:
+                    row["digest"]["sha256"] = new_digest
+        else:
+            for row in document["externalReferences"]:
+                if row["url"] == windows.name:
+                    row["hashes"][0]["content"] = new_digest
+        path.write_text(json.dumps(document))
+        carried[name] = path.read_bytes()
+        sealed_report["artifacts"][name] = sha256_file(path)
+    sealed_report["artifacts"][windows.name] = new_digest
+    sources = []
+    for name, payload in carried.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        sources.append(path)
+    seal_evidence_bundle(evidence, sealed_report, files=sources)
+    _write_checksums(assets)
+    report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
+    assert not report["ok"] and not report["published"]
+    assert "sealed build receipts" in report["steps"][-1]["detail"]
+    assert windows.name in report["steps"][-1]["detail"]
+
+
+@pytest.mark.stubbed_backend
+def test_finalize_requires_provenance_to_name_the_sealed_source_sha(assets):
+    _write_checksums(assets)
+    path = assets / "provenance.intoto.json"
+    document = json.loads(path.read_text())
+    document["predicate"]["buildDefinition"]["resolvedDependencies"][0]["digest"][
+        "sha1"
+    ] = ("b" * 40)
+    path.write_text(json.dumps(document))
+    _write_checksums(assets)
+    report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
+    assert not report["ok"] and not report["published"]
+    assert "source SHA" in report["steps"][-1]["detail"]
 
 
 def test_the_finalize_step_revalidates_the_draft_before_the_flip(assets):
@@ -1921,6 +2074,7 @@ def test_finalize_refuses_a_draft_rewritten_to_drop_its_distributions(assets):
     sdist = assets / "openai4s-0.2.0.tar.gz"
     # PyPI is immutable and still holds both.
     immutable = {wheel.name: sha256_file(wheel), sdist.name: sha256_file(sdist)}
+    _write_checksums(assets)
     wheel.unlink()
     sdist.unlink()
     _write_checksums(assets)  # the manifest is rewritten to cover the rest
@@ -1937,8 +2091,7 @@ def test_finalize_refuses_a_draft_rewritten_to_drop_its_distributions(assets):
     assert report["stopped_at"] == "publish"
     assert report["published"] is False
     detail = report["steps"][-1]["detail"]
-    assert "do not carry the same" in detail
-    assert "the draft is missing" in detail
+    assert "disagrees with the release assets" in detail
     assert wheel.name in detail and sdist.name in detail
 
 
@@ -1949,6 +2102,7 @@ def test_finalize_refuses_a_draft_that_dropped_only_the_wheel(assets):
     wheel = assets / "openai4s-0.2.0-py3-none-any.whl"
     sdist = assets / "openai4s-0.2.0.tar.gz"
     immutable = {wheel.name: sha256_file(wheel), sdist.name: sha256_file(sdist)}
+    _write_checksums(assets)
     wheel.unlink()
     _write_checksums(assets)
 
@@ -1985,8 +2139,7 @@ def test_finalize_anchors_only_python_distributions_not_every_tarball(assets):
     sdist name exactly instead of case-folding a prefix.
     """
     _signed_dmg(assets)
-    (assets / "OpenAI4S-0.2.0-linux-x86_64.tar.gz").write_bytes(b"linux-bundle")
-    (assets / "OpenAI4S-0.2.0-windows-x86_64.zip").write_bytes(b"windows-zip")
+    _desktop_release_assets(assets)
     _write_checksums(assets)
     wheel = assets / "openai4s-0.2.0-py3-none-any.whl"
     sdist = assets / "openai4s-0.2.0.tar.gz"
@@ -2014,7 +2167,9 @@ def test_finalize_still_refuses_when_the_sdist_itself_is_missing_from_pypi(asset
     sdist is still anchored. A bundle beside it must not make the check lenient.
     """
     _signed_dmg(assets)
-    (assets / "OpenAI4S-0.2.0-linux-x86_64.tar.gz").write_bytes(b"linux-bundle")
+    linux = assets / "OpenAI4S-0.2.0-linux-x86_64.tar.gz"
+    linux.write_bytes(b"linux-bundle")
+    _write_build_receipt(assets, "linux", [linux])
     _write_checksums(assets)
     wheel = assets / "openai4s-0.2.0-py3-none-any.whl"
 

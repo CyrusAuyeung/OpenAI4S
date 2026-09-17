@@ -91,6 +91,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import release_gates, release_receipts  # noqa: E402
+from scripts.release_consistency import verify_release_consistency  # noqa: E402
 from scripts.release_gates import GateManifestError  # noqa: E402
 
 
@@ -1823,6 +1824,7 @@ class Pipeline:
             return StepResult(
                 "upload", True, f"would upload {len(self.assets)} asset(s)"
             )
+        self._verify_consistency(self.assets)
         completed = self._gh(
             [
                 "release",
@@ -2002,10 +2004,10 @@ class Pipeline:
         exactly. ``SHA256SUMS`` is still cross-checked, so a disagreement between
         the two is itself a refusal rather than a silent preference.
 
-        Without an attestation (a hand-run ``--only publish``) this falls back to
-        the old self-referential check and says so, because refusing outright
-        would remove the documented manual recovery path -- but it is a weaker
-        claim and is reported as one.
+        A hand-run ``--only publish`` without an attestation still checks the
+        complete sealed evidence chain and shared Windows/Linux payload. It
+        cannot establish an independent staging baseline, but refreshing a
+        mutable SHA256SUMS alone must never make stale evidence acceptable.
         """
         completed = self._gh(
             ["release", "view", f"v{self.version}", "--json", "assets"]
@@ -2095,7 +2097,18 @@ class Pipeline:
                         f"digest ({actual[:12]} != {digest[:12]}); refusing to "
                         f"publish"
                     )
+            self._verify_consistency([Path(temp) / name for name in expected])
         return checked
+
+    def _verify_consistency(self, assets: Sequence[Path]) -> None:
+        try:
+            verify_release_consistency(
+                assets,
+                version=self.version,
+                required_kinds=required_receipt_kinds(assets),
+            )
+        except release_receipts.ReceiptError as error:
+            raise ReleaseError(str(error)) from error
 
     def step_publish(self) -> StepResult:
         """The last cross-channel step: flip the draft public.

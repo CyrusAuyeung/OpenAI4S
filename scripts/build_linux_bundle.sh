@@ -376,54 +376,90 @@ Keywords=science;research;agent;python;r;notebook;llm;
 StartupNotify=true
 DESKTOP
 
-cat > "$APPDIR/install.sh" <<INSTALL
+cat > "$APPDIR/install.sh" <<'INSTALL'
 #!/bin/bash
 # Per-user desktop integration for an unpacked OpenAI4S bundle. Touches nothing
-# outside \$HOME and needs no root: it symlinks the CLI onto your PATH and
+# outside $HOME and needs no root: it symlinks the CLI onto your PATH and
 # registers a menu entry pointing back at *this* directory, wherever it is.
 set -euo pipefail
-APPDIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-BIN_DIR="\${XDG_BIN_HOME:-\$HOME/.local/bin}"
-DATA_DIR="\${XDG_DATA_HOME:-\$HOME/.local/share}"
+APPDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
 
-mkdir -p "\$BIN_DIR" "\$DATA_DIR/applications"
-ln -sf "\$APPDIR/bin/$APP_NAME_LOWER" "\$BIN_DIR/$APP_NAME_LOWER"
+mkdir -p "$BIN_DIR" "$DATA_DIR/applications"
+ln -sf "$APPDIR/bin/openai4s" "$BIN_DIR/openai4s"
 
 ICON=""
 for size in 512 256 128 64 48 32 16; do
-  src="\$APPDIR/share/icons/hicolor/\${size}x\${size}/apps/$APP_NAME_LOWER.png"
-  [ -f "\$src" ] || continue
-  dest="\$DATA_DIR/icons/hicolor/\${size}x\${size}/apps"
-  mkdir -p "\$dest"
-  cp -f "\$src" "\$dest/$APP_NAME_LOWER.png"
-  ICON="$APP_NAME_LOWER"
+  src="$APPDIR/share/icons/hicolor/${size}x${size}/apps/openai4s.png"
+  [ -f "$src" ] || continue
+  dest="$DATA_DIR/icons/hicolor/${size}x${size}/apps"
+  mkdir -p "$dest"
+  cp -f "$src" "$dest/openai4s.png"
+  ICON="openai4s"
 done
 # Fall back to the absolute path of the largest shipped icon if the hicolor
 # theme is unavailable; a themed name that resolves to nothing shows a blank
 # tile, and a blank tile looks like a broken install.
-if [ -z "\$ICON" ]; then
-  ICON="\$APPDIR/share/icons/hicolor/512x512/apps/$APP_NAME_LOWER.png"
+if [ -z "$ICON" ]; then
+  ICON="$APPDIR/share/icons/hicolor/512x512/apps/openai4s.png"
 fi
 
-sed -e "s|@APPDIR@|\$APPDIR|g" -e "s|@ICON@|\$ICON|g" \\
-  "\$APPDIR/share/applications/$APP_NAME_LOWER.desktop.in" \\
-  > "\$DATA_DIR/applications/$APP_NAME_LOWER.desktop"
-chmod 644 "\$DATA_DIR/applications/$APP_NAME_LOWER.desktop"
+# Exec has two escaping layers: the quoted command argument, then the desktop
+# file's string value. Use the bundled interpreter so no host Python or shell
+# substitution syntax participates in rendering a relocated path.
+"$APPDIR/runtime/bin/python3" -I - "$APPDIR" "$ICON" \
+  "$DATA_DIR/applications/openai4s.desktop" <<'DESKTOP_ENTRY'
+import sys
+from pathlib import Path
 
-command -v update-desktop-database >/dev/null 2>&1 && \\
-  update-desktop-database "\$DATA_DIR/applications" >/dev/null 2>&1 || true
-command -v gtk-update-icon-cache >/dev/null 2>&1 && \\
-  gtk-update-icon-cache -qtf "\$DATA_DIR/icons/hicolor" >/dev/null 2>&1 || true
+app, icon, destination = sys.argv[1:]
+
+
+def desktop_string(value):
+    return (
+        value.replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+
+
+# freedesktop.org Desktop Entry Specification, sections 4 and 7. Literal %
+# must be doubled so a directory named %F is not interpreted as a field code.
+argument = "".join(
+    "\\" + char if char in '\\"`$' else char
+    for char in str(Path(app) / "OpenAI4S")
+)
+replacements = {
+    "Exec=@APPDIR@/OpenAI4S": "Exec="
+    + desktop_string('"' + argument.replace("%", "%%") + '"'),
+    "Icon=@ICON@": "Icon=" + desktop_string(icon),
+}
+template = Path(app) / "share/applications/openai4s.desktop.in"
+# Replace whole template lines once: placeholders inside a real path are data.
+rendered = "\n".join(
+    replacements.get(line, line)
+    for line in template.read_text(encoding="utf-8").splitlines()
+)
+Path(destination).write_text(rendered + "\n", encoding="utf-8")
+DESKTOP_ENTRY
+chmod 644 "$DATA_DIR/applications/openai4s.desktop"
+
+command -v update-desktop-database >/dev/null 2>&1 && \
+  update-desktop-database "$DATA_DIR/applications" >/dev/null 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+  gtk-update-icon-cache -qtf "$DATA_DIR/icons/hicolor" >/dev/null 2>&1 || true
 
 echo "Installed:"
-echo "  CLI       : \$BIN_DIR/$APP_NAME_LOWER  -> \$APPDIR/bin/$APP_NAME_LOWER"
-echo "  Menu entry: \$DATA_DIR/applications/$APP_NAME_LOWER.desktop"
+echo "  CLI       : $BIN_DIR/openai4s  -> $APPDIR/bin/openai4s"
+echo "  Menu entry: $DATA_DIR/applications/openai4s.desktop"
 echo
-case ":\$PATH:" in
-  *":\$BIN_DIR:"*) ;;
-  *) echo "note: \$BIN_DIR is not on your PATH; add it to use \\\`$APP_NAME_LOWER\\\` directly." ;;
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo "note: $BIN_DIR is not on your PATH; add it to use \`openai4s\` directly." ;;
 esac
-echo "Run the app with: \$APPDIR/$APP_NAME    (or from your application menu)"
+echo "Run the app with: $APPDIR/OpenAI4S    (or from your application menu)"
 INSTALL
 chmod +x "$APPDIR/install.sh"
 

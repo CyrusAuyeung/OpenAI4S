@@ -160,6 +160,9 @@ integration. `Exec=` and `Icon=` in a `.desktop` entry are absolute paths, and a
 tarball does not know where it will be unpacked, so the entry ships as a
 template and `install.sh` substitutes the real location at install time.
 Shipping a pre-baked path would produce a menu entry that launches nothing.
+The installer encodes the executable path using the desktop-entry quoting and
+escaping rules, including literal percent signs. Installation paths containing
+spaces or shell punctuation must still launch the same bundled executable.
 
 ```bash
 bash scripts/build_linux_bundle.sh                               # native
@@ -380,6 +383,22 @@ runs before the evidence bundle and checksums are sealed, so signing and
 notarization facts are part of the evidence and every resulting artifact is
 covered before staging. `re-verify` reads the assets back *after* upload,
 because a local checksum cannot see a transfer that dropped bytes.
+
+Before upload and again after downloading the draft for publication, the
+pipeline checks the relationships between assets: provenance and SBOM hashes,
+the sealed evidence's artifact inventory and build receipts, and the Windows
+package's embedded Linux payload must agree with the exact distributions being
+released. This check also applies to a hand-run `--only publish` without a stage
+attestation. Updating `SHA256SUMS` after replacing a ZIP cannot make its older
+build receipt valid. These checks establish consistency; the out-of-band stage
+attestation remains the protection against replacing an entire draft and its
+evidence together.
+
+If a draft asset was replaced, restore the original verified bytes and their
+matching evidence. If the replacement changes the release source, merge the
+fixes and build a new immutable tag through CI. Do not edit an old receipt to
+claim the replacement was the build it originally recorded, move a release tag,
+or rebuild wheel/sdist files already published under the same PyPI version.
 
 All of it lives in [`scripts/release_pipeline.py`](../scripts/release_pipeline.py),
 not in the workflow YAML, so it can be exercised without cutting a release:

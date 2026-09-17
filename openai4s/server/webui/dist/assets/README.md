@@ -10,5 +10,5 @@ Committed output of `frontend/` (`npm run build`). The gateway serves this tree 
 | --- | --- |
 | `en-BiWYNluY.js` | Vite build output. Do not edit by hand; rebuild from `frontend/`. |
 | `index-BB_6MzkS.css` | Vite build output. Do not edit by hand; rebuild from `frontend/`. |
-| `index-BdX2k03K.js` | Vite build output. Do not edit by hand; rebuild from `frontend/`. |
+| `index-Cn5c4S-o.js` | Vite build output. Do not edit by hand; rebuild from `frontend/`. |
 | `zh-DZtw8kA9.js` | Vite build output. Do not edit by hand; rebuild from `frontend/`. |

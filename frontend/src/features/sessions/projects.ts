@@ -295,7 +295,12 @@ export function renderProjMenu(): void {
   m.setAttribute("role", "menu");
 }
 
+// The menu filters the sidebar without replacing the open conversation. It
+// cancels pending project opens, but must not retire that conversation's reads.
+let projectFilterVersion = 0;
+
 export function selectProject(id: string): void {
+  projectFilterVersion += 1;
   project.value = id;
   $("#proj-menu")?.classList.add("hidden");
   renderProjMenu();
@@ -307,17 +312,23 @@ export async function openProject(id: string): Promise<void> {
   // parked on an await (an upload-created session about to open its
   // conversation, a resume watchdog) sees a stale token and stands down instead
   // of yanking the view back to where it started.
-  _openGen.value = (_openGen.value || 0) + 1;
+  const gen = (_openGen.value || 0) + 1;
+  const filterVersion = projectFilterVersion;
+  _openGen.value = gen;
   await loadProjects();
+  if (_openGen.value !== gen || projectFilterVersion !== filterVersion) return;
   project.value = id;
   showWorkspace();
   await loadSessions();
+  if (_openGen.value !== gen || projectFilterVersion !== filterVersion || project.value !== id) return;
   renderProjMenu();
   const ss = (sessions.value as SessionLike[]).filter((f) => f.project_id === id);
   const first = ss[0];
   // Await the conversation. Fire-and-forget let openProject's callers (routing,
   // dashboard rows, createProject) return before the session existed, so the
   // next navigation raced the open this call had not finished.
+  // The child takes its own generation; ownership checks belong before this
+  // handoff, not after it.
   if (first?.id) await binds.openConversation(first.id, id);
   else {
     // The empty-project path must create its conversation in the project just

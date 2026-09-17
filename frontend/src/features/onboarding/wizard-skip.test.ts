@@ -58,7 +58,7 @@ vi.mock("./api", async (importOriginal) => {
 import { WizardHost } from "../../components/onboarding/Wizard";
 import { t } from "../../i18n";
 import { ot } from "./copy";
-import { INITIAL_WIZARD, type WizardState } from "./machine";
+import { INITIAL_WIZARD, type PathChoice, type WizardState } from "./machine";
 
 type VNode = { type?: unknown; props?: Record<string, unknown> & { children?: unknown } };
 type Button = { text: string; disabled: boolean; onClick: () => void };
@@ -108,10 +108,26 @@ function wizard(): WizardState {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((r, fail) => {
     resolve = r;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
+}
+
+function pathChoice(node: unknown): ((path: PathChoice) => void) | null {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = pathChoice(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  const props = (node as VNode).props;
+  if (typeof props?.onChoose === "function") return props.onChoose as (path: PathChoice) => void;
+  return pathChoice(props?.children);
 }
 
 const UNREACHABLE = {
@@ -184,6 +200,38 @@ describe("first-run wizard: skipping while a connection test is waiting", () => 
     await Promise.resolve();
     expect(wizard().error).toBeNull();
     expect(wizard().step).toBe("readiness");
+  });
+
+
+  it.each(["response", "error"])("does not apply the former model's late %s to the newly tested model", async (outcome) => {
+    const old = deferred<Record<string, unknown>>();
+    api.probeModelProfile.mockReturnValueOnce(old.promise);
+    button(t("cust.models.test")).onClick();
+    button(ot("onboarding.checklist")).onClick();
+    render().find((b) => b.text.endsWith(ot("onboarding.step.path")))!.onClick();
+    hooks.slots[1] = { profiles: [], protocols: [], local_model_catalog: { endpoints: [] } };
+    hooks.begin();
+    const choose = pathChoice(WizardHost());
+    expect(choose).toBeTypeOf("function");
+    choose!({ ...wizard().path!, kind: "existing", profileId: "mp-new", model: "new-model" });
+    button(ot("onboarding.checklist")).onClick();
+    render().find((b) => b.text.endsWith(ot("onboarding.step.test")))!.onClick();
+    api.probeModelProfile.mockResolvedValueOnce({
+      reachable: true,
+      capability_receipt: { native_tool_call: false, streaming: false, reachable: true },
+    });
+    button(t("cust.models.test")).onClick();
+    await vi.waitFor(() => expect(wizard().receipt?.native_tool_call).toBe("false"));
+    expect(api.probeModelProfile).toHaveBeenLastCalledWith("mp-new");
+
+    if (outcome === "error") old.reject(new Error("old model failure"));
+    else old.resolve({ reachable: true, capability_receipt: { native_tool_call: true, streaming: true } });
+    await old.promise.catch(() => {});
+    await Promise.resolve();
+    expect(wizard().path?.profileId).toBe("mp-new");
+    expect(wizard().receipt?.native_tool_call).toBe("false");
+    expect(wizard().error).toBeNull();
+    expect(button(t("cust.models.test")).disabled).toBe(false);
   });
 
   it("still reports a failed probe while the user is waiting for it", async () => {

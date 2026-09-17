@@ -1,0 +1,129 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("./api", () => ({ api: vi.fn(), apiErrorText: String }));
+vi.mock("./dashboard", () => ({ showDashboard: vi.fn(), showWorkspace: vi.fn() }));
+
+import { _openGen, currentId, folders, project, sessions } from "../../stores/session";
+import { resetStoreFields } from "../../stores/signal-field";
+import { api } from "./api";
+import { binds } from "./binds";
+import { openProject, selectProject } from "./projects";
+
+function deferred() {
+  let resolve!: (value: unknown) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise((answer, fail) => { resolve = answer; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function response(path: string): unknown {
+  if (path.startsWith("/projects?")) return { projects: [{ project_id: "A" }, { project_id: "B" }] };
+  if (path.startsWith("/frames?")) {
+    const id = new URLSearchParams(path.split("?")[1]).get("project_id");
+    return { frames: [{ id: `session-${id}`, project_id: id }] };
+  }
+  if (path.endsWith("/folders")) return { folders: [{ folder_id: `folder-${path.split("/")[2]}` }] };
+  throw new Error(`unexpected request: ${path}`);
+}
+
+beforeEach(() => {
+  resetStoreFields();
+  vi.mocked(api).mockReset().mockImplementation(async (path) => response(path));
+  binds.openConversation = vi.fn((fid: string, pid?: string | null) => {
+    // The child takes its own navigation generation when ownership transfers.
+    _openGen.value += 1;
+    currentId.value = fid;
+    project.value = pid || null;
+  });
+  binds.newSession = vi.fn();
+});
+
+describe("project navigation owns every pending list read", () => {
+  it.each(["B", "A"])("drops an earlier project click after a later navigation to %s, including the same project", async (latest) => {
+    const old = deferred();
+    vi.mocked(api).mockReturnValueOnce(old.promise);
+    const openingA = openProject("A");
+    await openProject(latest);
+    expect(currentId.value).toBe(`session-${latest}`);
+
+    old.resolve(response("/projects?limit=100"));
+    await openingA;
+    expect(project.value).toBe(latest);
+    expect(currentId.value).toBe(`session-${latest}`);
+    expect(binds.openConversation).toHaveBeenCalledTimes(1);
+    expect(binds.newSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["frames", "folders", "frames error", "folders error"])("drops A's late %s without replacing B's lists or reopening A", async (kind) => {
+    const old = deferred();
+    const heldPath = kind.startsWith("frames") ? "/frames?limit=100&project_id=A" : "/projects/A/folders";
+    let held = false;
+    vi.mocked(api).mockImplementation(async (path) => {
+      if ((kind.startsWith("frames") && path.startsWith("/frames?") && path.includes("project_id=A")) || path === heldPath) {
+        held = true;
+        return old.promise;
+      }
+      return response(path);
+    });
+    const openingA = openProject("A");
+    await vi.waitFor(() => expect(held).toBe(true));
+    await openProject("B");
+    const expectedSessions = sessions.value;
+    const expectedFolders = folders.value;
+
+    if (kind.endsWith("error")) old.reject(new Error("old navigation failed"));
+    else old.resolve(response(heldPath));
+    await openingA;
+    expect(project.value).toBe("B");
+    expect(currentId.value).toBe("session-B");
+    expect(sessions.value).toEqual(expectedSessions);
+    expect(folders.value).toEqual(expectedFolders);
+    expect(binds.openConversation).toHaveBeenCalledTimes(1);
+    expect(binds.newSession).not.toHaveBeenCalled();
+  });
+
+
+  it.each([["B"], ["B", "A"]])("lets menu filtering supersede a pending project open without taking its conversation generation: %j", async (...choices) => {
+    project.value = "A";
+    currentId.value = "still-loading-session";
+    const old = deferred();
+    vi.mocked(api).mockReturnValueOnce(old.promise);
+    const opening = openProject("A");
+    const conversationGeneration = _openGen.value;
+    for (const choice of choices) selectProject(choice);
+    await vi.waitFor(() => expect(sessions.value).toEqual([{ id: `session-${choices.at(-1)}`, project_id: choices.at(-1) }]));
+    // Menu selection only filters the sidebar: the existing conversation's
+    // in-flight history remains owned by this exact (id, generation).
+    expect(_openGen.value).toBe(conversationGeneration);
+    expect(currentId.value).toBe("still-loading-session");
+    old.resolve(response("/projects?limit=100"));
+    await opening;
+    expect(project.value).toBe(choices.at(-1));
+    expect(_openGen.value).toBe(conversationGeneration);
+    expect(currentId.value).toBe("still-loading-session");
+    expect(binds.openConversation).not.toHaveBeenCalled();
+    expect(binds.newSession).not.toHaveBeenCalled();
+  });
+
+  it("does not reopen a project after the user has gone Home", async () => {
+    const old = deferred();
+    vi.mocked(api).mockReturnValueOnce(old.promise);
+    const opening = openProject("A");
+    // showDashboard advances this generation and clears the current session.
+    _openGen.value += 1;
+    currentId.value = null;
+    old.resolve(response("/projects?limit=100"));
+    await opening;
+    expect(currentId.value).toBeNull();
+    expect(binds.openConversation).not.toHaveBeenCalled();
+    expect(binds.newSession).not.toHaveBeenCalled();
+  });
+
+  it("hands a current navigation to its conversation without invalidating that child's generation", async () => {
+    await openProject("A");
+    expect(binds.openConversation).toHaveBeenCalledWith("session-A", "A");
+    expect(currentId.value).toBe("session-A");
+    expect(project.value).toBe("A");
+    expect(folders.value).toEqual([{ folder_id: "folder-A" }]);
+  });
+});

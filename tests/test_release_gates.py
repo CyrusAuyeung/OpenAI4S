@@ -1535,6 +1535,159 @@ def test_the_linux_bundle_ships_the_resources_only_a_runtime_check_would_miss():
     assert "cross-build" in build.lower()
 
 
+def _desktop_string_value(value: str) -> str:
+    """Decode the desktop-file string layer (Desktop Entry spec section 4)."""
+    escapes = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+    decoded = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            index += 1
+            assert index < len(value), "incomplete desktop string escape"
+            char = escapes[value[index]]
+        decoded.append(char)
+        index += 1
+    return "".join(decoded)
+
+
+def _desktop_launcher_argv(value: str) -> list[str]:
+    """Parse executable arguments using section 7, not shell quoting rules.
+
+    Quoting is undone after the string layer, and field codes are expanded
+    last. This launcher takes no file/URL arguments, so only literal %% is
+    permitted; treating %F in an unpack path as files is a broken launch.
+    """
+    command = _desktop_string_value(value)
+    reserved = "\t\n\r\"'\\><~|&;$*?#()`"
+    arguments = []
+    index = 0
+    while index < len(command):
+        if command[index] == " ":
+            index += 1
+            continue
+        argument = []
+        if command[index] == '"':
+            index += 1
+            while index < len(command) and command[index] != '"':
+                char = command[index]
+                if char == "\\":
+                    index += 1
+                    assert index < len(command), "incomplete Exec argument escape"
+                    char = command[index]
+                    assert char in '\\"`$', "invalid Exec argument escape"
+                else:
+                    assert char not in "`$", "unescaped character in quoted argument"
+                argument.append(char)
+                index += 1
+            assert index < len(command), "unterminated Exec argument quote"
+            index += 1
+            assert index == len(command) or command[index] == " "
+        else:
+            while index < len(command) and command[index] != " ":
+                assert command[index] not in reserved, "unquoted reserved character"
+                argument.append(command[index])
+                index += 1
+        arguments.append("".join(argument))
+    argv = []
+    for decoded in arguments:
+        expanded = []
+        index = 0
+        while index < len(decoded):
+            char = decoded[index]
+            if char == "%":
+                index += 1
+                assert (
+                    index < len(decoded) and decoded[index] == "%"
+                ), "the executable path contains an unescaped desktop field code"
+            expanded.append(char)
+            index += 1
+        argv.append("".join(expanded))
+    return argv
+
+
+@pytest.mark.parametrize(
+    "directory",
+    [
+        "ordinary-bundle",
+        "bundle with spaces",
+        "bundle $HOME 'single' \"double\" \\backslash %F %% & | `tick` ;<>~*?#()",
+        "bundle @APPDIR@ @ICON@",
+    ],
+)
+@pytest.mark.parametrize("themed_icon", [True, False])
+def test_linux_installer_launches_from_relocated_paths(
+    tmp_path, directory, themed_icon
+):
+    """Run the shipped generator and installer, then launch the rendered Exec."""
+    bash = shutil.which("bash")
+    if bash is None or os.name != "posix":
+        pytest.skip("Linux installer requires a POSIX host with Bash")
+    app = tmp_path / directory
+    (app / "bin").mkdir(parents=True)
+    (app / "runtime" / "bin").mkdir(parents=True)
+    (app / "runtime" / "bin" / "python3").symlink_to(sys.executable)
+    for relative, output in (("OpenAI4S", "desktop"), ("bin/openai4s", "cli")):
+        script = app / relative
+        script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n", encoding="utf-8")
+        script.chmod(0o755)
+    icon = app / "share/icons/hicolor/512x512/apps/openai4s.png"
+    if themed_icon:
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"test icon")
+
+    home = tmp_path / "home $user & quoted"
+    data = home / "share\\name %F"
+    bins = home / "bin overrides"
+    user_data = home / ".openai4s" / "keep.txt"
+    user_data.parent.mkdir(parents=True)
+    user_data.write_text("saved session", encoding="utf-8")
+    env = {
+        **os.environ,
+        "APPDIR": str(app),
+        "APP_NAME": "OpenAI4S",
+        "APP_NAME_LOWER": "openai4s",
+        "HOME": str(home),
+        "XDG_BIN_HOME": str(bins),
+        "XDG_DATA_HOME": str(data),
+    }
+    build = (ROOT / "scripts" / "build_linux_bundle.sh").read_text("utf-8")
+    start = build.index('echo "-- [6/10]')
+    end = build.index("# 7) icons.", start)
+    subprocess.run(
+        [bash, "-c", build[start:end]], env=env, check=True, capture_output=True
+    )
+    subprocess.run([str(app / "install.sh")], env=env, check=True, capture_output=True)
+
+    desktop = data / "applications/openai4s.desktop"
+    fields = dict(
+        line.split("=", 1)
+        for line in desktop.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    argv = _desktop_launcher_argv(fields["Exec"])
+    assert argv == [str(app.resolve() / "OpenAI4S")]
+    assert subprocess.check_output(argv, env=env, text=True).strip() == "desktop"
+    assert _desktop_string_value(fields["Icon"]) == (
+        "openai4s" if themed_icon else str(icon.resolve())
+    )
+    cli = bins / "openai4s"
+    assert cli.resolve() == (app / "bin/openai4s").resolve()
+    assert subprocess.check_output([str(cli)], env=env, text=True).strip() == "cli"
+    if themed_icon:
+        assert (data / "icons/hicolor/512x512/apps/openai4s.png").read_bytes() == (
+            b"test icon"
+        )
+
+    subprocess.run(
+        [str(app / "uninstall.sh")], env=env, check=True, capture_output=True
+    )
+    assert not desktop.exists()
+    assert not cli.is_symlink()
+    assert not (data / "icons/hicolor/512x512/apps/openai4s.png").exists()
+    assert user_data.read_text(encoding="utf-8") == "saved session"
+
+
 def test_the_windows_package_has_no_native_windows_execution_path():
     """Both halves, because either alone is satisfiable by a broken package."""
     launcher = (ROOT / "scripts" / "windows" / "openai4s.ps1").read_text("utf-8")

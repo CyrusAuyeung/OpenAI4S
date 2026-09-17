@@ -346,6 +346,11 @@ export function WizardHost() {
     setTesting(false);
   };
 
+  const choosePath = (path: PathChoice) => {
+    leaveTest();
+    dispatch({ type: "choosePath", path });
+  };
+
   const onSkip = async () => {
     leaveTest();
     setBusy(true);
@@ -390,8 +395,9 @@ export function WizardHost() {
       const created = await saveModelProfile(body);
       const id = asString(created.id);
       if (id) await activateModelProfile(id);
+      if (!alive.current) return;
       const chosen = { ...path, profileId: id };
-      dispatch({ type: "choosePath", path: chosen });
+      choosePath(chosen);
       const refreshed = await fetchOnboarding();
       if (!alive.current) return;
       setStatus(refreshed);
@@ -455,6 +461,19 @@ export function WizardHost() {
     try {
       const refreshed = await activateExistingModelProfile(id);
       if (!alive.current) return;
+      // The saved profile may have been edited since the wizard listed it.
+      // Refresh the identity too, so the old model's receipt cannot survive.
+      const selected = refreshed.profiles.find((profile) => asString(profile.id) === id);
+      if (selected) {
+        choosePath({
+          kind: "existing",
+          profileId: id,
+          provider: asString(selected.provider),
+          model: asString(selected.model),
+          baseUrl: asString(selected.base_url),
+          name: asString(selected.name || id),
+        });
+      }
       setStatus(refreshed);
       dispatch({ type: "next" });
     } catch (error) {
@@ -557,7 +576,7 @@ export function WizardHost() {
                 status={status}
                 state={state}
                 busy={busy}
-                onChoose={(path) => dispatch({ type: "choosePath", path })}
+                onChoose={choosePath}
                 onSaveNew={onSaveNew}
               />
             ) : null}
