@@ -29,9 +29,10 @@ from __future__ import annotations
 import io
 import json
 import os
-import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "PKU-YuanGroup/OpenAI4S")
@@ -41,6 +42,19 @@ START = "<!-- CONTRIBUTORS:START -->"
 END = "<!-- CONTRIBUTORS:END -->"
 INVENTORY_START = "<!-- AVATAR-FILES:START -->"
 INVENTORY_END = "<!-- AVATAR-FILES:END -->"
+# (file in AVATAR_DIR, table header, per-avatar description)
+INVENTORIES = (
+    (
+        "README.md",
+        "| File | Purpose |",
+        "Render-ready avatar for contributor `{login}`.",
+    ),
+    (
+        "README_zh.md",
+        "| 文件 | 职责 |",
+        "贡献者 `{login}` 的可直接渲染头像。",
+    ),
+)
 SRC = 256  # source crop resolution for a crisp circle
 DISPLAY = 64  # rendered avatar size in px, close to the original wall
 # Bots and the automated co-author identity are not community members. The
@@ -153,15 +167,23 @@ def _avatar_name(login: str) -> str:
     return f"{login}.png"
 
 
-def write_avatars(people: list[dict], token: str | None) -> tuple[set[str], int]:
+def write_avatars(
+    people: list[dict], token: str | None
+) -> tuple[set[str], int, list[str]]:
     """Refresh the avatars, prune the departed, and say what was written.
 
-    Returns the logins that have a usable committed PNG *and* the number this
-    run actually produced: "a file with that name exists" and "I refreshed it"
-    are different facts, and only the second one says the run worked.
+    Returns the logins that have a usable committed PNG, the number this run
+    actually produced, and the PNG filenames left on disk: "a file with that
+    name exists" and "I refreshed it" are different facts, and only the second
+    one says the run worked.
     """
 
     os.makedirs(AVATAR_DIR, exist_ok=True)
+    # A login whose casing drifted refreshes its committed file under the
+    # committed spelling. A case-insensitive filesystem does that on its own;
+    # a case-sensitive one would otherwise add a case-variant twin beside it.
+    committed = set(os.listdir(AVATAR_DIR))
+    spelling = {name.casefold(): name for name in committed}
     written = 0
     for c in people:
         login = c["login"]
@@ -178,7 +200,10 @@ def write_avatars(people: list[dict], token: str | None) -> tuple[set[str], int]
         except Exception as exc:  # noqa: BLE001
             print(f"  avatar failed for {login}: {exc}", file=sys.stderr)
             continue
-        with open(os.path.join(AVATAR_DIR, _avatar_name(login)), "wb") as f:
+        name = _avatar_name(login)
+        if name not in committed:
+            name = spelling.get(name.casefold(), name)
+        with open(os.path.join(AVATAR_DIR, name), "wb") as f:
             f.write(png)
         written += 1
     # Drop old identities and legacy SVGs, but keep a current contributor's
@@ -196,7 +221,12 @@ def write_avatars(people: list[dict], token: str | None) -> tuple[set[str], int]
     have_png = {
         person["login"] for person in people if _avatar_name(person["login"]) in on_disk
     }
-    return have_png, written
+    surviving = sorted(
+        name
+        for name in on_disk
+        if name.endswith(".png") and os.path.isfile(os.path.join(AVATAR_DIR, name))
+    )
+    return have_png, written, surviving
 
 
 def render(people: list[dict], have_png: set[str]) -> str:
@@ -216,82 +246,98 @@ def render(people: list[dict], have_png: set[str]) -> str:
     return "\n".join(rows)
 
 
+def _replace_block(text: str, start: str, end: str, block: str) -> str:
+    """Replace what sits between the single ``start``/``end`` pair in ``text``."""
+    head, tail = text.find(start), text.find(end)
+    if text.count(start) != 1 or text.count(end) != 1 or head > tail:
+        raise ValueError(f"expected exactly one {start} ... {end} pair")
+    return f"{text[:head]}{start}\n{block}\n{end}{text[tail + len(end):]}"
+
+
+def _write_texts(updates: dict[str, str]) -> None:
+    """Stage every document beside its target, then replace them together."""
+    staged: list[tuple[str, str]] = []
+    try:
+        for path, text in updates.items():
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+            staged.append((tmp, path))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            shutil.copymode(path, tmp)
+        for tmp, path in staged:
+            os.replace(tmp, path)
+    finally:
+        for tmp, _path in staged:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+
 def update_readme(path: str, block: str) -> bool:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    if START not in text or END not in text:
-        print(f"markers not found in {path}", file=sys.stderr)
+    try:
+        updated = _replace_block(text, START, END, block)
+    except ValueError as exc:
+        print(f"{path}: {exc}", file=sys.stderr)
         return False
-    replacement = f"{START}\n{block}\n{END}"
-    updated = re.sub(
-        re.escape(START) + r".*?" + re.escape(END),
-        lambda _m: replacement,
-        text,
-        flags=re.DOTALL,
-    )
     if updated == text:
         return False
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(updated)
+    _write_texts({path: updated})
     return True
 
 
-def update_avatar_readmes() -> list[str]:
-    """Document surviving PNGs, preserving their on-disk filename spelling."""
-    names = sorted(
-        name
-        for name in os.listdir(AVATAR_DIR)
-        if name.endswith(".png") and os.path.isfile(os.path.join(AVATAR_DIR, name))
-    )
-    updates: list[tuple[str, str]] = []
-    for filename, header, description in (
-        (
-            "README.md",
-            "| File | Purpose |",
-            "Render-ready avatar for contributor `{login}`.",
-        ),
-        (
-            "README_zh.md",
-            "| 文件 | 职责 |",
-            "贡献者 `{login}` 的可直接渲染头像。",
-        ),
-    ):
+def read_avatar_readmes() -> dict[str, str]:
+    """Read both file-table documents, refusing one that cannot be updated.
+
+    Unlike the wall, a skipped inventory fails the directory-docs gate, so
+    this runs before anything is fetched or written.
+    """
+    texts: dict[str, str] = {}
+    for filename, _header, _description in INVENTORIES:
         path = os.path.join(AVATAR_DIR, filename)
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        if (
-            text.count(INVENTORY_START) != 1
-            or text.count(INVENTORY_END) != 1
-            or text.index(INVENTORY_START) > text.index(INVENTORY_END)
-        ):
-            raise ValueError(f"invalid avatar inventory markers in {path}")
+        try:
+            _replace_block(text, INVENTORY_START, INVENTORY_END, "")
+        except ValueError as exc:
+            raise ValueError(f"{path}: {exc}") from None
+        texts[path] = text
+    return texts
+
+
+def update_avatar_readmes(texts: dict[str, str], names: list[str]) -> list[str]:
+    """Document surviving PNGs, preserving their on-disk filename spelling."""
+    updates: dict[str, str] = {}
+    for filename, header, description in INVENTORIES:
+        path = os.path.join(AVATAR_DIR, filename)
         rows = [header, "| --- | --- |"]
         for name in names:
             detail = description.format(login=name[:-4])
             rows.append(f"| `{name}` | {detail} |")
-        start = text.index(INVENTORY_START) + len(INVENTORY_START)
-        end = text.index(INVENTORY_END)
-        updated = text[:start] + "\n" + "\n".join(rows) + "\n" + text[end:]
-        if updated != text:
-            updates.append((path, updated))
-    # Validate both blocks before rewriting either document.
-    for path, text in updates:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
-    return [path for path, _text in updates]
+        block = "\n".join(rows)
+        updated = _replace_block(texts[path], INVENTORY_START, INVENTORY_END, block)
+        if updated != texts[path]:
+            updates[path] = updated
+    _write_texts(updates)
+    return list(updates)
 
 
 def main() -> int:
+    try:
+        inventories = read_avatar_readmes()
+    except (OSError, ValueError) as exc:
+        print(f"avatar inventory not updatable: {exc}", file=sys.stderr)
+        return 1
     token = _token()
     people = fetch_contributors(token)
     if not people:
         print("no contributors fetched (rate limit or auth?)", file=sys.stderr)
         return 1
     people = include_recognized_contributors(people)
-    have_png, written = write_avatars(people, token)
+    have_png, written, surviving = write_avatars(people, token)
     block = render(people, have_png)
     changed = [p for p in READMES if os.path.exists(p) and update_readme(p, block)]
-    changed.extend(update_avatar_readmes())
+    changed.extend(update_avatar_readmes(inventories, surviving))
     print(
         f"{len(people)} contributors: "
         + ", ".join(c["login"] for c in people)

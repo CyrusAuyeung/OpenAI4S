@@ -52,6 +52,7 @@ def test_a_recognized_login_that_is_excluded_is_still_refused(monkeypatch):
 
 
 def test_empty_api_result_still_fails_before_recognition_is_added(monkeypatch):
+    monkeypatch.setattr(update_contributors, "read_avatar_readmes", dict)
     monkeypatch.setattr(update_contributors, "_token", lambda: None)
     monkeypatch.setattr(update_contributors, "fetch_contributors", lambda _token: [])
 
@@ -84,10 +85,13 @@ def test_avatar_refresh_failure_keeps_current_png_and_prunes_departed_one(
 
     monkeypatch.setattr(update_contributors, "_get", fail_download)
 
-    have_png, written = update_contributors.write_avatars([{"login": "EQSTLab"}], None)
+    have_png, written, surviving = update_contributors.write_avatars(
+        [{"login": "EQSTLab"}], None
+    )
 
     assert have_png == {"EQSTLab"}
     assert written == 0  # nothing was refreshed; only the count says so
+    assert surviving == ["EQSTLab.png"]
     assert current.read_bytes() == b"existing-avatar"
     assert not departed.exists()
     assert not legacy_svg.exists()
@@ -116,7 +120,7 @@ def test_a_login_whose_casing_drifted_keeps_its_file_and_links_remotely(
     monkeypatch.setattr(update_contributors, "_get", fail_download)
 
     people = [{"login": "EQSTLab"}]
-    have_png, _written = update_contributors.write_avatars(people, None)
+    have_png, _written, _surviving = update_contributors.write_avatars(people, None)
 
     assert committed.read_bytes() == b"existing-avatar"
     assert have_png == set()
@@ -155,6 +159,38 @@ def test_the_unauthenticated_avatar_fallback_never_carries_the_token(
 
     assert seen[0][1] == "secret-token"
     assert seen[1] == ("https://github.com/Recognized.png?s=256", None)
+
+
+def test_documents_are_all_staged_before_any_is_replaced(tmp_path):
+    first = tmp_path / "README.md"
+    first.write_text("old\n", encoding="utf-8")
+    unwritable = tmp_path / "missing" / "README_zh.md"
+
+    with pytest.raises(OSError):
+        update_contributors._write_texts(
+            {str(first): "new\n", str(unwritable): "new\n"}
+        )
+
+    assert first.read_text(encoding="utf-8") == "old\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["README.md"]
+
+
+def test_a_replaced_document_keeps_its_permissions(tmp_path):
+    document = tmp_path / "README.md"
+    document.write_text("old\n", encoding="utf-8")
+    document.chmod(0o644)
+    mode = document.stat().st_mode
+
+    update_contributors._write_texts({str(document): "new\n"})
+
+    assert document.read_text(encoding="utf-8") == "new\n"
+    assert document.stat().st_mode == mode
+
+
+def _stage(root):
+    # The directory gate reads Git's file list, which keeps a deleted avatar
+    # until the deletion is staged -- exactly as a real refresh has to be.
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
 
 
 @pytest.fixture
@@ -205,6 +241,9 @@ def contributor_checkout(tmp_path, monkeypatch):
             ["Existing"],
             ["NewPerson.png", "existing.png"],
         ),
+        # A successful refresh keeps the committed spelling on every
+        # filesystem instead of adding a case-variant twin beside it.
+        (["existing.png"], ["Existing"], [], ["existing.png"]),
         ([], ["Unavailable"], ["Unavailable"], []),
         (
             ["Existing.png"],
@@ -218,8 +257,10 @@ def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
     contributor_checkout, monkeypatch, existing, logins, failed, expected
 ):
     avatar_dir = contributor_checkout
+    root = avatar_dir.parents[1]
     for name in existing:
         (avatar_dir / name).write_bytes(b"previous-avatar")
+    _stage(root)
     monkeypatch.setattr(
         update_contributors,
         "fetch_contributors",
@@ -233,7 +274,13 @@ def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
 
     monkeypatch.setattr(update_contributors, "_get", download)
     assert update_contributors.main() == 0
+    _stage(root)
     assert check_directory_readmes.main() == 0
+    refreshed = {f"{login}.png".casefold() for login in logins if login not in failed}
+    for name in expected:
+        assert (avatar_dir / name).read_bytes() == (
+            b"synthetic-avatar" if name.casefold() in refreshed else b"previous-avatar"
+        )
     inventories = []
     for name in ("README.md", "README_zh.md"):
         text = (avatar_dir / name).read_text(encoding="utf-8")
@@ -254,6 +301,7 @@ def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
 @pytest.mark.parametrize(
     "invalid_block",
     [
+        None,  # the document is missing altogether
         "no markers",
         "<!-- AVATAR-FILES:START -->",
         "<!-- AVATAR-FILES:END --><!-- AVATAR-FILES:START -->",
@@ -261,16 +309,39 @@ def test_refresh_keeps_bilingual_inventory_and_gate_in_sync(
         "<!-- AVATAR-FILES:START --><!-- AVATAR-FILES:END -->",
     ],
 )
-def test_invalid_inventory_markers_do_not_rewrite_either_readme(
-    contributor_checkout, invalid_block
+def test_an_unusable_inventory_stops_the_refresh_before_any_write(
+    contributor_checkout, monkeypatch, capsys, invalid_block
 ):
+    """No avatar, wall or inventory may change when one inventory is unusable.
+
+    Checking the markers only after the PNGs and the wall were rewritten left
+    exactly the half-updated tree the directory gate rejects.
+    """
     avatar_dir = contributor_checkout
-    english = (avatar_dir / "README.md").read_bytes()
+    root = avatar_dir.parents[1]
+    (avatar_dir / "Departed.png").write_bytes(b"previous-avatar")
     chinese = avatar_dir / "README_zh.md"
-    chinese.write_text(invalid_block, encoding="utf-8")
+    if invalid_block is None:
+        chinese.unlink()
+    else:
+        chinese.write_text(invalid_block, encoding="utf-8")
+    monkeypatch.setattr(
+        update_contributors,
+        "fetch_contributors",
+        lambda _token: [{"login": "NewPerson"}],
+    )
+    monkeypatch.setattr(
+        update_contributors, "_get", lambda _url, _token: b"synthetic-avatar"
+    )
 
-    with pytest.raises(ValueError, match="avatar inventory markers"):
-        update_contributors.update_avatar_readmes()
+    def snapshot():
+        return {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(root).parts
+        }
 
-    assert (avatar_dir / "README.md").read_bytes() == english
-    assert chinese.read_text(encoding="utf-8") == invalid_block
+    before = snapshot()
+    assert update_contributors.main() == 1
+    assert snapshot() == before
+    assert "README_zh.md" in capsys.readouterr().err
