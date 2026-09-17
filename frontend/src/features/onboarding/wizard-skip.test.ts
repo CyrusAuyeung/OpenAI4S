@@ -130,6 +130,20 @@ function pathChoice(node: unknown): ((path: PathChoice) => void) | null {
   return pathChoice(props?.children);
 }
 
+function findVNode(node: unknown, match: (node: VNode) => boolean): VNode | null {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findVNode(item, match);
+      if (found) return found;
+    }
+    return null;
+  }
+  const vnode = node as VNode;
+  if (match(vnode)) return vnode;
+  return findVNode(vnode.props?.children, match);
+}
+
 const UNREACHABLE = {
   reachable: false,
   state: "unreachable",
@@ -261,6 +275,39 @@ describe("first-run wizard: skipping while a connection test is waiting", () => 
     expect(wizard().error?.message).toBe(ot("onboarding.test.needProfile"));
     expect(wizard().receipt).toBeNull();
     expect(wizard().providerRequests).toBe(0);
+  });
+
+  it("treats a local model edited after its save as unsaved again", async () => {
+    // Saved as mp-local/llama3, then the model box is edited without pressing
+    // Next. The saved profile is still llama3 on the server, so probing its id
+    // would measure llama3 and show the result as the edited model's.
+    hooks.slots[1] = {
+      profiles: [],
+      active_id: "mp-local",
+      protocols: [],
+      local_model_catalog: { endpoints: [{ label: "Ollama", base_url: "http://127.0.0.1:11434/v1", default_model: "llama3" }] },
+    };
+    hooks.slots[REDUCER] = {
+      ...wizard(),
+      step: "path",
+      path: { kind: "local", profileId: "mp-local", provider: "chatgpt", model: "llama3", baseUrl: "http://127.0.0.1:11434/v1", name: "Ollama" },
+    } satisfies WizardState;
+
+    hooks.begin();
+    const pathStep = findVNode(WizardHost(), (node) => typeof node.props?.onChoose === "function");
+    expect(pathStep).toBeTruthy();
+    const rendered = (pathStep!.type as (props: unknown) => unknown)(pathStep!.props);
+    const modelBox = findVNode(rendered, (node) => node.type === "input" && node.props?.value === "llama3" && typeof node.props?.onInput === "function");
+    expect(modelBox).toBeTruthy();
+    (modelBox!.props!.onInput as (event: unknown) => void)({ currentTarget: { value: "qwen3" } });
+
+    expect(wizard().path).toMatchObject({ kind: "local", model: "qwen3", profileId: "" });
+    render().find((b) => b.text === ot("onboarding.checklist"))!.onClick();
+    render().find((b) => b.text.endsWith(ot("onboarding.step.test")))!.onClick();
+    button(t("cust.models.test")).onClick();
+    await Promise.resolve();
+    expect(api.probeModelProfile).not.toHaveBeenCalled();
+    expect(wizard().error?.message).toBe(ot("onboarding.test.needProfile"));
   });
 
   it("selects the active profile before probing it when no path was chosen", async () => {

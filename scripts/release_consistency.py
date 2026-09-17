@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Mapping, Sequence
 
 from openai4s.evidence import verify_package
+from scripts import release_gates
 from scripts.release_gates import (
     RECEIPT_NAME,
     GateManifestError,
@@ -110,6 +111,26 @@ def _rows(rows: Any, *, label: str, sbom: bool = False) -> dict[str, str]:
     return digests
 
 
+def _windows_name(member: str) -> str:
+    """The path Windows gives a zip member once the package is extracted.
+
+    Python keeps a member's name as written. Windows does not: `\\` separates
+    like `/`, `.` and `..` components collapse, a trailing dot or space is
+    stripped from each component, and names compare without case. Two members
+    that differ only in those ways are one file to the launcher.
+    """
+    parts: list[str] = []
+    for raw in member.replace("\\", "/").split("/"):
+        if raw == "..":
+            if parts:
+                parts.pop()
+            continue
+        part = raw.rstrip(". ")
+        if part:
+            parts.append(part.casefold())
+    return "/".join(parts)
+
+
 def _windows_payloads(
     files: Mapping[str, Path], digests: Mapping[str, str], version: str
 ) -> None:
@@ -127,27 +148,35 @@ def _windows_payloads(
         expected_member = payload_dir + linux
         sidecar = expected_member + ".sha256"
         with zipfile.ZipFile(path) as archive:
-            # A closed list, compared without case. The launcher installs the
-            # first `payload\*.tar.gz` Windows hands it and trusts the sidecar
-            # beside *that* file; NTFS matches and sorts names ignoring case, so
-            # an `OpenAI4S-0.0.TAR.GZ` riding along would be the one installed
-            # while an `endswith(".tar.gz")` test here never saw it.
-            carried = [
-                info
-                for info in archive.infolist()
-                if not info.is_dir()
-                and info.filename.casefold().startswith(payload_dir.casefold())
-            ]
-            stray = sorted(
-                info.filename
-                for info in carried
-                if info.filename not in (expected_member, sidecar)
-            )
+            # The launcher installs the first `payload\*.tar.gz` Windows hands it
+            # and trusts the sidecar beside *that* file, so "exactly one payload"
+            # has to be read the way Windows reads the extracted tree, not the
+            # way `endswith(".tar.gz")` reads the zip: an `OpenAI4S-0.0.TAR.GZ`,
+            # a `payload\\0.tar.gz` or a `./payload/0.tar.gz` riding along is the
+            # one that sorts first and gets installed. Two rules: nothing under
+            # the payload directory but the payload and its sidecar, spelled
+            # exactly; and no other tarball anywhere in the package.
+            payload_root = _windows_name(payload_dir) + "/"
+            spelled = {
+                _windows_name(expected_member): expected_member,
+                _windows_name(sidecar): sidecar,
+            }
+            carried = [info for info in archive.infolist() if not info.is_dir()]
+            stray = []
+            for info in carried:
+                where = _windows_name(info.filename)
+                if where in spelled:
+                    # The payload or its sidecar under another spelling lands
+                    # on the same file and replaces the verified one.
+                    if info.filename != spelled[where]:
+                        stray.append(info.filename)
+                elif where.startswith(payload_root) or where.endswith(".tar.gz"):
+                    stray.append(info.filename)
             members = [info for info in carried if info.filename == expected_member]
             if stray or len(members) != 1:
                 raise ReceiptError(
                     f"{name} must contain exactly the payload {linux}"
-                    + (f"; its payload directory also carries {stray}" if stray else "")
+                    + (f"; it also carries {sorted(stray)}" if stray else "")
                 )
             member = members[0]
             # Check before streaming: a forged zip cannot make verification
@@ -165,8 +194,11 @@ def _windows_payloads(
                 # The digest the launcher will actually check the install against.
                 if len(recorded) != 1 or recorded[0].file_size > 4096:
                     raise ReceiptError(f"{name} carries a malformed payload checksum")
+                # Compared as written: bootstrap.sh takes this token verbatim
+                # and accepts lowercase hex only, so folding case here would
+                # pass a package that then refuses every install.
                 tokens = archive.read(recorded[0]).decode("utf-8", "replace").split()
-                if not tokens or tokens[0].lower() != digests[linux]:
+                if not tokens or tokens[0] != digests[linux]:
                     raise ReceiptError(
                         f"{name} payload checksum does not name release asset {linux}"
                     )
@@ -299,14 +331,24 @@ def _verify(
             # Staging runs at the frozen SHA, so there they are the same list; a
             # hand-run `--only publish` from a later `main` is not, and it
             # arrives here after PyPI has already taken the version -- so say
-            # what to do, not only what differed.
+            # what to do, not only what differed. Only for that case: a failed
+            # gate or a wrong SHA fails identically from every checkout.
+            elsewhere = (
+                quality.get("schema_version") != release_gates.SCHEMA_VERSION
+                or str(quality.get("manifest_digest") or "")
+                != release_gates.manifest_digest()
+            )
             raise ReceiptError(
-                f"the sealed quality receipt did not verify: {error}. The gate "
-                f"manifest it is held to is read from the checkout running this "
-                f"script; a hand-run finalize has to run from a checkout of the "
-                f"release commit {source_sha[:12]} (the v{version} tag), because "
-                f"a later revision's gate list will not match a receipt sealed "
-                f"at the tag"
+                f"the sealed quality receipt did not verify: {error}"
+                + (
+                    f". The gate manifest it is held to is read from the checkout "
+                    f"running this script; a hand-run finalize has to run from a "
+                    f"checkout of the release commit {source_sha[:12]} (the "
+                    f"v{version} tag), because a later revision's gate list will "
+                    f"not match a receipt sealed at the tag"
+                    if elsewhere
+                    else ""
+                )
             ) from error
         _match(
             report.get("artifacts"),

@@ -219,8 +219,13 @@ function PathStep({
             class="cust-input"
             value={state.path.model}
             onInput={(e) =>
+              // An edited model is no longer the profile that was saved: Next
+              // saves a new one. Keeping the saved id let Test (reached through
+              // the checklist) probe the *old* model and file its receipt under
+              // the new name.
               onChoose({
                 ...state.path!,
+                profileId: "",
                 model: (e.currentTarget as HTMLInputElement).value,
               })
             }

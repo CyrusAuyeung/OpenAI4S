@@ -109,17 +109,23 @@ describe("project navigation owns every pending list read", () => {
     expect(binds.newSession).not.toHaveBeenCalled();
   });
 
-  it.each(["a conversation open", "going Home"])("keeps a same-project list refresh that %s overtakes", async () => {
+  it.each([
+    // What openConversation does to the view: a new generation, a new owner.
+    { overtaker: "a conversation open", overtake: () => { _openGen.value += 1; currentId.value = "another-session"; } },
+    // What showDashboard does: a new generation and no conversation at all.
+    { overtaker: "going Home", overtake: () => { _openGen.value += 1; currentId.value = null; } },
+  ])("keeps a same-project list refresh that $overtaker overtakes", async ({ overtake }) => {
     // A rename, a delete, a finished turn: each ends in a list refresh. Opening
     // another row (or Home) while it is in flight bumps the view generation, and
     // openConversation does not reload a non-empty list -- so a refresh dropped
     // on that bump left the deleted row, the old title, the stale spinner.
     project.value = "A";
+    currentId.value = "session-before";
     sessions.value = [{ id: "before-the-refresh", project_id: "A" }];
     const held = deferred();
     vi.mocked(api).mockImplementation(async (path) => (path.startsWith("/frames?") ? held.promise : response(path)));
     const refresh = loadSessions();
-    _openGen.value += 1;
+    overtake();
     held.resolve(response("/frames?limit=100&project_id=A"));
     await refresh;
     expect(sessions.value).toEqual([{ id: "session-A", project_id: "A" }]);

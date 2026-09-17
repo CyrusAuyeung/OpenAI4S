@@ -1905,6 +1905,19 @@ def test_staging_rejects_a_windows_payload_from_another_linux_build(
         # A case twin overwrites the verified payload when the zip is extracted.
         "payload/openai4s-0.2.0-LINUX-x86_64.tar.gz",
         "PAYLOAD/other.tar.gz",
+        # Python keeps these names as written; Windows folds every one of them
+        # into `payload\`: a backslash separates, `.` and `..` collapse, and a
+        # trailing dot is stripped from a component.
+        "payload\\0.tar.gz",
+        "./payload/0.tar.gz",
+        "wsl/../payload/0.tar.gz",
+        "payload./0.tar.gz",
+        # Not a tarball, so only the folding sees it: a sidecar that extraction
+        # writes over the verified one.
+        "payload\\OpenAI4S-0.2.0-linux-x86_64.tar.gz.sha256",
+        # ...and a second tarball anywhere else in the package was refused
+        # before there was a payload directory rule at all.
+        "wsl/other.tar.gz",
     ],
 )
 def test_staging_rejects_a_second_payload_the_launcher_would_install(assets, stray):
@@ -1920,23 +1933,44 @@ def test_staging_rejects_a_second_payload_the_launcher_would_install(assets, str
     assert report["stopped_at"] == "upload"
     detail = report["steps"][-1]["detail"]
     assert "must contain exactly the payload" in detail
-    assert stray.rsplit("/", 1)[1] in detail
+    assert repr(f"{windows.stem}/{stray}") in detail
 
 
 @pytest.mark.stubbed_backend
-def test_staging_rejects_a_payload_checksum_naming_other_bytes(assets):
+@pytest.mark.parametrize(
+    ("recorded", "accepted"),
+    [
+        # The shape `build_windows_zip.sh` ships: lowercase hex, two spaces, name.
+        (lambda digest: digest, True),
+        (lambda digest: "0" * 64, False),
+        # bootstrap.sh takes the token verbatim and accepts lowercase hex only,
+        # so a gate that folded case would pass a package no install accepts.
+        (lambda digest: digest.upper(), False),
+    ],
+)
+def test_staging_holds_the_payload_checksum_to_the_released_bytes(
+    assets, recorded, accepted
+):
     """The launcher verifies the install against the sidecar beside the payload."""
     import zipfile
 
     linux, windows = _desktop_release_assets(assets)
     with zipfile.ZipFile(windows, "a") as archive:
+        # Directory entries too, as the real `zip -r` writes them.
+        archive.writestr(f"{windows.stem}/payload/", b"")
         archive.writestr(
-            f"{windows.stem}/payload/{linux.name}.sha256", f"{'0' * 64}  {linux.name}\n"
+            f"{windows.stem}/payload/{linux.name}.sha256",
+            f"{recorded(sha256_file(linux))}  {linux.name}\n",
         )
     _write_build_receipt(assets, "windows", [windows])
-    report = _pipeline(assets, mode="release", gh=_gh_for(assets)).run()
-    assert not report["ok"], report
-    assert "payload checksum does not name" in report["steps"][-1]["detail"]
+    report = _pipeline(
+        assets, mode="release", stop_after="reverify", gh=_gh_for(assets)
+    ).run()
+    if accepted:
+        assert report["ok"], report
+    else:
+        assert not report["ok"], report
+        assert "payload checksum does not name" in report["steps"][-1]["detail"]
 
 
 @pytest.mark.stubbed_backend
@@ -2043,6 +2077,218 @@ def test_resealing_current_documents_cannot_replace_the_old_build_receipt(
     assert windows.name in report["steps"][-1]["detail"]
 
 
+def _reseal_evidence(assets, tmp_path, *, report=None, carried=None):
+    """Seal the evidence again, as anyone able to rewrite the draft can.
+
+    The chain is unsigned. A tamper that stops at the published documents is
+    caught by the seal; one that re-seals has to be caught by the comparison
+    *between* the seal and the bytes, which is what these callers exercise.
+    """
+    import zipfile
+
+    from scripts.release_pipeline import seal_evidence_bundle
+
+    evidence = assets / "openai4s-0.2.0-evidence.zip"
+    with zipfile.ZipFile(evidence) as archive:
+        sealed_report = json.loads(archive.read("release-report.json"))
+        files = {
+            Path(name).name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("artifacts/")
+        }
+    if report is not None:
+        report(sealed_report)
+    if carried is not None:
+        carried(files)
+    sources = []
+    for name, payload in files.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        sources.append(path)
+    seal_evidence_bundle(evidence, sealed_report, files=sources)
+
+
+def _edit_json(path, change):
+    document = json.loads(path.read_text())
+    change(document)
+    path.write_text(json.dumps(document))
+
+
+def _edit_carried(name, change):
+    def apply(files):
+        document = json.loads(files[name])
+        change(document)
+        files[name] = json.dumps(document).encode()
+
+    return apply
+
+
+def _unvouched_asset(assets, tmp_path):
+    (assets / "OpenAI4S-0.2.0-extra-tool.zip").write_bytes(b"nobody built this")
+
+
+def _dropped_sbom(assets, tmp_path):
+    (assets / "sbom.cdx.json").unlink()
+
+
+def _provenance_for_another_version(assets, tmp_path):
+    def change(document):
+        parameters = document["predicate"]["buildDefinition"]["externalParameters"]
+        parameters["version"] = "9.9.9"
+
+    _edit_json(assets / "provenance.intoto.json", change)
+
+
+def _sbom_for_another_version(assets, tmp_path):
+    def change(document):
+        document["metadata"]["component"]["version"] = "9.9.9"
+
+    _edit_json(assets / "sbom.cdx.json", change)
+
+
+def _provenance_names_a_subject_twice(assets, tmp_path):
+    _edit_json(
+        assets / "provenance.intoto.json",
+        lambda document: document["subject"].append(dict(document["subject"][0])),
+    )
+
+
+def _sbom_gives_a_distribution_two_digests(assets, tmp_path):
+    def change(document):
+        row = next(
+            ref
+            for ref in document["externalReferences"]
+            if ref.get("type") == "distribution"
+        )
+        row["hashes"].append({"alg": "SHA-256", "content": "0" * 64})
+
+    _edit_json(assets / "sbom.cdx.json", change)
+
+
+def _evidence_rewritten_under_its_manifest(assets, tmp_path):
+    import zipfile
+
+    evidence = assets / "openai4s-0.2.0-evidence.zip"
+    with zipfile.ZipFile(evidence) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    report = json.loads(members["release-report.json"])
+    report["builder"] = {"os": "somewhere else"}
+    members["release-report.json"] = json.dumps(report).encode()
+    with zipfile.ZipFile(evidence, "w") as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+
+
+def _sealed_for_another_version(assets, tmp_path):
+    _reseal_evidence(
+        assets, tmp_path, report=lambda sealed: sealed.update(version="9.9.9")
+    )
+
+
+def _sealed_without_a_frozen_sha(assets, tmp_path):
+    _reseal_evidence(
+        assets, tmp_path, report=lambda sealed: sealed.update(source_sha="not-a-sha")
+    )
+
+
+def _sealed_inventory_names_other_bytes(assets, tmp_path):
+    def change(sealed):
+        sealed["artifacts"]["openai4s-0.2.0-py3-none-any.whl"] = "0" * 64
+
+    _reseal_evidence(assets, tmp_path, report=change)
+
+
+def _sealed_sbom_is_not_the_published_one(assets, tmp_path):
+    _reseal_evidence(
+        assets,
+        tmp_path,
+        carried=lambda files: files.update({"sbom.cdx.json": b"{}"}),
+    )
+
+
+def _sealed_receipt_names_a_ghost(assets, tmp_path):
+    _reseal_evidence(
+        assets,
+        tmp_path,
+        carried=_edit_carried(
+            "build-receipt-dist.json",
+            lambda receipt: receipt["artifacts"].append(
+                {"name": "ghost-0.2.0.whl", "sha256": "0" * 64}
+            ),
+        ),
+    )
+
+
+def _sealed_receipt_is_for_another_commit(assets, tmp_path):
+    _reseal_evidence(
+        assets,
+        tmp_path,
+        carried=_edit_carried(
+            "build-receipt-dist.json",
+            lambda receipt: receipt.update(source_sha="b" * 40, candidate_sha="b" * 40),
+        ),
+    )
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    ("tamper", "refusal"),
+    [
+        # The direction that publishes something: an asset nothing vouches for.
+        # Dropped and replaced assets were tested; an *added* one was not, and
+        # deleting the `missing` half of `_match` left the whole file green.
+        (_unvouched_asset, "missing ['OpenAI4S-0.2.0-extra-tool.zip']"),
+        (_dropped_sbom, "release is missing evidence assets: ['sbom.cdx.json']"),
+        (_provenance_for_another_version, "provenance names another release version"),
+        (_sbom_for_another_version, "SBOM names another release version"),
+        (_provenance_names_a_subject_twice, "missing or duplicate distribution name"),
+        (_sbom_gives_a_distribution_two_digests, "no unique SHA-256"),
+        (_evidence_rewritten_under_its_manifest, "evidence.zip failed verification"),
+        (_sealed_for_another_version, "sealed release report names another version"),
+        (_sealed_without_a_frozen_sha, "has no frozen source SHA"),
+        (_sealed_inventory_names_other_bytes, "sealed release report disagrees"),
+        (_sealed_sbom_is_not_the_published_one, "sealed sbom.cdx.json differs"),
+        (_sealed_receipt_names_a_ghost, "unexpected or duplicate artifact 'ghost"),
+        (_sealed_receipt_is_for_another_commit, "is for bbbbbbbbbbbb but this release"),
+    ],
+)
+def test_finalize_refuses_each_break_in_the_evidence_chain(
+    assets, tmp_path, tamper, refusal
+):
+    """One tamper per check, each asserting that check's own refusal.
+
+    The gate is a sequence of comparisons, and a test that only asserts "it
+    refused" is satisfied by whichever comparison happens to fire first. Most of
+    them could be deleted one at a time with the suite green; each row here goes
+    red when -- and only when -- its own line is removed.
+    """
+    _write_checksums(assets)  # stage: seal the evidence over the real bytes
+    tamper(assets, tmp_path)
+    _write_checksums(assets)  # ...then refresh the mutable manifest to match
+    calls = []
+    original = _gh_for(assets)
+
+    def gh(argv):
+        calls.append(argv)
+        return original(argv)
+
+    report = _pipeline(assets, mode="release", only="publish", gh=gh).run()
+    assert not report["ok"] and not report["published"], report
+    assert refusal in report["steps"][-1]["detail"]
+    assert not any(call[1] == "edit" for call in calls)
+
+
+@pytest.mark.stubbed_backend
+def test_staging_rejects_a_windows_package_released_without_its_linux_payload(assets):
+    """The payload is compared with a release asset, so there has to be one."""
+    linux, _windows = _desktop_release_assets(assets)
+    linux.unlink()
+    (assets / "build-receipt-linux.json").unlink()
+    report = _pipeline(assets, mode="release", gh=_gh_for(assets)).run()
+    assert not report["ok"], report
+    assert "payload has no matching release asset" in report["steps"][-1]["detail"]
+
+
 @pytest.mark.stubbed_backend
 def test_finalize_requires_provenance_to_name_the_sealed_source_sha(assets):
     _write_checksums(assets)
@@ -2124,6 +2370,45 @@ def test_a_hand_run_finalize_from_another_checkout_is_told_to_use_the_tag(
     assert "different gate manifest" in detail
     assert "checkout of the release commit" in detail
     assert "v0.2.0 tag" in detail
+
+
+@pytest.mark.stubbed_backend
+def test_a_failed_gate_is_not_blamed_on_the_checkout(assets, tmp_path):
+    """The tag-checkout advice is for a manifest that differs, and only that.
+
+    A sealed receipt recording a gate that failed fails identically from every
+    checkout. Sending the operator to re-run from the tag for it costs them a
+    round trip to the same refusal.
+    """
+    import zipfile
+
+    from scripts.release_pipeline import seal_evidence_bundle
+
+    _write_checksums(assets)
+    evidence = assets / "openai4s-0.2.0-evidence.zip"
+    with zipfile.ZipFile(evidence) as archive:
+        sealed_report = json.loads(archive.read("release-report.json"))
+        carried = {
+            Path(name).name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("artifacts/")
+        }
+    quality = json.loads(carried["quality-receipt.json"])
+    quality["gates"][0]["returncode"] = 1
+    carried["quality-receipt.json"] = json.dumps(quality).encode()
+    sources = []
+    for name, payload in carried.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        sources.append(path)
+    seal_evidence_bundle(evidence, sealed_report, files=sources)
+    _write_checksums(assets)
+
+    report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
+    assert not report["ok"] and not report["published"]
+    detail = report["steps"][-1]["detail"]
+    assert "failed with exit code 1" in detail
+    assert "checkout of the release commit" not in detail
 
 
 def test_the_finalize_step_revalidates_the_draft_before_the_flip(assets):
