@@ -169,7 +169,10 @@ later, so GNOME and anything on `GDesktopAppInfo`) and KIO both check that the
 path containing `%` gets an entry those desktops drop. `install.sh` warns about
 such a path rather than implying it works; the CLI link is unaffected. The
 renderer also fails, without writing an entry, if the template no longer
-carries exactly the `Exec` and `Icon` lines it replaces.
+carries exactly the `Exec` and `Icon` lines it replaces. Because the installer
+now depends on the bundled interpreter, `verify_linux_bundle.py` runs the
+shipped `install.sh` and `uninstall.sh` against the unpacked bundle on a
+matching Linux host, rather than only reading them.
 
 ```bash
 bash scripts/build_linux_bundle.sh                               # native

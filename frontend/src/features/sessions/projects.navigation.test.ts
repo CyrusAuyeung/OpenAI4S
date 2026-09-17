@@ -87,25 +87,56 @@ describe("project navigation owns every pending list read", () => {
   it.each([
     { choices: ["B"] },
     { choices: ["B", "A"] },
-  ])("lets menu filtering supersede a pending project open without taking its conversation generation: $choices", async ({ choices }) => {
+  ])("hands the view back to the open conversation when menu filtering supersedes a pending project open: $choices", async ({ choices }) => {
     project.value = "A";
     currentId.value = "still-loading-session";
+    // The generation that conversation's in-flight reads were issued under.
+    const owned = _openGen.value;
     const old = deferred();
     vi.mocked(api).mockReturnValueOnce(old.promise);
     const opening = openProject("A");
-    const conversationGeneration = _openGen.value;
+    // Entry retires it: from here those reads stand down -- "load earlier" keeps
+    // its loading flag, a history still loading never paints. Capturing the
+    // generation only after this line is how the ownerless view went unseen.
+    expect(_openGen.value).not.toBe(owned);
     for (const choice of choices) selectProject(choice);
     await vi.waitFor(() => expect(sessions.value).toEqual([{ id: `session-${choices.at(-1)}`, project_id: choices.at(-1) }]));
-    // Menu selection only filters the sidebar: the existing conversation's
-    // in-flight history remains owned by this exact (id, generation).
-    expect(_openGen.value).toBe(conversationGeneration);
-    expect(currentId.value).toBe("still-loading-session");
-    old.resolve(response("/projects?limit=100"));
-    await opening;
-    expect(project.value).toBe(choices.at(-1));
-    expect(_openGen.value).toBe(conversationGeneration);
     expect(currentId.value).toBe("still-loading-session");
     expect(binds.openConversation).not.toHaveBeenCalled();
+    old.resolve(response("/projects?limit=100"));
+    await opening;
+    // The menu still only filtered the sidebar -- same conversation, the menu's
+    // project -- but the view has an owner again: one reload of that conversation,
+    // which is what re-issues the reads the entry bump retired.
+    expect(project.value).toBe(choices.at(-1));
+    expect(currentId.value).toBe("still-loading-session");
+    expect(binds.openConversation).toHaveBeenCalledTimes(1);
+    expect(binds.openConversation).toHaveBeenCalledWith("still-loading-session", choices.at(-1));
+    expect(binds.newSession).not.toHaveBeenCalled();
+  });
+
+  it("opens the menu's project when a dashboard open stands down with the workspace already revealed", async () => {
+    // From a dashboard row there is no conversation to hand the view back to,
+    // and by the second stand-down showWorkspace() has run: the workspace was
+    // left visible over the previous transcript with no session open.
+    const old = deferred();
+    let held = false;
+    vi.mocked(api).mockImplementation(async (path) => {
+      if (path.startsWith("/frames?") && path.includes("project_id=A")) {
+        held = true;
+        return old.promise;
+      }
+      return response(path);
+    });
+    const opening = openProject("A");
+    await vi.waitFor(() => expect(held).toBe(true));
+    selectProject("B");
+    old.resolve(response("/frames?limit=100&project_id=A"));
+    await opening;
+    expect(project.value).toBe("B");
+    expect(currentId.value).toBe("session-B");
+    expect(binds.openConversation).toHaveBeenCalledTimes(1);
+    expect(binds.openConversation).toHaveBeenCalledWith("session-B", "B");
     expect(binds.newSession).not.toHaveBeenCalled();
   });
 

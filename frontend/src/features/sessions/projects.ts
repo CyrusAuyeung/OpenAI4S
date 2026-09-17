@@ -4,6 +4,7 @@ import { publicText } from "../scrub/scrub";
 import { t } from "../../i18n";
 import {
   _openGen,
+  currentId,
   editingProject,
   project,
   projects,
@@ -307,6 +308,20 @@ export function selectProject(id: string): void {
   void loadSessions();
 }
 
+// openProject retires the open conversation's reads the moment it starts (the
+// bump below). Running to completion always handed the view to a conversation;
+// standing down for a menu filter handed it to nobody -- "load earlier" stayed
+// on Loading…, a history still loading never painted and offered no Retry, the
+// resume watchdog stopped. If the filter is why we stood down and nobody else
+// has taken the view since, give it an owner again: reload the conversation
+// that is showing, or, once the workspace was revealed with none, open the
+// project the menu chose.
+async function reclaimView(gen: number, filterVersion: number, workspaceShown: boolean): Promise<void> {
+  if (_openGen.value !== gen || projectFilterVersion === filterVersion) return;
+  if (currentId.value) await binds.openConversation(currentId.value, project.value);
+  else if (workspaceShown && project.value) await openProject(project.value);
+}
+
 export async function openProject(id: string): Promise<void> {
   // A project trip is navigation: bump the generation so any continuation still
   // parked on an await (an upload-created session about to open its
@@ -316,11 +331,11 @@ export async function openProject(id: string): Promise<void> {
   const filterVersion = projectFilterVersion;
   _openGen.value = gen;
   await loadProjects();
-  if (_openGen.value !== gen || projectFilterVersion !== filterVersion) return;
+  if (_openGen.value !== gen || projectFilterVersion !== filterVersion) return reclaimView(gen, filterVersion, false);
   project.value = id;
   showWorkspace();
   await loadSessions();
-  if (_openGen.value !== gen || projectFilterVersion !== filterVersion || project.value !== id) return;
+  if (_openGen.value !== gen || projectFilterVersion !== filterVersion || project.value !== id) return reclaimView(gen, filterVersion, true);
   renderProjMenu();
   const ss = (sessions.value as SessionLike[]).filter((f) => f.project_id === id);
   const first = ss[0];

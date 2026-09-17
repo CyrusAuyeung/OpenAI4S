@@ -1763,6 +1763,42 @@ def test_linux_installer_carries_a_legacy_encoded_path_through(tmp_path):
     assert b"Icon=" + icon + b"\n" in destination.read_bytes()
 
 
+def test_the_linux_verifier_runs_the_installer_it_ships(tmp_path):
+    """The bundle gate executes install.sh; a static read cannot see it fail.
+
+    install.sh renders the menu entry with the *bundled* interpreter. The
+    verifier already ran that interpreter and never ran the installer, so an
+    installer that could not start it, or a template it could no longer fill,
+    shipped with every gate green. The generated bundle here stands in for the
+    unpacked archive; on the release runner the same check meets the real one.
+    """
+    verifier = _load_script("verify_linux_bundle")
+    app, _env, _data, _bins, _user_data = _generated_linux_bundle(
+        tmp_path, "bundle with spaces", True
+    )
+    verifier._check_installer_runs(app)
+
+    # A template line the renderer has no key for: substring checks still pass.
+    template = app / "share/applications/openai4s.desktop.in"
+    shipped = template.read_text("utf-8")
+    template.write_text(
+        shipped.replace("Exec=@APPDIR@/OpenAI4S", "Exec=@APPDIR@/OpenAI4S %U"),
+        encoding="utf-8",
+    )
+    verifier._check_desktop_entry(app)
+    with pytest.raises(verifier.BundleCheckError, match="did not run against"):
+        verifier._check_installer_runs(app)
+    template.write_text(shipped, encoding="utf-8")
+
+    # An embedded interpreter that will not start for the installer.
+    runtime = app / "runtime" / "bin" / "python3"
+    runtime.unlink()
+    runtime.write_text("#!/bin/sh\necho 'no isolated mode here' >&2\nexit 1\n", "utf-8")
+    runtime.chmod(0o755)
+    with pytest.raises(verifier.BundleCheckError, match="no isolated mode here"):
+        verifier._check_installer_runs(app)
+
+
 def test_the_windows_package_has_no_native_windows_execution_path():
     """Both halves, because either alone is satisfiable by a broken package."""
     launcher = (ROOT / "scripts" / "windows" / "openai4s.ps1").read_text("utf-8")
