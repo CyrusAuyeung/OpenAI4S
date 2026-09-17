@@ -437,12 +437,23 @@ replacements = {
     "Icon=@ICON@": "Icon=" + desktop_string(icon),
 }
 template = Path(app) / "share/applications/openai4s.desktop.in"
-# Replace whole template lines once: placeholders inside a real path are data.
-rendered = "\n".join(
-    replacements.get(line, line)
-    for line in template.read_text(encoding="utf-8").splitlines()
+# argv arrives surrogate-escaped, so a legacy-encoded directory name is carried
+# through byte for byte as `sed` carried it. Strict UTF-8 raised on the write
+# instead -- after opening the file, leaving a working entry at zero bytes.
+lines = template.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+# Whole lines, each exactly once: placeholders inside a real path are data. A
+# template line that drifted from these keys would otherwise pass through and
+# install a menu entry that launches the literal string @APPDIR@.
+drifted = [key for key in replacements if lines.count(key) != 1]
+if drifted:
+    sys.exit(
+        "install.sh: %s does not carry exactly one line for each of %s; "
+        "no menu entry was written" % (template, drifted)
+    )
+rendered = "\n".join(replacements.get(line, line) for line in lines)
+Path(destination).write_text(
+    rendered + "\n", encoding="utf-8", errors="surrogateescape"
 )
-Path(destination).write_text(rendered + "\n", encoding="utf-8")
 DESKTOP_ENTRY
 chmod 644 "$DATA_DIR/applications/openai4s.desktop"
 
@@ -460,6 +471,19 @@ case ":$PATH:" in
   *) echo "note: $BIN_DIR is not on your PATH; add it to use \`openai4s\` directly." ;;
 esac
 echo "Run the app with: $APPDIR/OpenAI4S    (or from your application menu)"
+# The entry doubles a literal % as the specification requires, and that is as
+# far as escaping can go: GLib (GNOME and everything on GDesktopAppInfo) and KIO
+# both check that the Exec program exists *before* expanding %%, so they look
+# for a path with two percent signs in it and drop the entry.
+case "$APPDIR" in
+  *%*)
+    echo >&2
+    echo "warning: this bundle's path contains '%'. GNOME and KDE look the program" >&2
+    echo "         up before expanding the escaped '%%', so the menu entry will not" >&2
+    echo "         appear or launch there. The \`openai4s\` command above still works;" >&2
+    echo "         move the bundle to a path without '%' and re-run install.sh." >&2
+    ;;
+esac
 INSTALL
 chmod +x "$APPDIR/install.sh"
 

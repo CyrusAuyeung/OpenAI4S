@@ -150,6 +150,24 @@ describe("M-01 wizard state machine", () => {
     expect(state.decided).toContain("test");
   });
 
+  it("files a probe result only under the profile it was measured for", () => {
+    const receipt = { native_tool_call: "true", streaming: "true", stale: false, native_completion: true, reachable: true } as const;
+    const waiting = run([
+      { type: "choosePath", path: PATH },
+      { type: "startTest" },
+    ]);
+    // A result for some other profile -- a superseded probe, or one that fell
+    // back to the active profile -- is not this selection's capability.
+    const foreign = reduceWizard(waiting, { type: "testResult", receipt, detail: "", reachable: true, profileId: "someone-else" });
+    expect(foreign).toBe(waiting);
+    expect(foreign.receipt).toBeNull();
+    const own = reduceWizard(waiting, { type: "testResult", receipt, detail: "", reachable: true, profileId: PATH.profileId });
+    expect(own.receipt).toEqual(receipt);
+    // With no selection there is no profile a result could belong to.
+    const unselected = reduceWizard(INITIAL_WIZARD, { type: "testResult", receipt, detail: "", reachable: true, profileId: "p1" });
+    expect(unselected.receipt).toBeNull();
+  });
+
   it("will not grow decided past the four required steps", () => {
     let state = INITIAL_WIZARD;
     for (const step of REQUIRED_STEPS) {

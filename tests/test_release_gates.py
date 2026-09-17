@@ -1557,6 +1557,12 @@ def _desktop_launcher_argv(value: str) -> list[str]:
     Quoting is undone after the string layer, and field codes are expanded
     last. This launcher takes no file/URL arguments, so only literal %% is
     permitted; treating %F in an unpack path as files is a broken launch.
+
+    This is the specification's reading order, not a desktop's. GLib (since
+    2.36) and KIO both check that the Exec program exists *before* they expand
+    %%, so a path containing a percent sign decodes correctly here and is still
+    dropped by GNOME and KDE -- which is why install.sh warns about one and the
+    test below asserts that it does.
     """
     command = _desktop_string_value(value)
     reserved = "\t\n\r\"'\\><~|&;$*?#()`"
@@ -1606,20 +1612,8 @@ def _desktop_launcher_argv(value: str) -> list[str]:
     return argv
 
 
-@pytest.mark.parametrize(
-    "directory",
-    [
-        "ordinary-bundle",
-        "bundle with spaces",
-        "bundle $HOME 'single' \"double\" \\backslash %F %% & | `tick` ;<>~*?#()",
-        "bundle @APPDIR@ @ICON@",
-    ],
-)
-@pytest.mark.parametrize("themed_icon", [True, False])
-def test_linux_installer_launches_from_relocated_paths(
-    tmp_path, directory, themed_icon
-):
-    """Run the shipped generator and installer, then launch the rendered Exec."""
+def _generated_linux_bundle(tmp_path, directory, themed_icon):
+    """A bundle directory written by the shipped step-6 generator, not installed."""
     bash = shutil.which("bash")
     if bash is None or os.name != "posix":
         pytest.skip("Linux installer requires a POSIX host with Bash")
@@ -1657,7 +1651,33 @@ def test_linux_installer_launches_from_relocated_paths(
     subprocess.run(
         [bash, "-c", build[start:end]], env=env, check=True, capture_output=True
     )
-    subprocess.run([str(app / "install.sh")], env=env, check=True, capture_output=True)
+    return app, env, data, bins, user_data
+
+
+@pytest.mark.parametrize(
+    "directory",
+    [
+        "ordinary-bundle",
+        "bundle with spaces",
+        "bundle $HOME 'single' \"double\" \\backslash %F %% & | `tick` ;<>~*?#()",
+        "bundle @APPDIR@ @ICON@",
+    ],
+)
+@pytest.mark.parametrize("themed_icon", [True, False])
+def test_linux_installer_launches_from_relocated_paths(
+    tmp_path, directory, themed_icon
+):
+    """Run the shipped generator and installer, then launch the rendered Exec."""
+    app, env, data, bins, user_data = _generated_linux_bundle(
+        tmp_path, directory, themed_icon
+    )
+    icon = app / "share/icons/hicolor/512x512/apps/openai4s.png"
+    installed = subprocess.run(
+        [str(app / "install.sh")], env=env, check=True, capture_output=True
+    )
+    # Escaping cannot make a percent sign launch from a GLib or KIO menu (see
+    # `_desktop_launcher_argv`), so the installer has to say so -- and only then.
+    assert (b"path contains '%'" in installed.stderr) == ("%" in directory)
 
     desktop = data / "applications/openai4s.desktop"
     fields = dict(
@@ -1686,6 +1706,61 @@ def test_linux_installer_launches_from_relocated_paths(
     assert not cli.is_symlink()
     assert not (data / "icons/hicolor/512x512/apps/openai4s.png").exists()
     assert user_data.read_text(encoding="utf-8") == "saved session"
+
+
+def test_linux_installer_refuses_a_template_it_cannot_fill(tmp_path):
+    """Whole-line replacement that matches nothing has to fail, not pass through.
+
+    The renderer looks each template line up by exact text. A line that drifted
+    from its key -- an argument appended to Exec, a renamed launcher -- was
+    written out unchanged with exit 0, installing a menu entry that launches the
+    literal string `@APPDIR@`; the bundle verifier's substring checks still pass
+    such a template.
+    """
+    app, env, data, _bins, _user_data = _generated_linux_bundle(
+        tmp_path, "drifted bundle", True
+    )
+    template = app / "share/applications/openai4s.desktop.in"
+    template.write_text(
+        template.read_text("utf-8").replace(
+            "Exec=@APPDIR@/OpenAI4S", "Exec=@APPDIR@/OpenAI4S %U"
+        ),
+        encoding="utf-8",
+    )
+    installed = subprocess.run([str(app / "install.sh")], env=env, capture_output=True)
+    assert installed.returncode != 0
+    assert b"Exec=@APPDIR@/OpenAI4S" in installed.stderr
+    assert not (data / "applications/openai4s.desktop").exists()
+
+
+def test_linux_installer_carries_a_legacy_encoded_path_through(tmp_path):
+    """`sed` was byte-transparent; the renderer that replaced it has to be too.
+
+    argv reaches Python surrogate-escaped. Writing that back as strict UTF-8
+    raised -- after `write_text` had already opened the destination, so a
+    re-install under a legacy-encoded directory left the working menu entry at
+    zero bytes and aborted with the CLI link and icons half installed. Only the
+    rendering program is run here: APFS will not create such a directory, and
+    argv carries the bytes on every POSIX host.
+    """
+    app, _env, _data, _bins, _user_data = _generated_linux_bundle(
+        tmp_path, "legacy bundle", True
+    )
+    installer = (app / "install.sh").read_text("utf-8")
+    program = installer.split("<<'DESKTOP_ENTRY'\n", 1)[1].split(
+        "\nDESKTOP_ENTRY\n", 1
+    )[0]
+    destination = tmp_path / "rendered.desktop"
+    destination.write_text("the previous, working entry\n", encoding="utf-8")
+    icon = b"/home/j\xfcrgen/icons/openai4s.png"
+
+    subprocess.run(
+        [sys.executable, "-I", "-", str(app), icon, str(destination)],
+        input=program.encode("utf-8"),
+        check=True,
+        capture_output=True,
+    )
+    assert b"Icon=" + icon + b"\n" in destination.read_bytes()
 
 
 def test_the_windows_package_has_no_native_windows_execution_path():

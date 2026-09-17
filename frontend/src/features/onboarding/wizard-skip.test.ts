@@ -203,6 +203,12 @@ describe("first-run wizard: skipping while a connection test is waiting", () => 
   });
 
 
+  // Characterization, not a regression test for the choosePath change: every
+  // exit from the test step already retired the running probe (Checklist, Next,
+  // Skip and Finish all call leaveTest), and onTest takes a fresh run id, so
+  // this passed before choosePath called leaveTest too and passes without it.
+  // It pins the guarantee across a model switch; what is new is pinned in
+  // machine.test.ts -- the reducer drops a result measured for another profile.
   it.each(["response", "error"])("does not apply the former model's late %s to the newly tested model", async (outcome) => {
     const old = deferred<Record<string, unknown>>();
     api.probeModelProfile.mockReturnValueOnce(old.promise);
@@ -232,6 +238,49 @@ describe("first-run wizard: skipping while a connection test is waiting", () => 
     expect(wizard().receipt?.native_tool_call).toBe("false");
     expect(wizard().error).toBeNull();
     expect(button(t("cust.models.test")).disabled).toBe(false);
+  });
+
+  it("probes the selected path, never the active profile in its place", async () => {
+    // An unsaved local choice has no profile id yet. Falling back to
+    // `status.active_id` measured a different model and showed its capability
+    // badges -- and ticked "test" -- under the local one.
+    hooks.slots[1] = {
+      profiles: [{ id: "mp-active", name: "Claude", provider: "claude", model: "claude-x", base_url: "" }],
+      active_id: "mp-active",
+      protocols: [],
+      local_model_catalog: { endpoints: [] },
+    };
+    hooks.slots[REDUCER] = {
+      ...wizard(),
+      path: { kind: "local", profileId: "", provider: "ollama", model: "llama3", baseUrl: "http://127.0.0.1:11434/v1", name: "llama3" },
+    } satisfies WizardState;
+
+    button(t("cust.models.test")).onClick();
+    await Promise.resolve();
+    expect(api.probeModelProfile).not.toHaveBeenCalled();
+    expect(wizard().error?.message).toBe(ot("onboarding.test.needProfile"));
+    expect(wizard().receipt).toBeNull();
+    expect(wizard().providerRequests).toBe(0);
+  });
+
+  it("selects the active profile before probing it when no path was chosen", async () => {
+    hooks.slots[1] = {
+      profiles: [{ id: "mp-active", name: "Claude", provider: "claude", model: "claude-x", base_url: "https://api.anthropic.com" }],
+      active_id: "mp-active",
+      protocols: [],
+      local_model_catalog: { endpoints: [] },
+    };
+    hooks.slots[REDUCER] = { ...wizard(), path: null, decided: [] } satisfies WizardState;
+    api.probeModelProfile.mockResolvedValueOnce({
+      reachable: true,
+      capability_receipt: { native_tool_call: true, streaming: true, reachable: true },
+    });
+
+    button(t("cust.models.test")).onClick();
+    await vi.waitFor(() => expect(wizard().receipt?.native_tool_call).toBe("true"));
+    expect(api.probeModelProfile).toHaveBeenCalledWith("mp-active");
+    // The receipt is filed under the model that was measured.
+    expect(wizard().path).toMatchObject({ kind: "existing", profileId: "mp-active", model: "claude-x" });
   });
 
   it("still reports a failed probe while the user is waiting for it", async () => {

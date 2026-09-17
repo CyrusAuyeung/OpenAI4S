@@ -289,6 +289,9 @@ _LOCAL_ONLY_SIDECARS = (
     "build-receipt-linux.json",
     "build-receipt-windows.json",
     "stage-attestation.json",
+    # The record of a run that stopped. `step_assets` never collects it, so it
+    # is never uploaded, however long it sits beside the artifacts.
+    "-evidence-stopped.zip",
 )
 
 
@@ -1121,13 +1124,46 @@ def test_a_build_receipt_from_another_workflow_run_is_refused(assets):
     assert "workflow run 7100" in report["steps"][-1]["detail"]
     assert "7101" in report["steps"][-1]["detail"]
 
-    # A stopped-run report is diagnostic output, not a receipted distribution
-    # to feed into the next staging attempt.
-    (assets / "openai4s-0.2.0-evidence-stopped.zip").unlink()
+    # The stopped run left its diagnostic bundle beside the artifacts. It is
+    # this pipeline's own output, not a receipted distribution: the retry must
+    # neither stage it nor be refused because of it.
+    stopped = assets / "openai4s-0.2.0-evidence-stopped.zip"
+    assert stopped.is_file()
     same = _pipeline(
         assets, mode="release", gh=_gh_for(assets), workflow_run_id="7100"
     ).run()
     assert same["ok"], same
+    collected = next(s for s in same["steps"] if s["step"] == "assets")
+    assert stopped.name not in collected["facts"]["assets"]
+
+
+def test_a_staging_retry_is_not_refused_over_the_previous_runs_own_evidence(assets):
+    """The consistency gate before upload must survive an in-place retry.
+
+    `gh release upload` fails once. That run has already sealed
+    `openai4s-<v>-evidence.zip` and leaves a `-evidence-stopped.zip` behind.
+    Both are `.zip` files carrying this version, so `step_assets` collected them
+    on the retry: provenance and the SBOM then named them as subjects, no build
+    receipt covered them, and the gate refused the retry with "restore the
+    verified assets" -- over files nobody had replaced.
+    """
+    _signed_dmg(assets, notarized=True)
+    healthy = _gh_for(assets)
+
+    def flaky(argv):
+        if argv[1] == "upload":
+            return _completed(1, b"", b"HTTP 502")
+        return healthy(argv)
+
+    first = _pipeline(assets, mode="release", gh=flaky).run()
+    assert first["ok"] is False and first["stopped_at"] == "upload", first
+    assert (assets / "openai4s-0.2.0-evidence.zip").is_file()
+    assert (assets / "openai4s-0.2.0-evidence-stopped.zip").is_file()
+
+    retry = _pipeline(assets, mode="release", gh=healthy).run()
+    assert retry["ok"], retry
+    collected = next(s for s in retry["steps"] if s["step"] == "assets")
+    assert not [name for name in collected["facts"]["assets"] if "evidence" in name]
 
 
 def test_a_receipt_built_under_publish_true_cannot_serve_a_rehearsal(assets):
@@ -1832,9 +1868,20 @@ def test_finalize_rejects_replaced_windows_even_after_checksum_refresh(assets):
 
 
 @pytest.mark.stubbed_backend
-def test_staging_rejects_a_windows_payload_from_another_linux_build(assets):
+@pytest.mark.parametrize(
+    ("payload", "refusal"),
+    [
+        (b"other-linux-build", "payload size differs"),
+        # Same length as the released tarball: only the digest can tell them
+        # apart, and a fixture of another size never reached that comparison.
+        (b"LINUX-BUNDLE", "payload does not match release asset"),
+    ],
+)
+def test_staging_rejects_a_windows_payload_from_another_linux_build(
+    assets, payload, refusal
+):
     """Individually receipted files still have to be the same shared payload."""
-    _desktop_release_assets(assets, payload=b"other-linux-build")
+    _desktop_release_assets(assets, payload=payload)
     calls = []
     original = _gh_for(assets)
 
@@ -1844,8 +1891,83 @@ def test_staging_rejects_a_windows_payload_from_another_linux_build(assets):
 
     report = _pipeline(assets, mode="release", gh=gh).run()
     assert not report["ok"], report
-    assert "payload" in report["steps"][-1]["detail"].lower()
+    assert refusal in report["steps"][-1]["detail"]
     assert not any(call[1] in {"upload", "edit"} for call in calls)
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    "stray",
+    [
+        # What the launcher's `-Filter '*.tar.gz' | Select-Object -First 1`
+        # would pick on NTFS: matched ignoring case, sorted before the real one.
+        "payload/OpenAI4S-0.0.TAR.GZ",
+        # A case twin overwrites the verified payload when the zip is extracted.
+        "payload/openai4s-0.2.0-LINUX-x86_64.tar.gz",
+        "PAYLOAD/other.tar.gz",
+    ],
+)
+def test_staging_rejects_a_second_payload_the_launcher_would_install(assets, stray):
+    """Exactly one payload, as Windows reads the directory -- not as `endswith` does."""
+    import zipfile
+
+    _linux, windows = _desktop_release_assets(assets)
+    with zipfile.ZipFile(windows, "a") as archive:
+        archive.writestr(f"{windows.stem}/{stray}", b"another bundle")
+    _write_build_receipt(assets, "windows", [windows])
+    report = _pipeline(assets, mode="release", gh=_gh_for(assets)).run()
+    assert not report["ok"], report
+    assert report["stopped_at"] == "upload"
+    detail = report["steps"][-1]["detail"]
+    assert "must contain exactly the payload" in detail
+    assert stray.rsplit("/", 1)[1] in detail
+
+
+@pytest.mark.stubbed_backend
+def test_staging_rejects_a_payload_checksum_naming_other_bytes(assets):
+    """The launcher verifies the install against the sidecar beside the payload."""
+    import zipfile
+
+    linux, windows = _desktop_release_assets(assets)
+    with zipfile.ZipFile(windows, "a") as archive:
+        archive.writestr(
+            f"{windows.stem}/payload/{linux.name}.sha256", f"{'0' * 64}  {linux.name}\n"
+        )
+    _write_build_receipt(assets, "windows", [windows])
+    report = _pipeline(assets, mode="release", gh=_gh_for(assets)).run()
+    assert not report["ok"], report
+    assert "payload checksum does not name" in report["steps"][-1]["detail"]
+
+
+@pytest.mark.stubbed_backend
+def test_a_corrupt_archive_is_a_refusal_not_a_traceback(assets):
+    """`zlib.error` is none of OSError, ValueError or BadZipFile.
+
+    An intact central directory over a damaged deflate stream raised straight
+    through the gate and through `Pipeline.run`, which handles `ReleaseError`
+    only: no report, no `stopped_at`, no sealed record of the stopped run.
+    """
+    import zipfile
+
+    linux = assets / "OpenAI4S-0.2.0-linux-x86_64.tar.gz"
+    linux.write_bytes(bytes(range(256)) * 64)
+    windows = assets / "OpenAI4S-0.2.0-windows-x86_64.zip"
+    member = f"{windows.stem}/payload/{linux.name}"
+    with zipfile.ZipFile(windows, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(member, linux.read_bytes())
+    with zipfile.ZipFile(windows) as archive:
+        info = archive.getinfo(member)
+        start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    blob = bytearray(windows.read_bytes())
+    blob[start : start + 8] = b"\xff" * 8
+    windows.write_bytes(bytes(blob))
+    _write_build_receipt(assets, "linux", [linux])
+    _write_build_receipt(assets, "windows", [windows])
+
+    report = _pipeline(assets, mode="release", gh=_gh_for(assets)).run()
+    assert report["ok"] is False
+    assert report["stopped_at"] == "upload"
+    assert "release consistency verification failed" in report["steps"][-1]["detail"]
 
 
 @pytest.mark.stubbed_backend
@@ -1864,7 +1986,12 @@ def test_finalize_checks_distribution_documents_after_checksum_refresh(
     _write_checksums(assets)
     report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
     assert not report["ok"] and not report["published"]
-    assert document in report["steps"][-1]["detail"]
+    # The document's *own* comparison. The bare file name also appears in the
+    # later "sealed release report ... changed [...]" refusal, so asserting only
+    # the name stayed green with both of these checks deleted.
+    assert (
+        f"{document} disagrees with the release assets" in report["steps"][-1]["detail"]
+    )
 
 
 @pytest.mark.stubbed_backend
@@ -1929,6 +2056,74 @@ def test_finalize_requires_provenance_to_name_the_sealed_source_sha(assets):
     report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
     assert not report["ok"] and not report["published"]
     assert "source SHA" in report["steps"][-1]["detail"]
+
+
+@pytest.mark.stubbed_backend
+@pytest.mark.parametrize(
+    ("anchor", "refusal"),
+    [
+        ({"source_sha": "b" * 40}, "was frozen at bbbbbbbbbbbb"),
+        ({"workflow_run_id": "666"}, "this is run 666"),
+    ],
+)
+def test_finalize_holds_the_sealed_chain_to_the_sha_and_run_it_was_given(
+    assets, anchor, refusal
+):
+    """A flag the finalizer accepts is a flag it has to compare.
+
+    The SHA the sealed receipts are verified against is read out of the evidence
+    archive itself, so on its own the chain can only agree with itself. Staging
+    holds the same receipts to `--source-sha` and `--workflow-run-id`; finalize
+    took both flags -- the hosted job passes the run id -- and compared neither,
+    so a draft sealed for another commit and another run was made public.
+    """
+    _write_checksums(assets)
+    calls = []
+    original = _gh_for(assets)
+
+    def gh(argv):
+        calls.append(argv)
+        return original(argv)
+
+    report = _pipeline(assets, mode="release", only="publish", gh=gh, **anchor).run()
+    assert not report["ok"] and not report["published"], report
+    assert refusal in report["steps"][-1]["detail"]
+    assert not any(call[1] == "edit" for call in calls)
+
+    # The same draft, given the anchors it was actually sealed under, publishes.
+    agreed = _pipeline(
+        assets,
+        mode="release",
+        only="publish",
+        gh=_gh_for(assets),
+        source_sha=FAKE_HEAD,
+        workflow_run_id="7100",
+    ).run()
+    assert agreed["ok"] and agreed["published"], agreed
+
+
+@pytest.mark.stubbed_backend
+def test_a_hand_run_finalize_from_another_checkout_is_told_to_use_the_tag(
+    assets, monkeypatch
+):
+    """The quality receipt is held to the *running checkout's* gate manifest.
+
+    Staging runs at the frozen SHA, so there the two are one list. The documented
+    recovery -- `--only publish` by hand, after PyPI has taken the version -- is
+    run from wherever the maintainer is, and a gate list that moved since the tag
+    refuses an intact draft. That refusal is correct; leaving the operator to
+    work out that the *checkout* is what differs was not.
+    """
+    from scripts import release_gates
+
+    _write_checksums(assets)
+    monkeypatch.setattr(release_gates, "manifest_digest", lambda: "f" * 64)
+    report = _pipeline(assets, mode="release", only="publish", gh=_gh_for(assets)).run()
+    assert not report["ok"] and not report["published"]
+    detail = report["steps"][-1]["detail"]
+    assert "different gate manifest" in detail
+    assert "checkout of the release commit" in detail
+    assert "v0.2.0 tag" in detail
 
 
 def test_the_finalize_step_revalidates_the_draft_before_the_flip(assets):
@@ -2068,6 +2263,11 @@ def test_finalize_refuses_a_draft_rewritten_to_drop_its_distributions(assets):
     empty, so with a valid immutable PyPI version the finalizer published a
     GitHub release whose distributions are simply absent, while PyPI says
     exactly what should have been there.
+
+    With the evidence sealed over the complete set, as here, the consistency
+    gate now refuses this first -- the chain still names the dropped files. The
+    PyPI anchor itself is pinned by
+    `test_finalize_anchors_a_consistently_resealed_draft_to_pypi`.
     """
     _signed_dmg(assets)
     wheel = assets / "openai4s-0.2.0-py3-none-any.whl"
@@ -2093,6 +2293,44 @@ def test_finalize_refuses_a_draft_rewritten_to_drop_its_distributions(assets):
     detail = report["steps"][-1]["detail"]
     assert "disagrees with the release assets" in detail
     assert wheel.name in detail and sdist.name in detail
+
+
+def test_finalize_anchors_a_consistently_resealed_draft_to_pypi(assets):
+    """The reverse anchor, reached with the consistency gate fully satisfied.
+
+    The two tests around this one now stop earlier: their evidence was sealed
+    over the complete set, so the chain names distributions the draft no longer
+    has and `_verify_consistency` refuses first. That is a good refusal and it
+    proves nothing about the anchor -- `absent_from_draft` could be deleted with
+    both still green. The evidence chain is unsigned, so whoever can rewrite the
+    draft can re-receipt and re-seal the reduced set too; then every document
+    agrees with every other, and immutable PyPI is the only thing left that
+    knows what the release was.
+    """
+    _signed_dmg(assets)
+    wheel = assets / "openai4s-0.2.0-py3-none-any.whl"
+    sdist = assets / "openai4s-0.2.0.tar.gz"
+    # PyPI is immutable and still holds both.
+    immutable = {wheel.name: sha256_file(wheel), sdist.name: sha256_file(sdist)}
+    sdist.unlink()
+    _receipt_dist(assets)  # re-receipted for the reduced set...
+    _write_checksums(assets)  # ...then sealed and manifested over it
+
+    report = _pipeline(
+        assets,
+        mode="release",
+        only="publish",
+        gh=_gh_for(assets),
+        pypi_digests=lambda project, version: immutable,
+    ).run()
+
+    assert report["ok"] is False
+    assert report["stopped_at"] == "publish"
+    assert report["published"] is False
+    detail = report["steps"][-1]["detail"]
+    assert "do not carry the same" in detail
+    assert "the draft is missing" in detail
+    assert sdist.name in detail
 
 
 def test_finalize_refuses_a_draft_that_dropped_only_the_wheel(assets):

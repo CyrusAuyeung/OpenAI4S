@@ -16,12 +16,32 @@ import zipfile
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping, Sequence
 
-from openai4s.evidence import EvidenceError, verify_package
-from scripts.release_gates import GateManifestError, verify_receipt_document
-from scripts.release_receipts import ReceiptError, verify_build_receipts
+from openai4s.evidence import verify_package
+from scripts.release_gates import (
+    RECEIPT_NAME,
+    GateManifestError,
+    verify_receipt_document,
+)
+from scripts.release_receipts import (
+    BUILD_RECEIPT_PREFIX,
+    ReceiptError,
+    verify_build_receipts,
+)
 
-SBOM = "sbom.cdx.json"
-PROVENANCE = "provenance.intoto.json"
+#: The names the pipeline writes and this module reads back. One definition,
+#: imported by `release_pipeline`: the writer and the collector disagreeing on
+#: the SBOM's name is how it was once built on every release and carried on none.
+SBOM_NAME = "sbom.cdx.json"
+PROVENANCE_NAME = "provenance.intoto.json"
+
+
+def evidence_bundle_name(version: str) -> str:
+    return f"openai4s-{version}-evidence.zip"
+
+
+def stopped_evidence_name(version: str) -> str:
+    """The best-effort record of a run that stopped. Never a release asset."""
+    return f"openai4s-{version}-evidence-stopped.zip"
 
 
 def _digest(stream: BinaryIO) -> str:
@@ -103,13 +123,32 @@ def _windows_payloads(
         linux = f"OpenAI4S-{version}-linux-{arch}.tar.gz"
         if linux not in files:
             raise ReceiptError(f"{name} payload has no matching release asset {linux}")
-        expected_member = f"{path.stem}/payload/{linux}"
+        payload_dir = f"{path.stem}/payload/"
+        expected_member = payload_dir + linux
+        sidecar = expected_member + ".sha256"
         with zipfile.ZipFile(path) as archive:
-            members = [
-                info for info in archive.infolist() if info.filename.endswith(".tar.gz")
+            # A closed list, compared without case. The launcher installs the
+            # first `payload\*.tar.gz` Windows hands it and trusts the sidecar
+            # beside *that* file; NTFS matches and sorts names ignoring case, so
+            # an `OpenAI4S-0.0.TAR.GZ` riding along would be the one installed
+            # while an `endswith(".tar.gz")` test here never saw it.
+            carried = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir()
+                and info.filename.casefold().startswith(payload_dir.casefold())
             ]
-            if len(members) != 1 or members[0].filename != expected_member:
-                raise ReceiptError(f"{name} must contain exactly the payload {linux}")
+            stray = sorted(
+                info.filename
+                for info in carried
+                if info.filename not in (expected_member, sidecar)
+            )
+            members = [info for info in carried if info.filename == expected_member]
+            if stray or len(members) != 1:
+                raise ReceiptError(
+                    f"{name} must contain exactly the payload {linux}"
+                    + (f"; its payload directory also carries {stray}" if stray else "")
+                )
             member = members[0]
             # Check before streaming: a forged zip cannot make verification
             # decompress more payload bytes than the independently held asset.
@@ -121,47 +160,81 @@ def _windows_payloads(
                 raise ReceiptError(
                     f"{name} payload does not match release asset {linux}"
                 )
+            recorded = [info for info in carried if info.filename == sidecar]
+            if recorded:
+                # The digest the launcher will actually check the install against.
+                if len(recorded) != 1 or recorded[0].file_size > 4096:
+                    raise ReceiptError(f"{name} carries a malformed payload checksum")
+                tokens = archive.read(recorded[0]).decode("utf-8", "replace").split()
+                if not tokens or tokens[0].lower() != digests[linux]:
+                    raise ReceiptError(
+                        f"{name} payload checksum does not name release asset {linux}"
+                    )
 
 
 def verify_release_consistency(
-    assets: Sequence[Path], *, version: str, required_kinds: Sequence[str]
+    assets: Sequence[Path],
+    *,
+    version: str,
+    required_kinds: Sequence[str],
+    expected_sha: str = "",
+    workflow_run_id: str = "",
+    digests: Mapping[str, str] | None = None,
 ) -> None:
     """Require the complete staged evidence chain, including manual recovery.
 
     The evidence is a pre-upload snapshot: its report covers distributions,
     SBOM and provenance, but cannot contain its own hash or SHA256SUMS. Build
     receipts are carried inside that archive, not as public sidecars.
+
+    ``expected_sha`` and ``workflow_run_id`` are the two anchors staging holds
+    its receipts to. The source SHA this chain is checked against is otherwise
+    read out of the archive being checked, so a caller that was told either one
+    passes it here rather than having the flag accepted and then ignored.
+    ``digests`` are SHA-256s the caller has *just* taken of these same files.
     """
     try:
-        _verify(assets, version=version, required_kinds=required_kinds)
-    except (
-        OSError,
-        ValueError,
-        KeyError,
-        TypeError,
-        AttributeError,
-        zipfile.BadZipFile,
-        EvidenceError,
-        RuntimeError,
-        GateManifestError,
-    ) as error:
+        _verify(
+            assets,
+            version=version,
+            required_kinds=required_kinds,
+            expected_sha=expected_sha,
+            workflow_run_id=workflow_run_id,
+            known=digests or {},
+        )
+    except ReceiptError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        # Every refusal has to reach the caller as one. A tuple of expected
+        # types let a corrupt deflate stream (`zlib.error`) through as a raw
+        # traceback: no report row, no sealed record of the stopped run.
         raise ReceiptError(
-            f"release consistency verification failed: {error}"
+            f"release consistency verification failed: "
+            f"{type(error).__name__}: {error}"
         ) from error
 
 
 def _verify(
-    assets: Sequence[Path], *, version: str, required_kinds: Sequence[str]
+    assets: Sequence[Path],
+    *,
+    version: str,
+    required_kinds: Sequence[str],
+    expected_sha: str,
+    workflow_run_id: str,
+    known: Mapping[str, str],
 ) -> None:
     files = {path.name: path for path in assets if path.name != "SHA256SUMS"}
-    evidence_name = f"openai4s-{version}-evidence.zip"
-    required = {SBOM, PROVENANCE, evidence_name}
+    evidence_name = evidence_bundle_name(version)
+    required = {SBOM_NAME, PROVENANCE_NAME, evidence_name}
     if not required <= files.keys():
         raise ReceiptError(
             f"release is missing evidence assets: {sorted(required - files.keys())}"
         )
     digests = {}
     for name, path in files.items():
+        if name in known:
+            digests[name] = known[name]
+            continue
         with path.open("rb") as stream:
             digests[name] = _digest(stream)
     distributions = {
@@ -170,20 +243,22 @@ def _verify(
     if not distributions:
         raise ReceiptError("release evidence names no distributions")
 
-    provenance = _document(files[PROVENANCE].read_bytes(), PROVENANCE)
+    provenance = _document(files[PROVENANCE_NAME].read_bytes(), PROVENANCE_NAME)
     definition = provenance["predicate"]["buildDefinition"]
     if definition["externalParameters"]["version"] != version:
         raise ReceiptError("provenance names another release version")
     _match(
-        _rows(provenance.get("subject"), label=PROVENANCE), distributions, PROVENANCE
+        _rows(provenance.get("subject"), label=PROVENANCE_NAME),
+        distributions,
+        PROVENANCE_NAME,
     )
-    sbom = _document(files[SBOM].read_bytes(), SBOM)
+    sbom = _document(files[SBOM_NAME].read_bytes(), SBOM_NAME)
     if sbom["metadata"]["component"]["version"] != version:
         raise ReceiptError("SBOM names another release version")
     _match(
-        _rows(sbom.get("externalReferences"), label=SBOM, sbom=True),
+        _rows(sbom.get("externalReferences"), label=SBOM_NAME, sbom=True),
         distributions,
-        SBOM,
+        SBOM_NAME,
     )
 
     verdict = verify_package(files[evidence_name])
@@ -200,6 +275,11 @@ def _verify(
             r"[0-9a-f]{40}", source_sha
         ):
             raise ReceiptError("sealed release report has no frozen source SHA")
+        if expected_sha and source_sha != expected_sha:
+            raise ReceiptError(
+                f"sealed release report is for {source_sha[:12]}, but this release "
+                f"was frozen at {expected_sha[:12]}"
+            )
         sources = definition["resolvedDependencies"]
         if (
             not isinstance(sources, list)
@@ -210,15 +290,30 @@ def _verify(
                 "provenance source SHA differs from the sealed release report"
             )
         quality = _document(
-            archive.read("artifacts/quality-receipt.json"), "sealed quality receipt"
+            archive.read(f"artifacts/{RECEIPT_NAME}"), "sealed quality receipt"
         )
-        verify_receipt_document(quality, expected_sha=source_sha)
+        try:
+            verify_receipt_document(quality, expected_sha=source_sha)
+        except GateManifestError as error:
+            # The gate list the receipt is held to is the *running checkout's*.
+            # Staging runs at the frozen SHA, so there they are the same list; a
+            # hand-run `--only publish` from a later `main` is not, and it
+            # arrives here after PyPI has already taken the version -- so say
+            # what to do, not only what differed.
+            raise ReceiptError(
+                f"the sealed quality receipt did not verify: {error}. The gate "
+                f"manifest it is held to is read from the checkout running this "
+                f"script; a hand-run finalize has to run from a checkout of the "
+                f"release commit {source_sha[:12]} (the v{version} tag), because "
+                f"a later revision's gate list will not match a receipt sealed "
+                f"at the tag"
+            ) from error
         _match(
             report.get("artifacts"),
             {name: value for name, value in digests.items() if name != evidence_name},
             "sealed release report",
         )
-        for name in (SBOM, PROVENANCE):
+        for name in (SBOM_NAME, PROVENANCE_NAME):
             if (
                 hashlib.sha256(archive.read(f"artifacts/{name}")).hexdigest()
                 != digests[name]
@@ -229,8 +324,14 @@ def _verify(
         ) as scratch:
             receipts = []
             coverage: dict[str, str] = {}
+            # The same shape `step_evidence` globs when it seals them. A narrower
+            # pattern here would skip a receipt the sealer carried and then
+            # report its distributions as unreceipted.
+            sealed_receipt = re.compile(
+                rf"artifacts/{re.escape(BUILD_RECEIPT_PREFIX)}[^/]+\.json"
+            )
             for member in archive.namelist():
-                if not re.fullmatch(r"artifacts/build-receipt-[a-z]+\.json", member):
+                if not sealed_receipt.fullmatch(member):
                     continue
                 payload = archive.read(member)
                 document = _document(payload, member)
@@ -257,10 +358,21 @@ def _verify(
             # All supplied paths are in the staging/download directory. No
             # archive member is extracted and every receipt row was allowlisted
             # against real distribution names before the existing verifier reads.
-            verify_build_receipts(
+            # `digests`: the rows were just matched against these exact hashes,
+            # so re-reading every distribution to compare them again buys
+            # nothing -- and a desktop bundle is hundreds of megabytes.
+            sealed = verify_build_receipts(
                 receipts,
                 expected_sha=source_sha,
-                assets_dir=files[SBOM].parent,
+                assets_dir=files[SBOM_NAME].parent,
                 required_kinds=required_kinds,
+                digests=distributions,
             )
+        for kind, document in sorted(sealed.items()):
+            recorded_run = str(document.get("workflow_run_id") or "")
+            if workflow_run_id and recorded_run != workflow_run_id:
+                raise ReceiptError(
+                    f"sealed build receipt {kind} is from workflow run "
+                    f"{recorded_run or '<none>'}; this is run {workflow_run_id}"
+                )
     _windows_payloads(files, digests, version)

@@ -7,6 +7,7 @@ import { _openGen, currentId, folders, project, sessions } from "../../stores/se
 import { resetStoreFields } from "../../stores/signal-field";
 import { api } from "./api";
 import { binds } from "./binds";
+import { loadSessions } from "./load";
 import { openProject, selectProject } from "./projects";
 
 function deferred() {
@@ -83,7 +84,10 @@ describe("project navigation owns every pending list read", () => {
   });
 
 
-  it.each([["B"], ["B", "A"]])("lets menu filtering supersede a pending project open without taking its conversation generation: %j", async (...choices) => {
+  it.each([
+    { choices: ["B"] },
+    { choices: ["B", "A"] },
+  ])("lets menu filtering supersede a pending project open without taking its conversation generation: $choices", async ({ choices }) => {
     project.value = "A";
     currentId.value = "still-loading-session";
     const old = deferred();
@@ -103,6 +107,23 @@ describe("project navigation owns every pending list read", () => {
     expect(currentId.value).toBe("still-loading-session");
     expect(binds.openConversation).not.toHaveBeenCalled();
     expect(binds.newSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["a conversation open", "going Home"])("keeps a same-project list refresh that %s overtakes", async () => {
+    // A rename, a delete, a finished turn: each ends in a list refresh. Opening
+    // another row (or Home) while it is in flight bumps the view generation, and
+    // openConversation does not reload a non-empty list -- so a refresh dropped
+    // on that bump left the deleted row, the old title, the stale spinner.
+    project.value = "A";
+    sessions.value = [{ id: "before-the-refresh", project_id: "A" }];
+    const held = deferred();
+    vi.mocked(api).mockImplementation(async (path) => (path.startsWith("/frames?") ? held.promise : response(path)));
+    const refresh = loadSessions();
+    _openGen.value += 1;
+    held.resolve(response("/frames?limit=100&project_id=A"));
+    await refresh;
+    expect(sessions.value).toEqual([{ id: "session-A", project_id: "A" }]);
+    expect(folders.value).toEqual([{ folder_id: "folder-A" }]);
   });
 
   it("does not reopen a project after the user has gone Home", async () => {

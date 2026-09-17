@@ -77,6 +77,8 @@ export type WizardAction =
       receipt: WizardReceipt | null;
       detail: string;
       reachable: boolean;
+      /** The profile the probe actually measured. */
+      profileId?: string;
     }
   | { type: "fail"; message: string; requestId: string }
   | { type: "clearError" }
@@ -209,6 +211,12 @@ export function reduceWizard(state: WizardState, action: WizardAction): WizardSt
         probeDetail: "",
       };
     case "testResult":
+      // The receipt is filed under `state.path`, so it has to have been
+      // measured for it. Clearing on an identity change covers what is already
+      // stored; this covers what is still arriving, whoever sent it.
+      if (action.profileId !== undefined && action.profileId !== (state.path?.profileId ?? "")) {
+        return state;
+      }
       return {
         ...state,
         receipt: action.receipt,

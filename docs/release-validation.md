@@ -161,8 +161,15 @@ tarball does not know where it will be unpacked, so the entry ships as a
 template and `install.sh` substitutes the real location at install time.
 Shipping a pre-baked path would produce a menu entry that launches nothing.
 The installer encodes the executable path using the desktop-entry quoting and
-escaping rules, including literal percent signs. Installation paths containing
-spaces or shell punctuation must still launch the same bundled executable.
+escaping rules. Installation paths containing spaces or shell punctuation must
+still launch the same bundled executable. A literal percent sign is doubled as
+the specification requires, but that is where escaping ends: GLib (2.36 and
+later, so GNOME and anything on `GDesktopAppInfo`) and KIO both check that the
+`Exec` program exists *before* they expand `%%`, so a bundle unpacked under a
+path containing `%` gets an entry those desktops drop. `install.sh` warns about
+such a path rather than implying it works; the CLI link is unaffected. The
+renderer also fails, without writing an entry, if the template no longer
+carries exactly the `Exec` and `Icon` lines it replaces.
 
 ```bash
 bash scripts/build_linux_bundle.sh                               # native
@@ -392,7 +399,17 @@ released. This check also applies to a hand-run `--only publish` without a stage
 attestation. Updating `SHA256SUMS` after replacing a ZIP cannot make its older
 build receipt valid. These checks establish consistency; the out-of-band stage
 attestation remains the protection against replacing an entire draft and its
-evidence together.
+evidence together. When `--source-sha` or `--workflow-run-id` is supplied, the
+sealed report and the sealed build receipts must also name that commit and that
+run, as they must at staging.
+
+Run a hand-run `--only publish` from a checkout of the release tag. The sealed
+quality receipt is verified against the gate manifest of the checkout running
+the script, so a later `main` whose gate list has moved refuses an intact draft
+— after PyPI has already taken the version. The refusal names the release
+commit to check out. A staging retry in the same `--assets-dir` is supported:
+the previous attempt's `-evidence.zip` and `-evidence-stopped.zip` are this
+pipeline's own outputs and are never collected as distributions.
 
 If a draft asset was replaced, restore the original verified bytes and their
 matching evidence. If the replacement changes the release source, merge the

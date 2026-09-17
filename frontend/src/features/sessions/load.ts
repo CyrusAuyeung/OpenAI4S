@@ -2,7 +2,6 @@
 
 import { t } from "../../i18n";
 import {
-  _openGen,
   _folderCollapsed,
   _foldersFor,
   _projectsLoadingMore,
@@ -216,10 +215,20 @@ export function invalidateFolders(): void {
   _foldersFor.value = null;
 }
 
+// A list read belongs to the project it was issued for, and to nothing else.
+// `_openGen` says who owns the *view*: every conversation open and every trip
+// Home bumps it, and neither makes project P's rows wrong. Keyed on it, a
+// refresh after a delete, a rename, a send or a WS frame_update was dropped the
+// moment the user clicked another row -- and nothing re-issues it, because
+// openConversation reloads only an empty list.
+const listScope = (): (() => boolean) => {
+  const pid = project.value;
+  return () => project.value === pid;
+};
+
 export async function loadFolders(): Promise<void> {
   const pid = project.value;
-  const gen = _openGen.value;
-  const current = () => project.value === pid && _openGen.value === gen;
+  const current = listScope();
   if (!pid) {
     folders.value = [];
     _foldersFor.value = null;
@@ -239,11 +248,10 @@ export async function loadFolders(): Promise<void> {
 
 export async function loadSessions(): Promise<void> {
   const pid = project.value;
-  const gen = _openGen.value;
-  const current = () => project.value === pid && _openGen.value === gen;
+  const current = listScope();
   const scope = pid ? `&project_id=${encodeURIComponent(pid)}` : "";
-  if (_sessionScope.value !== (project.value || "")) {
-    _sessionScope.value = project.value || "";
+  if (_sessionScope.value !== (pid || "")) {
+    _sessionScope.value = pid || "";
     sessionPages.value = 1;
   }
   const want = sessionWalkBudget(sessionPages.value || 1);
