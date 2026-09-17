@@ -4,6 +4,7 @@ import { publicText } from "../scrub/scrub";
 import { t } from "../../i18n";
 import {
   _openGen,
+  currentId,
   editingProject,
   project,
   projects,
@@ -295,11 +296,30 @@ export function renderProjMenu(): void {
   m.setAttribute("role", "menu");
 }
 
+// The menu filters the sidebar without replacing the open conversation. It
+// cancels pending project opens, but must not retire that conversation's reads.
+let projectFilterVersion = 0;
+
 export function selectProject(id: string): void {
+  projectFilterVersion += 1;
   project.value = id;
   $("#proj-menu")?.classList.add("hidden");
   renderProjMenu();
   void loadSessions();
+}
+
+// openProject retires the open conversation's reads the moment it starts (the
+// bump below). Running to completion always handed the view to a conversation;
+// standing down for a menu filter handed it to nobody -- "load earlier" stayed
+// on Loading…, a history still loading never painted and offered no Retry, the
+// resume watchdog stopped. If the filter is why we stood down and nobody else
+// has taken the view since, give it an owner again: reload the conversation
+// that is showing, or, once the workspace was revealed with none, open the
+// project the menu chose.
+async function reclaimView(gen: number, filterVersion: number, workspaceShown: boolean): Promise<void> {
+  if (_openGen.value !== gen || projectFilterVersion === filterVersion) return;
+  if (currentId.value) await binds.openConversation(currentId.value, project.value);
+  else if (workspaceShown && project.value) await openProject(project.value);
 }
 
 export async function openProject(id: string): Promise<void> {
@@ -307,17 +327,23 @@ export async function openProject(id: string): Promise<void> {
   // parked on an await (an upload-created session about to open its
   // conversation, a resume watchdog) sees a stale token and stands down instead
   // of yanking the view back to where it started.
-  _openGen.value = (_openGen.value || 0) + 1;
+  const gen = (_openGen.value || 0) + 1;
+  const filterVersion = projectFilterVersion;
+  _openGen.value = gen;
   await loadProjects();
+  if (_openGen.value !== gen || projectFilterVersion !== filterVersion) return reclaimView(gen, filterVersion, false);
   project.value = id;
   showWorkspace();
   await loadSessions();
+  if (_openGen.value !== gen || projectFilterVersion !== filterVersion || project.value !== id) return reclaimView(gen, filterVersion, true);
   renderProjMenu();
   const ss = (sessions.value as SessionLike[]).filter((f) => f.project_id === id);
   const first = ss[0];
   // Await the conversation. Fire-and-forget let openProject's callers (routing,
   // dashboard rows, createProject) return before the session existed, so the
   // next navigation raced the open this call had not finished.
+  // The child takes its own generation; ownership checks belong before this
+  // handoff, not after it.
   if (first?.id) await binds.openConversation(first.id, id);
   else {
     // The empty-project path must create its conversation in the project just

@@ -215,8 +215,20 @@ export function invalidateFolders(): void {
   _foldersFor.value = null;
 }
 
+// A list read belongs to the project it was issued for, and to nothing else.
+// `_openGen` says who owns the *view*: every conversation open and every trip
+// Home bumps it, and neither makes project P's rows wrong. Keyed on it, a
+// refresh after a delete, a rename, a send or a WS frame_update was dropped the
+// moment the user clicked another row -- and nothing re-issues it, because
+// openConversation reloads only an empty list.
+const listScope = (): (() => boolean) => {
+  const pid = project.value;
+  return () => project.value === pid;
+};
+
 export async function loadFolders(): Promise<void> {
   const pid = project.value;
+  const current = listScope();
   if (!pid) {
     folders.value = [];
     _foldersFor.value = null;
@@ -225,17 +237,21 @@ export async function loadFolders(): Promise<void> {
   if (_foldersFor.value === pid && folders.value) return;
   try {
     const d = (await api(`/projects/${pid}/folders`)) as { folders?: unknown[] } | null;
+    if (!current()) return;
     folders.value = (d && d.folders) || [];
     _foldersFor.value = pid;
   } catch {
+    if (!current()) return;
     folders.value = [];
   }
 }
 
 export async function loadSessions(): Promise<void> {
-  const scope = project.value ? `&project_id=${encodeURIComponent(project.value)}` : "";
-  if (_sessionScope.value !== (project.value || "")) {
-    _sessionScope.value = project.value || "";
+  const pid = project.value;
+  const current = listScope();
+  const scope = pid ? `&project_id=${encodeURIComponent(pid)}` : "";
+  if (_sessionScope.value !== (pid || "")) {
+    _sessionScope.value = pid || "";
     sessionPages.value = 1;
   }
   const want = sessionWalkBudget(sessionPages.value || 1);
@@ -251,6 +267,7 @@ export async function loadSessions(): Promise<void> {
         has_more?: boolean;
         next_cursor?: string | null;
       } | null;
+      if (!current()) return;
       const step = absorbSessionPage(state, f);
       if (step.stop) break;
       cursor = step.cursor;
@@ -259,11 +276,13 @@ export async function loadSessions(): Promise<void> {
     sessionPages.value = Math.max(1, state.walked);
     sessionsHasMore.value = state.hasMore;
   } catch {
+    if (!current()) return;
     sessions.value = [];
     sessionPages.value = 1;
     sessionsHasMore.value = false;
   }
   await loadFolders();
+  if (!current()) return;
   renderSessions();
   syncCurrentTitle();
   const dash = $("#dashboard");
