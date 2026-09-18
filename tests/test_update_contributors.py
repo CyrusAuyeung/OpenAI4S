@@ -53,7 +53,7 @@ def test_a_recognized_login_that_is_excluded_is_still_refused(monkeypatch):
 
 
 def test_empty_api_result_still_fails_before_recognition_is_added(monkeypatch):
-    monkeypatch.setattr(update_contributors, "read_avatar_readmes", dict)
+    monkeypatch.setattr(update_contributors, "read_documents", dict)
     monkeypatch.setattr(update_contributors, "_token", lambda: None)
     monkeypatch.setattr(update_contributors, "fetch_contributors", lambda _token: [])
 
@@ -90,7 +90,7 @@ def test_avatar_refresh_failure_keeps_current_png_and_prunes_departed_one(
         [{"login": "EQSTLab"}], None
     )
 
-    assert have_png == {"EQSTLab"}
+    assert have_png == {"EQSTLab": "EQSTLab.png"}
     assert written == 0  # nothing was refreshed; only the count says so
     assert surviving == ["EQSTLab.png"]
     assert current.read_bytes() == b"existing-avatar"
@@ -98,7 +98,7 @@ def test_avatar_refresh_failure_keeps_current_png_and_prunes_departed_one(
     assert not legacy_svg.exists()
 
 
-def test_a_login_whose_casing_drifted_keeps_its_file_and_links_remotely(
+def test_a_login_whose_casing_drifted_links_the_file_it_actually_has(
     tmp_path, monkeypatch
 ):
     """The committed file wins over the login's spelling, and render() follows.
@@ -106,7 +106,9 @@ def test_a_login_whose_casing_drifted_keeps_its_file_and_links_remotely(
     `os.path.isfile` answers case-insensitively on a case-preserving
     filesystem, so keying "do I have a PNG" off it while pruning on an exact
     `os.listdir` match deleted the committed avatar and still emitted a local
-    `<img src>` for it -- a dead image on the front page of both READMEs.
+    `<img src>` for it -- a dead image on the front page of both READMEs. The
+    src is therefore read back from `os.listdir`: it names the file that
+    survived the prune, never the one the login would imply.
     """
     avatar_dir = tmp_path / "contributors"
     avatar_dir.mkdir()
@@ -120,13 +122,29 @@ def test_a_login_whose_casing_drifted_keeps_its_file_and_links_remotely(
 
     monkeypatch.setattr(update_contributors, "_get", fail_download)
 
-    people = [{"login": "EQSTLab"}]
-    have_png, _written, _surviving = update_contributors.write_avatars(people, None)
+    people = [{"login": "EQSTLab"}, {"login": "NoFile"}]
+    have_png, _written, surviving = update_contributors.write_avatars(people, None)
 
     assert committed.read_bytes() == b"existing-avatar"
-    assert have_png == set()
-    assert 'src="https://github.com/EQSTLab.png"' in update_contributors.render(
-        people, have_png
+    assert have_png == {"EQSTLab": "eqstlab.png"}
+    assert surviving == ["eqstlab.png"]
+    rendered = update_contributors.render(people, have_png)
+    assert f'src="{avatar_dir.as_posix()}/eqstlab.png"' in rendered
+    assert 'src="https://github.com/NoFile.png"' in rendered
+
+
+def test_the_refresh_writes_the_committed_spelling_of_an_avatar():
+    # Filesystem-independent, and the only assertion that is: a case-insensitive
+    # filesystem writes through to the committed file whatever name it is given,
+    # so the refresh scenarios below cannot see a case-variant twin at all.
+    assert update_contributors._target_name("Existing", {"existing.png"}) == (
+        "existing.png"
+    )
+    assert update_contributors._target_name("Existing", {"Existing.png"}) == (
+        "Existing.png"
+    )
+    assert update_contributors._target_name("NewPerson", {"existing.png"}) == (
+        "NewPerson.png"
     )
 
 
@@ -174,6 +192,20 @@ def test_documents_are_all_staged_before_any_is_replaced(tmp_path):
 
     assert first.read_text(encoding="utf-8") == "old\n"
     assert [path.name for path in tmp_path.iterdir()] == ["README.md"]
+
+
+def test_a_staged_file_a_killed_run_left_behind_is_swept(tmp_path):
+    document = tmp_path / "README.md"
+    document.write_text("old\n", encoding="utf-8")
+    leftover = tmp_path / f"{update_contributors.TMP_PREFIX}killed"
+    leftover.write_text("half a document\n", encoding="utf-8")
+
+    update_contributors._write_texts({str(document): "new\n"})
+
+    # Nothing but the document: the avatar directory's gate fails on any file
+    # its READMEs do not list, and the prune only removes images.
+    assert [path.name for path in tmp_path.iterdir()] == ["README.md"]
+    assert document.read_text(encoding="utf-8") == "new\n"
 
 
 def test_a_replaced_document_keeps_its_permissions(tmp_path):
@@ -230,6 +262,14 @@ def contributor_checkout(tmp_path, monkeypatch):
     [
         ([], ["NewPerson"], [], ["NewPerson.png"]),
         (["Departed.png", "Departed.svg"], ["NewPerson"], [], ["NewPerson.png"]),
+        # The staged file a killed run left behind goes with the departed:
+        # the gate below fails on any file the inventories do not list.
+        (
+            [f"{update_contributors.TMP_PREFIX}killed", "Departed.png"],
+            ["NewPerson"],
+            [],
+            ["NewPerson.png"],
+        ),
         (
             ["Existing.png"],
             ["NewPerson", "Existing"],
@@ -242,8 +282,10 @@ def contributor_checkout(tmp_path, monkeypatch):
             ["Existing"],
             ["NewPerson.png", "existing.png"],
         ),
-        # A successful refresh keeps the committed spelling on every
-        # filesystem instead of adding a case-variant twin beside it.
+        # A successful refresh keeps the committed spelling. On a
+        # case-insensitive filesystem this case passes either way -- only
+        # `test_the_refresh_writes_the_committed_spelling_of_an_avatar` pins
+        # the choice that a case-sensitive filesystem would act on.
         (["existing.png"], ["Existing"], [], ["existing.png"]),
         ([], ["Unavailable"], ["Unavailable"], []),
         (
@@ -390,3 +432,67 @@ def test_main_stages_all_four_readmes_before_replacing_any(
     assert writes == 4
     assert {path: path.read_bytes() for path in originals} == originals
     assert set(root.rglob("*")) == original_paths
+
+
+def test_a_wall_with_a_second_marker_pair_stops_the_refresh_too(
+    contributor_checkout, monkeypatch, capsys
+):
+    """One skipped wall beside one rewritten wall is two answers, not one.
+
+    Splicing "the" marker pair needs there to be exactly one, and a root
+    README that carries two used to be skipped while its sibling updated --
+    with the run still reporting success.
+    """
+    avatar_dir = contributor_checkout
+    root = avatar_dir.parents[1]
+    (root / "README.md").write_text(
+        "# Wall\n\n<!-- CONTRIBUTORS:START -->\n<!-- CONTRIBUTORS:END -->\n\n"
+        "<!-- CONTRIBUTORS:START -->\n<!-- CONTRIBUTORS:END -->\n",
+        encoding="utf-8",
+    )
+
+    def unexpected_fetch(*_args):
+        raise AssertionError("an unusable wall must fail before auth or network")
+
+    monkeypatch.setattr(update_contributors, "_token", unexpected_fetch)
+    monkeypatch.setattr(update_contributors, "fetch_contributors", unexpected_fetch)
+    before = {
+        path: path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    }
+
+    assert update_contributors.main() == 1
+
+    assert {path: path.read_bytes() for path in before} == before
+    assert "README.md" in capsys.readouterr().err
+
+
+def test_a_leftover_staged_file_goes_even_when_no_document_changes(
+    contributor_checkout, monkeypatch
+):
+    """The refresh that finds nothing to write still has to clear the tree.
+
+    The writer only sweeps a directory it is about to write, and a second run
+    over an already-current inventory writes nothing at all -- so the prune is
+    what keeps a killed run from leaving the directory gate red for good.
+    """
+    avatar_dir = contributor_checkout
+    root = avatar_dir.parents[1]
+    monkeypatch.setattr(
+        update_contributors,
+        "fetch_contributors",
+        lambda _token: [{"login": "NewPerson"}],
+    )
+    monkeypatch.setattr(
+        update_contributors, "_get", lambda _url, _token: b"synthetic-avatar"
+    )
+    assert update_contributors.main() == 0
+    leftover = avatar_dir / f"{update_contributors.TMP_PREFIX}killed"
+    leftover.write_text("half a document\n", encoding="utf-8")
+
+    assert update_contributors.main() == 0
+
+    assert not leftover.exists()
+    _stage(root)
+    assert check_directory_readmes.main() == 0

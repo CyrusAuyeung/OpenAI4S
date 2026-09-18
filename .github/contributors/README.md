@@ -7,10 +7,10 @@ from the contributor wall in the root READMEs. `scripts/update_contributors.py`
 writes them from the GitHub contributors API and a maintained list of publicly
 recognized non-commit contributors. The same script updates the marked file
 tables in both directory READMEs from the PNGs left on disk after refresh and
-pruning. Stage a refresh (`git add -A .github/contributors`) before running
-`scripts/check_directory_readmes.py`: that check reads Git's file list, which
-keeps a pruned avatar until its deletion is staged. Nothing in the OpenAI4S
-runtime reads this directory.
+pruning. A refresh rewrites the root walls too, so stage all of it (`git add
+-A`) before running `scripts/check_directory_readmes.py`: that check reads
+Git's file list, which keeps a pruned avatar until its deletion is staged.
+Nothing in the OpenAI4S runtime reads this directory.
 
 All changed READMEs are prepared as sibling temporary files before any
 destination is replaced. A staging failure leaves every README unchanged;

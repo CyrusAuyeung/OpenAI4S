@@ -5,9 +5,10 @@
 每位贡献者一张 PNG，裁成四角透明的圆形，由根 README 的贡献者墙引用。这些图片由
 `scripts/update_contributors.py` 从 GitHub contributors API 与一份维护中的、已公开
 署名的非 commit 贡献者名单生成。脚本同时根据刷新和清理后磁盘上保留的 PNG 文件，
-更新本目录两份 README 中带标记的文件表。运行 `scripts/check_directory_readmes.py`
-之前先暂存刷新结果（`git add -A .github/contributors`）：该检查读取 Git 的文件清单，
-被清理的头像在删除被暂存之前仍留在其中。OpenAI4S 的运行时不会读取本目录。
+更新本目录两份 README 中带标记的文件表。一次刷新同时会改写两份根 README 的贡献者墙，
+所以运行 `scripts/check_directory_readmes.py` 之前要把改动整体暂存（`git add -A`）：该
+检查读取 Git 的文件清单，被清理的头像在删除被暂存之前仍留在其中。OpenAI4S 的运行时不会
+读取本目录。
 
 所有待更新 README 都会先写入目标旁的临时文件，再依次替换。暂存失败不会改动任何
 README；单次替换是原子的，但整批替换不是全部成功或全部回滚的事务。

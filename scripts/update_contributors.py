@@ -42,6 +42,8 @@ START = "<!-- CONTRIBUTORS:START -->"
 END = "<!-- CONTRIBUTORS:END -->"
 INVENTORY_START = "<!-- AVATAR-FILES:START -->"
 INVENTORY_END = "<!-- AVATAR-FILES:END -->"
+# Staged writes carry this prefix so a run can sweep what a killed one left.
+TMP_PREFIX = ".update_contributors-"
 # (file in AVATAR_DIR, table header, per-avatar description)
 INVENTORIES = (
     (
@@ -167,23 +169,34 @@ def _avatar_name(login: str) -> str:
     return f"{login}.png"
 
 
+def _target_name(login: str, committed: set[str]) -> str:
+    """The file a refresh writes: the committed spelling, not a twin of it.
+
+    A case-insensitive filesystem writes through to the committed file whatever
+    name is passed; a case-sensitive one would grow a second avatar for the
+    same person the first time their login's casing drifts.
+    """
+    name = _avatar_name(login)
+    if name in committed:
+        return name
+    folded = name.casefold()
+    variants = sorted(other for other in committed if other.casefold() == folded)
+    return variants[0] if variants else name
+
+
 def write_avatars(
     people: list[dict], token: str | None
-) -> tuple[set[str], int, list[str]]:
+) -> tuple[dict[str, str], int, list[str]]:
     """Refresh the avatars, prune the departed, and say what was written.
 
-    Returns the logins that have a usable committed PNG, the number this run
-    actually produced, and the PNG filenames left on disk: "a file with that
-    name exists" and "I refreshed it" are different facts, and only the second
-    one says the run worked.
+    Returns each login's PNG as it is actually spelled on disk, the number this
+    run produced, and every PNG filename left there: "a file with that name
+    exists" and "I refreshed it" are different facts, and only the second one
+    says the run worked.
     """
 
     os.makedirs(AVATAR_DIR, exist_ok=True)
-    # A login whose casing drifted refreshes its committed file under the
-    # committed spelling. A case-insensitive filesystem does that on its own;
-    # a case-sensitive one would otherwise add a case-variant twin beside it.
     committed = set(os.listdir(AVATAR_DIR))
-    spelling = {name.casefold(): name for name in committed}
     written = 0
     for c in people:
         login = c["login"]
@@ -200,9 +213,7 @@ def write_avatars(
         except Exception as exc:  # noqa: BLE001
             print(f"  avatar failed for {login}: {exc}", file=sys.stderr)
             continue
-        name = _avatar_name(login)
-        if name not in committed:
-            name = spelling.get(name.casefold(), name)
+        name = _target_name(login, committed)
         with open(os.path.join(AVATAR_DIR, name), "wb") as f:
             f.write(png)
         written += 1
@@ -211,16 +222,21 @@ def write_avatars(
     # because a login whose casing drifts from the committed filename writes
     # through to the existing inode under the OLD name on a case-preserving
     # filesystem, and an exact-match prune then deletes the file just written.
+    # A staged file a killed run left here goes too: this runs on every
+    # refresh, while the writer only sweeps a directory it is about to write.
     current = {_avatar_name(person["login"]).casefold() for person in people}
     for name in os.listdir(AVATAR_DIR):
-        if name.casefold() not in current and name.endswith((".png", ".svg")):
+        departed = name.casefold() not in current and name.endswith((".png", ".svg"))
+        if departed or name.startswith(TMP_PREFIX):
             os.remove(os.path.join(AVATAR_DIR, name))
-    # Derived from what survived on disk, spelled exactly as render() will spell
-    # it, so a local <img src> is never emitted for a name that is not there.
+    # Read back from what survived the prune, so render() links a file under
+    # the name it actually has rather than the one the login would imply.
     on_disk = set(os.listdir(AVATAR_DIR))
-    have_png = {
-        person["login"] for person in people if _avatar_name(person["login"]) in on_disk
-    }
+    have_png: dict[str, str] = {}
+    for person in people:
+        name = _target_name(person["login"], on_disk)
+        if name in on_disk:
+            have_png[person["login"]] = name
     surviving = sorted(
         name
         for name in on_disk
@@ -229,13 +245,14 @@ def write_avatars(
     return have_png, written, surviving
 
 
-def render(people: list[dict], have_png: set[str]) -> str:
+def render(people: list[dict], have_png: dict[str, str]) -> str:
     rows = []
     for c in people:
         login = c["login"]
+        name = have_png.get(login)
         src = (
-            f"{AVATAR_DIR.replace(os.sep, '/')}/{_avatar_name(login)}"
-            if login in have_png
+            f"{AVATAR_DIR.replace(os.sep, '/')}/{name}"
+            if name
             else f"https://github.com/{login}.png"
         )
         rows.append(
@@ -259,10 +276,19 @@ def _write_texts(updates: dict[str, str]) -> None:
 
     Each replacement is atomic; the batch is not a multi-file transaction.
     """
+    # A hard kill leaves a staged file behind, and every file in the avatar
+    # directory has to be documented -- so sweep first, all of them, before
+    # staging anything that a per-path sweep would then delete.
+    for directory in {os.path.dirname(path) or "." for path in updates}:
+        for stale in os.listdir(directory):
+            if stale.startswith(TMP_PREFIX):
+                os.remove(os.path.join(directory, stale))
     staged: list[tuple[str, str]] = []
     try:
         for path, text in updates.items():
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+            fd, tmp = tempfile.mkstemp(
+                dir=os.path.dirname(path) or ".", prefix=TMP_PREFIX
+            )
             staged.append((tmp, path))
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(text)
@@ -275,33 +301,31 @@ def _write_texts(updates: dict[str, str]) -> None:
                 os.remove(tmp)
 
 
-def render_readme_update(path: str, block: str) -> str | None:
-    """Render a changed wall without writing it; keep the existing skip policy."""
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    try:
-        updated = _replace_block(text, START, END, block)
-    except ValueError as exc:
-        print(f"{path}: {exc}", file=sys.stderr)
-        return None
-    if updated == text:
-        return None
-    return updated
+def render_readme_update(text: str, block: str) -> str | None:
+    """Render a changed wall without writing it."""
+    updated = _replace_block(text, START, END, block)
+    return None if updated == text else updated
 
 
-def read_avatar_readmes() -> dict[str, str]:
-    """Read both file-table documents, refusing one that cannot be updated.
+def read_documents() -> dict[str, str]:
+    """Read every document this run rewrites, before anything is written.
 
-    Unlike the wall, a skipped inventory fails the directory-docs gate, so
-    this runs before anything is fetched or written.
+    Markers that cannot be spliced are fatal for a wall as much as for an
+    inventory: rewriting one root README while skipping its sibling publishes
+    two walls that disagree about who contributed, and a run that reports
+    success while doing that is worse than one that refuses.
     """
+    documents = [(path, START, END) for path in READMES if os.path.exists(path)]
+    documents += [
+        (os.path.join(AVATAR_DIR, filename), INVENTORY_START, INVENTORY_END)
+        for filename, _header, _description in INVENTORIES
+    ]
     texts: dict[str, str] = {}
-    for filename, _header, _description in INVENTORIES:
-        path = os.path.join(AVATAR_DIR, filename)
+    for path, start, end in documents:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         try:
-            _replace_block(text, INVENTORY_START, INVENTORY_END, "")
+            _replace_block(text, start, end, "")
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from None
         texts[path] = text
@@ -326,9 +350,9 @@ def avatar_readme_updates(texts: dict[str, str], names: list[str]) -> dict[str, 
 
 def main() -> int:
     try:
-        inventories = read_avatar_readmes()
+        texts = read_documents()
     except (OSError, ValueError) as exc:
-        print(f"avatar inventory not updatable: {exc}", file=sys.stderr)
+        print(f"readme not updatable: {exc}", file=sys.stderr)
         return 1
     token = _token()
     people = fetch_contributors(token)
@@ -340,11 +364,11 @@ def main() -> int:
     block = render(people, have_png)
     updates = {}
     for path in READMES:
-        if os.path.exists(path):
-            updated = render_readme_update(path, block)
+        if path in texts:
+            updated = render_readme_update(texts[path], block)
             if updated is not None:
                 updates[path] = updated
-    updates.update(avatar_readme_updates(inventories, surviving))
+    updates.update(avatar_readme_updates(texts, surviving))
     _write_texts(updates)
     changed = list(updates)
     print(
